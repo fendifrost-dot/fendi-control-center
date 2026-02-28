@@ -127,6 +127,39 @@ export type Database = {
           },
         ]
       }
+      connected_projects: {
+        Row: {
+          created_at: string
+          description: string | null
+          id: string
+          is_active: boolean
+          name: string
+          secret_key_name: string
+          supabase_url: string
+          updated_at: string
+        }
+        Insert: {
+          created_at?: string
+          description?: string | null
+          id?: string
+          is_active?: boolean
+          name: string
+          secret_key_name: string
+          supabase_url: string
+          updated_at?: string
+        }
+        Update: {
+          created_at?: string
+          description?: string | null
+          id?: string
+          is_active?: boolean
+          name?: string
+          secret_key_name?: string
+          supabase_url?: string
+          updated_at?: string
+        }
+        Relationships: []
+      }
       documents: {
         Row: {
           bureau: string | null

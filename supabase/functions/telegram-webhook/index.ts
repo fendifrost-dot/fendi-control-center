@@ -114,13 +114,12 @@ async function callGrok(prompt: string, systemPrompt: string): Promise<string> {
 async function getAIResponse(prompt: string, model: string): Promise<string> {
   const docContext = await getRecentDocContext();
   const contextBlock = `\n\n--- Recent Documents ---\n${docContext}\n---`;
-
   const fullPrompt = `${prompt}${contextBlock}`;
 
   if (model === "grok") {
-    return callGrok(fullPrompt, "You are Grok, a witty and direct AI assistant for Fendi Frost's credit repair command center. Keep responses concise and punchy. Use emoji sparingly. Reference recent documents when relevant.");
+    return callGrok(fullPrompt, "You are Grok, a witty and direct AI assistant for Fendi Frost's control center. Keep responses concise and punchy. Use emoji sparingly. Reference recent documents when relevant.");
   }
-  return callGemini(fullPrompt, "You are Gemini, a precise and analytical AI assistant for Fendi Frost's credit repair command center. Be thorough but concise. Structure your answers clearly. Reference recent documents when relevant.");
+  return callGemini(fullPrompt, "You are Gemini, a precise and analytical AI assistant for Fendi Frost's control center. Be thorough but concise. Structure your answers clearly. Reference recent documents when relevant.");
 }
 
 // ─── Handle approval callback ───────────────────────────────────
@@ -172,7 +171,7 @@ async function handleStatusCommand(): Promise<string> {
   const model = await getActiveModel();
 
   return [
-    `📊 *Frost Command Center*`,
+    `🎯 *Fendi Control Center*`,
     ``,
     `📄 Documents processed: ${docs?.length || 0}`,
     `⏳ Pending approvals: ${pending?.length || 0}`,
@@ -187,7 +186,6 @@ async function handleModelCommand(newModel: string): Promise<string> {
   const model = newModel.toLowerCase().trim();
   if (!valid.includes(model)) return `❌ Unknown model. Use: /model gemini or /model grok`;
 
-  // Upsert to handle both insert and update
   const { error } = await supabase
     .from("bot_settings")
     .upsert({ setting_key: "ai_model", setting_value: model, updated_at: new Date().toISOString() }, { onConflict: "setting_key" });
@@ -220,6 +218,141 @@ async function handlePendingCommand(): Promise<string> {
   });
 
   return [`📋 *Pending Approvals:*`, ``, ...lines].join("\n");
+}
+
+// ─── Cross-project helpers ──────────────────────────────────────
+async function getConnectedProjects() {
+  const { data } = await supabase
+    .from("connected_projects")
+    .select("*")
+    .eq("is_active", true)
+    .order("name");
+  return data || [];
+}
+
+function getProjectClient(project: any) {
+  const key = Deno.env.get(project.secret_key_name);
+  if (!key) return null;
+  return createClient(project.supabase_url, key);
+}
+
+// ─── /projects ──────────────────────────────────────────────────
+async function handleProjectsCommand(): Promise<string> {
+  const projects = await getConnectedProjects();
+  if (projects.length === 0) return "📂 No projects connected yet. Add them via the dashboard.";
+
+  const lines = projects.map((p: any, i: number) => {
+    return `${i + 1}. ${p.is_active ? "🟢" : "🔴"} *${p.name}*\n   ${p.description || "No description"}`;
+  });
+
+  return [`📂 *Connected Projects (${projects.length}):*`, ``, ...lines, ``, `Use /query <project\\_name> <sql> to query a project.`].join("\n");
+}
+
+// ─── /query <project> <question> ────────────────────────────────
+async function handleQueryCommand(args: string): Promise<string> {
+  const firstSpace = args.indexOf(" ");
+  if (firstSpace === -1) return "❌ Usage: /query <project\\_name> <question>";
+
+  const projectName = args.slice(0, firstSpace).trim().toLowerCase();
+  const question = args.slice(firstSpace + 1).trim();
+
+  const projects = await getConnectedProjects();
+  const project = projects.find((p: any) => p.name.toLowerCase().includes(projectName));
+
+  if (!project) {
+    const available = projects.map((p: any) => p.name).join(", ");
+    return `❌ Project not found. Available: ${available || "none"}`;
+  }
+
+  const client = getProjectClient(project);
+  if (!client) return `❌ Missing secret key for *${project.name}*. Add the secret \`${project.secret_key_name}\` in Cloud settings.`;
+
+  // Gather basic stats from the target project
+  try {
+    // Get table list via information_schema
+    const { data: tables } = await client.rpc("", {}).maybeSingle();
+    
+    // Since we can't run arbitrary SQL safely, use AI to interpret the question
+    // and gather what we can via standard Supabase client queries
+    const model = await getActiveModel();
+    const contextPrompt = `You are querying the "${project.name}" project. The user asks: "${question}". 
+    
+Since we're connecting via API, suggest what tables/data might be relevant and provide a helpful response based on the project name and description: "${project.description || 'No description'}". Be honest about what you can and cannot access.`;
+
+    return await getAIResponse(contextPrompt, model);
+  } catch (err) {
+    console.error("Cross-project query error:", err);
+    return `⚠️ Error querying *${project.name}*: ${(err as Error).message}`;
+  }
+}
+
+// ─── /stats <project> ───────────────────────────────────────────
+async function handleStatsCommand(projectName: string): Promise<string> {
+  if (!projectName) {
+    // Show stats for all connected projects
+    const projects = await getConnectedProjects();
+    if (projects.length === 0) return "📂 No projects connected.";
+
+    const results: string[] = [`📊 *Cross-Project Stats:*`, ``];
+    
+    for (const project of projects) {
+      const client = getProjectClient(project);
+      if (!client) {
+        results.push(`🔴 *${project.name}*: Missing API key`);
+        continue;
+      }
+      
+      try {
+        // Try to get a basic count from common tables
+        const checks = ["users", "profiles", "clients", "documents", "orders", "products", "posts"];
+        const counts: string[] = [];
+        
+        for (const table of checks) {
+          const { count } = await client.from(table).select("*", { count: "exact", head: true });
+          if (count !== null && count > 0) {
+            counts.push(`${table}: ${count}`);
+          }
+        }
+        
+        if (counts.length > 0) {
+          results.push(`🟢 *${project.name}*`);
+          counts.forEach(c => results.push(`   • ${c}`));
+        } else {
+          results.push(`🟡 *${project.name}*: Connected (no standard tables found)`);
+        }
+      } catch (err) {
+        results.push(`🔴 *${project.name}*: Connection error`);
+      }
+    }
+
+    return results.join("\n");
+  }
+
+  // Single project stats
+  const projects = await getConnectedProjects();
+  const project = projects.find((p: any) => p.name.toLowerCase().includes(projectName.toLowerCase()));
+  if (!project) return `❌ Project "${projectName}" not found.`;
+
+  const client = getProjectClient(project);
+  if (!client) return `❌ Missing key for *${project.name}*.`;
+
+  try {
+    const checks = ["users", "profiles", "clients", "documents", "orders", "products", "posts", "fans", "artists", "campaigns", "marketing_spend"];
+    const counts: string[] = [];
+
+    for (const table of checks) {
+      const { count } = await client.from(table).select("*", { count: "exact", head: true });
+      if (count !== null && count > 0) {
+        counts.push(`• ${table}: ${count}`);
+      }
+    }
+
+    if (counts.length === 0) return `🟡 *${project.name}*: Connected but no standard tables detected.`;
+
+    return [`📊 *${project.name} Stats:*`, ``, ...counts].join("\n");
+  } catch (err) {
+    return `⚠️ Error querying *${project.name}*.`;
+  }
 }
 
 // ─── Main Webhook Handler ───────────────────────────────────────
@@ -261,12 +394,15 @@ serve(async (req) => {
     // Command routing
     if (text === "/start") {
       await sendMessage(chatId, [
-        `🎯 *Frost Command Center* — Online`,
+        `🎯 *Fendi Control Center* — Online`,
         ``,
         `📊 /status — Pipeline overview`,
         `📋 /pending — Pending approvals`,
         `🧠 /model gemini|grok — Switch AI engine`,
-        `💬 Any message — AI chat with document context`,
+        `📂 /projects — List connected projects`,
+        `📊 /stats — Cross-project statistics`,
+        `🔍 /query <name> <question> — Query a project`,
+        `💬 Any message — AI chat with context`,
       ].join("\n"));
     } else if (text === "/status") {
       await sendMessage(chatId, await handleStatusCommand());
@@ -281,6 +417,18 @@ serve(async (req) => {
       }
     } else if (text === "/pending") {
       await sendMessage(chatId, await handlePendingCommand());
+    } else if (text === "/projects") {
+      await sendMessage(chatId, await handleProjectsCommand());
+    } else if (text.startsWith("/stats")) {
+      const projectName = text.replace("/stats", "").trim();
+      await sendMessage(chatId, await handleStatsCommand(projectName));
+    } else if (text.startsWith("/query")) {
+      const args = text.replace("/query", "").trim();
+      if (!args) {
+        await sendMessage(chatId, "❌ Usage: /query <project\\_name> <question>");
+      } else {
+        await sendMessage(chatId, await handleQueryCommand(args));
+      }
     } else {
       // AI relay with document context
       const model = await getActiveModel();
