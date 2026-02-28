@@ -41,6 +41,27 @@ export type Database = {
         }
         Relationships: []
       }
+      bot_settings: {
+        Row: {
+          id: string
+          setting_key: string
+          setting_value: string
+          updated_at: string
+        }
+        Insert: {
+          id?: string
+          setting_key: string
+          setting_value: string
+          updated_at?: string
+        }
+        Update: {
+          id?: string
+          setting_key?: string
+          setting_value?: string
+          updated_at?: string
+        }
+        Relationships: []
+      }
       clients: {
         Row: {
           created_at: string | null
@@ -471,10 +492,13 @@ export type Database = {
           field_value_json: Json | null
           field_value_text: string | null
           id: string
+          is_verified: boolean
           model_id: string
           object_key: string
           object_type: string
           page_number: number | null
+          verified_at: string | null
+          verified_via: string | null
         }
         Insert: {
           bbox_json?: Json | null
@@ -488,10 +512,13 @@ export type Database = {
           field_value_json?: Json | null
           field_value_text?: string | null
           id?: string
+          is_verified?: boolean
           model_id?: string
           object_key: string
           object_type: string
           page_number?: number | null
+          verified_at?: string | null
+          verified_via?: string | null
         }
         Update: {
           bbox_json?: Json | null
@@ -505,10 +532,13 @@ export type Database = {
           field_value_json?: Json | null
           field_value_text?: string | null
           id?: string
+          is_verified?: boolean
           model_id?: string
           object_key?: string
           object_type?: string
           page_number?: number | null
+          verified_at?: string | null
+          verified_via?: string | null
         }
         Relationships: [
           {
@@ -526,6 +556,39 @@ export type Database = {
             referencedColumns: ["id"]
           },
         ]
+      }
+      telegram_approval_queue: {
+        Row: {
+          client_id: string
+          created_at: string
+          document_id: string
+          id: string
+          observation_count: number
+          resolved_at: string | null
+          status: string
+          telegram_message_id: number | null
+        }
+        Insert: {
+          client_id: string
+          created_at?: string
+          document_id: string
+          id?: string
+          observation_count?: number
+          resolved_at?: string | null
+          status?: string
+          telegram_message_id?: number | null
+        }
+        Update: {
+          client_id?: string
+          created_at?: string
+          document_id?: string
+          id?: string
+          observation_count?: number
+          resolved_at?: string | null
+          status?: string
+          telegram_message_id?: number | null
+        }
+        Relationships: []
       }
     }
     Views: {
