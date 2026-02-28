@@ -290,6 +290,75 @@ const AGENT_TOOLS: ToolDef[] = [
       })) || []);
     },
   },
+  {
+    name: "trigger_drive_sync",
+    description: "Trigger a Google Drive sync to scan for new or updated files in the shared Drive folder. This will discover new documents and queue them for processing.",
+    parameters: { type: "object", properties: {}, required: [] },
+    destructive: false,
+    execute: async () => {
+      try {
+        const ANON_KEY = Deno.env.get("SUPABASE_PUBLISHABLE_KEY") || SUPABASE_SERVICE_ROLE_KEY;
+        const resp = await fetch(`${SUPABASE_URL}/functions/v1/drive-sync`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json", Authorization: `Bearer ${ANON_KEY}` },
+          body: JSON.stringify({}),
+        });
+        if (!resp.ok) {
+          const errText = await resp.text();
+          return `❌ Drive sync failed (${resp.status}): ${errText}`;
+        }
+        const result = await resp.json();
+        return `✅ Drive sync complete! Scanned ${result.folders_scanned || 0} folders, processed ${result.total_processed || 0} files, ${result.total_errors || 0} errors. Run ID: ${result.run_id}`;
+      } catch (e) {
+        return `❌ Drive sync error: ${String(e)}`;
+      }
+    },
+  },
+  {
+    name: "list_drive_files",
+    description: "List files stored in the system from Google Drive, optionally filtered by client name. Shows file name, status, type, and client.",
+    parameters: { type: "object", properties: { client_name: { type: "string", description: "Filter by client name (partial match). Leave empty for all." }, status: { type: "string", description: "Filter by status: pending, processing, completed, failed. Leave empty for all." }, limit: { type: "number", description: "Number of files to return (max 50)" } }, required: [] },
+    destructive: false,
+    execute: async (args: any) => {
+      const limit = Math.min(args.limit || 20, 50);
+      let query = supabase
+        .from("documents")
+        .select("id, file_name, doc_type, bureau, status, mime_type, drive_file_id, created_at, updated_at, clients(name)")
+        .eq("is_deleted", false)
+        .order("updated_at", { ascending: false })
+        .limit(limit);
+      if (args.status) query = query.eq("status", args.status);
+      const { data: docs } = await query;
+      let results = docs?.map((d: any) => ({
+        id: d.id, file_name: d.file_name, doc_type: d.doc_type, bureau: d.bureau,
+        status: d.status, mime_type: d.mime_type, client: (d.clients as any)?.name,
+        created_at: d.created_at, updated_at: d.updated_at,
+      })) || [];
+      if (args.client_name) {
+        results = results.filter((r: any) => r.client?.toLowerCase().includes(args.client_name.toLowerCase()));
+      }
+      if (results.length === 0) return "No files found matching your criteria.";
+      return JSON.stringify(results);
+    },
+  },
+  {
+    name: "get_client_summary",
+    description: "Get a summary of all clients with document counts and processing status.",
+    parameters: { type: "object", properties: {}, required: [] },
+    destructive: false,
+    execute: async () => {
+      const { data: clients } = await supabase.from("clients").select("id, name, drive_folder_id");
+      if (!clients || clients.length === 0) return "No clients found.";
+      const summaries = [];
+      for (const client of clients) {
+        const { data: docs } = await supabase.from("documents").select("id, status").eq("client_id", client.id).eq("is_deleted", false);
+        const statusCounts: Record<string, number> = {};
+        (docs || []).forEach((d: any) => { statusCounts[d.status] = (statusCounts[d.status] || 0) + 1; });
+        summaries.push({ name: client.name, total_documents: docs?.length || 0, by_status: statusCounts });
+      }
+      return JSON.stringify(summaries);
+    },
+  },
 ];
 
 // ─── Build tool schemas for AI models ───────────────────────────
