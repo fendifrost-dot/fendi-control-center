@@ -7,12 +7,11 @@ const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
 const SUPABASE_SERVICE_ROLE_KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
 const GEMINI_KEY = Deno.env.get("Frost_Gemini")!;
 const GROK_KEY = Deno.env.get("Frost_Grok")!;
-const LOVABLE_API_KEY = Deno.env.get("LOVABLE_API_KEY")!;
 
 const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
 const TELEGRAM_API = `https://api.telegram.org/bot${BOT_TOKEN}`;
 
-// ─── Send message to Telegram ───────────────────────────────────
+// ─── Telegram helpers ───────────────────────────────────────────
 async function sendMessage(chatId: string, text: string, options: any = {}) {
   const resp = await fetch(`${TELEGRAM_API}/sendMessage`, {
     method: "POST",
@@ -48,52 +47,84 @@ async function getActiveModel(): Promise<string> {
   return data?.setting_value || "gemini";
 }
 
-// ─── AI Response via active model ───────────────────────────────
-async function getAIResponse(prompt: string, model: string): Promise<string> {
-  try {
-    let modelId: string;
-    if (model === "grok") {
-      modelId = "openai/gpt-5-mini"; // closest equivalent via gateway
-    } else {
-      modelId = "google/gemini-3-flash-preview";
-    }
+// ─── Fetch last 3 processed documents for context ───────────────
+async function getRecentDocContext(): Promise<string> {
+  const { data: docs } = await supabase
+    .from("documents")
+    .select("file_name, doc_type, bureau, status, client_id, clients(name)")
+    .eq("status", "completed")
+    .order("updated_at", { ascending: false })
+    .limit(3);
 
-    const resp = await fetch("https://ai.gateway.lovable.dev/v1/chat/completions", {
+  if (!docs || docs.length === 0) return "No recently processed documents.";
+
+  return docs.map((d: any, i: number) => {
+    const client = d.clients as any;
+    return `${i + 1}. ${d.file_name} | Type: ${d.doc_type || "unknown"} | Bureau: ${d.bureau || "N/A"} | Client: ${client?.name || "Unknown"}`;
+  }).join("\n");
+}
+
+// ─── AI via Gemini (direct) ─────────────────────────────────────
+async function callGemini(prompt: string, systemPrompt: string): Promise<string> {
+  const resp = await fetch(
+    `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${GEMINI_KEY}`,
+    {
       method: "POST",
-      headers: {
-        Authorization: `Bearer ${LOVABLE_API_KEY}`,
-        "Content-Type": "application/json",
-      },
+      headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
-        model: modelId,
-        messages: [
-          {
-            role: "system",
-            content: model === "grok"
-              ? "You are Grok, a witty and direct AI assistant for Fendi Frost's credit repair command center. Keep responses concise and punchy. Use emoji sparingly."
-              : "You are Gemini, a precise and analytical AI assistant for Fendi Frost's credit repair command center. Be thorough but concise. Structure your answers clearly.",
-          },
-          { role: "user", content: prompt },
-        ],
+        contents: [{ role: "user", parts: [{ text: `${systemPrompt}\n\n${prompt}` }] }],
+        generationConfig: { maxOutputTokens: 1024 },
       }),
-    });
-
-    if (!resp.ok) {
-      console.error("AI gateway error:", resp.status);
-      return "⚠️ AI is temporarily unavailable. Try again shortly.";
     }
-
-    const data = await resp.json();
-    return data.choices?.[0]?.message?.content || "No response generated.";
-  } catch (e) {
-    console.error("AI error:", e);
-    return "⚠️ AI error. Try again.";
+  );
+  if (!resp.ok) {
+    console.error("Gemini error:", resp.status, await resp.text());
+    return "⚠️ Gemini unavailable. Try again shortly.";
   }
+  const data = await resp.json();
+  return data.candidates?.[0]?.content?.parts?.[0]?.text || "No response generated.";
+}
+
+// ─── AI via Grok (xAI direct) ───────────────────────────────────
+async function callGrok(prompt: string, systemPrompt: string): Promise<string> {
+  const resp = await fetch("https://api.x.ai/v1/chat/completions", {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${GROK_KEY}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      model: "grok-3-mini-fast",
+      messages: [
+        { role: "system", content: systemPrompt },
+        { role: "user", content: prompt },
+      ],
+      max_tokens: 1024,
+    }),
+  });
+  if (!resp.ok) {
+    console.error("Grok error:", resp.status, await resp.text());
+    return "⚠️ Grok unavailable. Try again shortly.";
+  }
+  const data = await resp.json();
+  return data.choices?.[0]?.message?.content || "No response generated.";
+}
+
+// ─── Route to active model ──────────────────────────────────────
+async function getAIResponse(prompt: string, model: string): Promise<string> {
+  const docContext = await getRecentDocContext();
+  const contextBlock = `\n\n--- Recent Documents ---\n${docContext}\n---`;
+
+  const fullPrompt = `${prompt}${contextBlock}`;
+
+  if (model === "grok") {
+    return callGrok(fullPrompt, "You are Grok, a witty and direct AI assistant for Fendi Frost's credit repair command center. Keep responses concise and punchy. Use emoji sparingly. Reference recent documents when relevant.");
+  }
+  return callGemini(fullPrompt, "You are Gemini, a precise and analytical AI assistant for Fendi Frost's credit repair command center. Be thorough but concise. Structure your answers clearly. Reference recent documents when relevant.");
 }
 
 // ─── Handle approval callback ───────────────────────────────────
 async function handleApproval(queueId: string, approved: boolean) {
-  // Get the queue entry
   const { data: queue, error: qErr } = await supabase
     .from("telegram_approval_queue")
     .select("*")
@@ -106,7 +137,6 @@ async function handleApproval(queueId: string, approved: boolean) {
   const now = new Date().toISOString();
 
   if (approved) {
-    // Mark observations as verified
     const { error: obsErr } = await supabase
       .from("observations")
       .update({ is_verified: true, verified_at: now, verified_via: "telegram" })
@@ -118,15 +148,13 @@ async function handleApproval(queueId: string, approved: boolean) {
       return "❌ Failed to verify observations.";
     }
 
-    // Update queue status
     await supabase
       .from("telegram_approval_queue")
       .update({ status: "approved", resolved_at: now })
       .eq("id", queueId);
 
-    return `✅ *Approved!* ${queue.observation_count} observations verified.`;
+    return `✅ *Verified and locked in database.* ${queue.observation_count} observations confirmed.`;
   } else {
-    // Mark as rejected — observations stay unverified
     await supabase
       .from("telegram_approval_queue")
       .update({ status: "rejected", resolved_at: now })
@@ -136,58 +164,45 @@ async function handleApproval(queueId: string, approved: boolean) {
   }
 }
 
-// ─── Handle /status command ─────────────────────────────────────
+// ─── /status ────────────────────────────────────────────────────
 async function handleStatusCommand(): Promise<string> {
-  const { data: pending } = await supabase
-    .from("telegram_approval_queue")
-    .select("id")
-    .eq("status", "pending");
-
-  const { data: jobs } = await supabase
-    .from("ingestion_jobs")
-    .select("id, status")
-    .in("status", ["queued", "running"]);
-
-  const { data: docs } = await supabase
-    .from("documents")
-    .select("id")
-    .eq("status", "completed");
-
-  const { data: modelSetting } = await supabase
-    .from("bot_settings")
-    .select("setting_value")
-    .eq("setting_key", "ai_model")
-    .single();
+  const { data: pending } = await supabase.from("telegram_approval_queue").select("id").eq("status", "pending");
+  const { data: jobs } = await supabase.from("ingestion_jobs").select("id, status").in("status", ["queued", "running"]);
+  const { data: docs } = await supabase.from("documents").select("id").eq("status", "completed");
+  const model = await getActiveModel();
 
   return [
-    `📊 *Command Center Status*`,
+    `📊 *Frost Command Center*`,
     ``,
     `📄 Documents processed: ${docs?.length || 0}`,
     `⏳ Pending approvals: ${pending?.length || 0}`,
     `🔄 Active jobs: ${jobs?.length || 0}`,
-    `🧠 Active model: ${modelSetting?.setting_value || "gemini"}`,
+    `🧠 Active model: *${model}* (${model === "grok" ? "Frost\\_Grok" : "Frost\\_Gemini"})`,
   ].join("\n");
 }
 
-// ─── Handle /model command ──────────────────────────────────────
+// ─── /model ─────────────────────────────────────────────────────
 async function handleModelCommand(newModel: string): Promise<string> {
   const valid = ["gemini", "grok"];
   const model = newModel.toLowerCase().trim();
+  if (!valid.includes(model)) return `❌ Unknown model. Use: /model gemini or /model grok`;
 
-  if (!valid.includes(model)) {
-    return `❌ Unknown model. Use: /model gemini or /model grok`;
+  // Upsert to handle both insert and update
+  const { error } = await supabase
+    .from("bot_settings")
+    .upsert({ setting_key: "ai_model", setting_value: model, updated_at: new Date().toISOString() }, { onConflict: "setting_key" });
+
+  if (error) {
+    console.error("Model switch error:", error);
+    return "❌ Failed to switch model.";
   }
 
-  await supabase
-    .from("bot_settings")
-    .update({ setting_value: model, updated_at: new Date().toISOString() })
-    .eq("setting_key", "ai_model");
-
   const emoji = model === "grok" ? "⚡" : "💎";
-  return `${emoji} Model switched to *${model.charAt(0).toUpperCase() + model.slice(1)}*. All AI responses will now use this personality.`;
+  const key = model === "grok" ? "Frost\\_Grok" : "Frost\\_Gemini";
+  return `${emoji} Switched to *${model.charAt(0).toUpperCase() + model.slice(1)}* using ${key}. All responses now route through this engine.`;
 }
 
-// ─── Handle /pending command ────────────────────────────────────
+// ─── /pending ───────────────────────────────────────────────────
 async function handlePendingCommand(): Promise<string> {
   const { data: pending } = await supabase
     .from("telegram_approval_queue")
@@ -201,7 +216,7 @@ async function handlePendingCommand(): Promise<string> {
   const lines = pending.map((p: any, i: number) => {
     const doc = p.documents as any;
     const client = p.clients as any;
-    return `${i + 1}. 📄 ${doc?.file_name || "Unknown"} (${client?.name || "Unknown"}) — ${p.observation_count} observations`;
+    return `${i + 1}. 📄 ${doc?.file_name || "Unknown"} (${client?.name || "Unknown"}) — ${p.observation_count} obs`;
   });
 
   return [`📋 *Pending Approvals:*`, ``, ...lines].join("\n");
@@ -211,37 +226,35 @@ async function handlePendingCommand(): Promise<string> {
 serve(async (req) => {
   try {
     const update = await req.json();
-    console.log("📨 Telegram update:", JSON.stringify(update).slice(0, 500));
+    console.log("📨 Update:", JSON.stringify(update).slice(0, 500));
 
-    // Handle callback queries (inline button presses)
+    // ── Callback queries (inline button presses) ──
     if (update.callback_query) {
       const cb = update.callback_query;
-      const data = cb.data; // format: "approve:queue_id" or "reject:queue_id"
-      const [action, queueId] = data.split(":");
+      const cbChatId = String(cb.message.chat.id);
 
+      if (cbChatId !== CHAT_ID) return new Response("ok");
+
+      const [action, queueId] = cb.data.split(":");
       await answerCallbackQuery(cb.id, "Processing...");
-      
+
       const result = await handleApproval(queueId, action === "approve");
-      
-      // Remove inline buttons
-      await editMessageReplyMarkup(cb.message.chat.id, cb.message.message_id);
-      
-      // Send result
-      await sendMessage(String(cb.message.chat.id), result);
-      
+      await editMessageReplyMarkup(cbChatId, cb.message.message_id);
+      await sendMessage(cbChatId, result);
+
       return new Response("ok");
     }
 
-    // Handle text messages
+    // ── Text messages ──
     const message = update.message;
     if (!message?.text) return new Response("ok");
 
     const chatId = String(message.chat.id);
     const text = message.text.trim();
 
-    // Only respond to our known chat
+    // Gate: only respond to authorized chat
     if (chatId !== CHAT_ID) {
-      console.log(`Ignoring message from unknown chat: ${chatId}`);
+      console.log(`🚫 Blocked message from unauthorized chat: ${chatId}`);
       return new Response("ok");
     }
 
@@ -250,37 +263,34 @@ serve(async (req) => {
       await sendMessage(chatId, [
         `🎯 *Frost Command Center* — Online`,
         ``,
-        `Available commands:`,
         `📊 /status — Pipeline overview`,
         `📋 /pending — Pending approvals`,
-        `🧠 /model gemini|grok — Switch AI personality`,
-        `💬 Any other message — AI-powered chat`,
+        `🧠 /model gemini|grok — Switch AI engine`,
+        `💬 Any message — AI chat with document context`,
       ].join("\n"));
     } else if (text === "/status") {
-      const status = await handleStatusCommand();
-      await sendMessage(chatId, status);
+      await sendMessage(chatId, await handleStatusCommand());
     } else if (text.startsWith("/model")) {
       const model = text.replace("/model", "").trim();
       if (!model) {
         const current = await getActiveModel();
-        await sendMessage(chatId, `🧠 Current model: *${current}*\n\nSwitch: /model gemini or /model grok`);
+        const key = current === "grok" ? "Frost\\_Grok" : "Frost\\_Gemini";
+        await sendMessage(chatId, `🧠 Active: *${current}* (${key})\n\nSwitch: /model gemini or /model grok`);
       } else {
-        const result = await handleModelCommand(model);
-        await sendMessage(chatId, result);
+        await sendMessage(chatId, await handleModelCommand(model));
       }
     } else if (text === "/pending") {
-      const result = await handlePendingCommand();
-      await sendMessage(chatId, result);
+      await sendMessage(chatId, await handlePendingCommand());
     } else {
-      // AI chat — use active model
+      // AI relay with document context
       const model = await getActiveModel();
-      const aiResponse = await getAIResponse(text, model);
-      await sendMessage(chatId, aiResponse);
+      const response = await getAIResponse(text, model);
+      await sendMessage(chatId, response);
     }
 
     return new Response("ok");
   } catch (err) {
     console.error("Webhook error:", err);
-    return new Response("ok"); // Always return 200 to Telegram
+    return new Response("ok");
   }
 });
