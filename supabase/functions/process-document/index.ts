@@ -278,7 +278,7 @@ async function storeBusinessObservations(
 }
 
 // ─── Notify Telegram ────────────────────────────────────────────
-async function notifyTelegram(documentName: string, docType: string, observationCount: number, clientName: string) {
+async function notifyTelegram(documentName: string, docType: string, observationCount: number, clientName: string, documentId: string, clientId: string) {
   try {
     const SUPABASE_URL_ENV = Deno.env.get("SUPABASE_URL")!;
     const SUPABASE_ANON_KEY = Deno.env.get("SUPABASE_PUBLISHABLE_KEY") || Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
@@ -294,6 +294,8 @@ async function notifyTelegram(documentName: string, docType: string, observation
         doc_type: docType,
         observation_count: observationCount,
         client_name: clientName,
+        document_id: documentId,
+        client_id: clientId,
       }),
     });
   } catch (e) {
@@ -399,7 +401,7 @@ serve(async (req) => {
         .eq("id", job.id);
 
       // Notify via Telegram
-      await notifyTelegram(doc.file_name, detectedDocType, observationCount, client?.name || "Unknown");
+      await notifyTelegram(doc.file_name, detectedDocType, observationCount, client?.name || "Unknown", doc.id, doc.client_id);
 
       const result = {
         job_id: job.id,
