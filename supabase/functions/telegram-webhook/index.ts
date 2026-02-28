@@ -350,10 +350,22 @@ async function getConnectedProjects() {
   return data || [];
 }
 
-function getProjectClient(project: any) {
-  const key = Deno.env.get(project.secret_key_name);
-  if (!key) return null;
-  return createClient(project.supabase_url, key);
+async function fetchProjectStats(project: any): Promise<{ name: string; tables: Record<string, number> } | null> {
+  const statsUrl = `${project.supabase_url}/functions/v1/project-stats`;
+  try {
+    const resp = await fetch(statsUrl, {
+      method: "GET",
+      headers: { "Content-Type": "application/json" },
+    });
+    if (!resp.ok) {
+      console.error(`Stats fetch failed for ${project.name}:`, resp.status, await resp.text());
+      return null;
+    }
+    return await resp.json();
+  } catch (e) {
+    console.error(`Stats fetch error for ${project.name}:`, e);
+    return null;
+  }
 }
 
 async function handleProjectsCommand(): Promise<string> {
@@ -374,41 +386,29 @@ async function handleStatsCommand(projectName: string): Promise<string> {
   if (!projectName) {
     const results: string[] = [`📊 *${SYSTEM_IDENTITY} — Cross-Project Stats:*`, ``];
     for (const project of projects) {
-      const client = getProjectClient(project);
-      if (!client) { results.push(`🔴 *${project.name}*: Missing API key`); continue; }
-      try {
-        const checks = ["users", "profiles", "clients", "documents", "orders", "products", "posts"];
-        const counts: string[] = [];
-        for (const table of checks) {
-          const { count } = await client.from(table).select("*", { count: "exact", head: true });
-          if (count !== null && count > 0) counts.push(`${table}: ${count}`);
-        }
-        if (counts.length > 0) {
-          results.push(`🟢 *${project.name}*`);
-          counts.forEach(c => results.push(`   • ${c}`));
-        } else {
-          results.push(`🟡 *${project.name}*: Connected (no standard tables)`);
-        }
-      } catch { results.push(`🔴 *${project.name}*: Connection error`); }
+      const stats = await fetchProjectStats(project);
+      if (!stats) { results.push(`🔴 *${project.name}*: Endpoint unreachable`); continue; }
+      const entries = Object.entries(stats.tables || {}).filter(([, v]) => v > 0);
+      if (entries.length > 0) {
+        results.push(`🟢 *${project.name}*`);
+        entries.forEach(([table, count]) => results.push(`   • ${table}: ${count}`));
+      } else {
+        results.push(`🟡 *${project.name}*: Connected (no data yet)`);
+      }
     }
     return results.join("\n");
   }
 
   const project = projects.find((p: any) => p.name.toLowerCase().includes(projectName.toLowerCase()));
   if (!project) return `❌ Project "${projectName}" not found.`;
-  const client = getProjectClient(project);
-  if (!client) return `❌ Missing key for *${project.name}*.`;
 
-  try {
-    const checks = ["users", "profiles", "clients", "documents", "orders", "products", "posts", "fans", "artists", "campaigns", "marketing_spend"];
-    const counts: string[] = [];
-    for (const table of checks) {
-      const { count } = await client.from(table).select("*", { count: "exact", head: true });
-      if (count !== null && count > 0) counts.push(`• ${table}: ${count}`);
-    }
-    if (counts.length === 0) return `🟡 *${project.name}*: Connected but no standard tables.`;
-    return [`📊 *${SYSTEM_IDENTITY} — ${project.name} Stats:*`, ``, ...counts].join("\n");
-  } catch { return `⚠️ Error querying *${project.name}*.`; }
+  const stats = await fetchProjectStats(project);
+  if (!stats) return `⚠️ Could not reach *${project.name}*'s stats endpoint.`;
+
+  const entries = Object.entries(stats.tables || {}).filter(([, v]) => v > 0);
+  if (entries.length === 0) return `🟡 *${project.name}*: Connected but no data yet.`;
+  const counts = entries.map(([table, count]) => `• ${table}: ${count}`);
+  return [`📊 *${SYSTEM_IDENTITY} — ${project.name} Stats:*`, ``, ...counts].join("\n");
 }
 
 async function handleQueryCommand(args: string): Promise<string> {
@@ -422,11 +422,12 @@ async function handleQueryCommand(args: string): Promise<string> {
   const project = projects.find((p: any) => p.name.toLowerCase().includes(projectName));
   if (!project) return `❌ Project not found. Available: ${projects.map((p: any) => p.name).join(", ") || "none"}`;
 
-  const client = getProjectClient(project);
-  if (!client) return `❌ Missing secret for *${project.name}*.`;
+  // Fetch stats for context
+  const stats = await fetchProjectStats(project);
+  const statsContext = stats ? `Tables: ${JSON.stringify(stats.tables)}` : "Stats unavailable";
 
   const model = await getActiveModel();
-  const contextPrompt = `You are the ${SYSTEM_IDENTITY}. The boss is asking about the "${project.name}" project: "${question}". Project description: "${project.description || 'N/A'}". Provide a helpful response.`;
+  const contextPrompt = `You are the ${SYSTEM_IDENTITY}. The boss is asking about the "${project.name}" project: "${question}". Project description: "${project.description || 'N/A'}". ${statsContext}. Provide a helpful response.`;
   return await getAIResponse(contextPrompt, model);
 }
 
