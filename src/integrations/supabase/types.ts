@@ -393,6 +393,71 @@ export type Database = {
           },
         ]
       }
+      marketing_spend: {
+        Row: {
+          ad_name: string | null
+          ad_set_name: string | null
+          campaign_id: string | null
+          campaign_name: string | null
+          clicks: number | null
+          client_id: string | null
+          conversions: number | null
+          created_at: string
+          currency: string
+          date: string
+          id: string
+          impressions: number | null
+          platform: string
+          raw_data: Json | null
+          spend: number
+          updated_at: string
+        }
+        Insert: {
+          ad_name?: string | null
+          ad_set_name?: string | null
+          campaign_id?: string | null
+          campaign_name?: string | null
+          clicks?: number | null
+          client_id?: string | null
+          conversions?: number | null
+          created_at?: string
+          currency?: string
+          date: string
+          id?: string
+          impressions?: number | null
+          platform?: string
+          raw_data?: Json | null
+          spend?: number
+          updated_at?: string
+        }
+        Update: {
+          ad_name?: string | null
+          ad_set_name?: string | null
+          campaign_id?: string | null
+          campaign_name?: string | null
+          clicks?: number | null
+          client_id?: string | null
+          conversions?: number | null
+          created_at?: string
+          currency?: string
+          date?: string
+          id?: string
+          impressions?: number | null
+          platform?: string
+          raw_data?: Json | null
+          spend?: number
+          updated_at?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "marketing_spend_client_id_fkey"
+            columns: ["client_id"]
+            isOneToOne: false
+            referencedRelation: "clients"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
       observations: {
         Row: {
           bbox_json: Json | null
