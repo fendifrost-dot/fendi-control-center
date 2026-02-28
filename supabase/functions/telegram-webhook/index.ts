@@ -11,6 +11,8 @@ const GROK_KEY = Deno.env.get("Frost_Grok")!;
 const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
 const TELEGRAM_API = `https://api.telegram.org/bot${BOT_TOKEN}`;
 
+const SYSTEM_IDENTITY = "Fendi Control Center AI";
+
 // ─── Telegram helpers ───────────────────────────────────────────
 async function sendMessage(chatId: string, text: string, options: any = {}) {
   const resp = await fetch(`${TELEGRAM_API}/sendMessage`, {
@@ -64,7 +66,7 @@ async function getRecentDocContext(): Promise<string> {
   }).join("\n");
 }
 
-// ─── AI via Gemini (direct) ─────────────────────────────────────
+// ─── AI via Gemini ──────────────────────────────────────────────
 async function callGemini(prompt: string, systemPrompt: string): Promise<string> {
   const resp = await fetch(
     `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${GEMINI_KEY}`,
@@ -85,7 +87,7 @@ async function callGemini(prompt: string, systemPrompt: string): Promise<string>
   return data.candidates?.[0]?.content?.parts?.[0]?.text || "No response generated.";
 }
 
-// ─── AI via Grok (xAI direct) ───────────────────────────────────
+// ─── AI via Grok ────────────────────────────────────────────────
 async function callGrok(prompt: string, systemPrompt: string): Promise<string> {
   const resp = await fetch("https://api.x.ai/v1/chat/completions", {
     method: "POST",
@@ -116,10 +118,12 @@ async function getAIResponse(prompt: string, model: string): Promise<string> {
   const contextBlock = `\n\n--- Recent Documents ---\n${docContext}\n---`;
   const fullPrompt = `${prompt}${contextBlock}`;
 
+  const baseSystem = `You are the ${SYSTEM_IDENTITY}. You serve Fendi Frost as a personal command center assistant.`;
+
   if (model === "grok") {
-    return callGrok(fullPrompt, "You are Grok, a witty and direct AI assistant for Fendi Frost's control center. Keep responses concise and punchy. Use emoji sparingly. Reference recent documents when relevant.");
+    return callGrok(fullPrompt, `${baseSystem} You have Grok's personality — witty, direct, and concise. Use emoji sparingly. Reference recent documents when relevant.`);
   }
-  return callGemini(fullPrompt, "You are Gemini, a precise and analytical AI assistant for Fendi Frost's control center. Be thorough but concise. Structure your answers clearly. Reference recent documents when relevant.");
+  return callGemini(fullPrompt, `${baseSystem} You have Gemini's personality — precise, analytical, and thorough but concise. Structure answers clearly. Reference recent documents when relevant.`);
 }
 
 // ─── Handle approval callback ───────────────────────────────────
@@ -152,30 +156,125 @@ async function handleApproval(queueId: string, approved: boolean) {
       .update({ status: "approved", resolved_at: now })
       .eq("id", queueId);
 
-    return `✅ *Verified and locked in database.* ${queue.observation_count} observations confirmed.`;
+    return `✅ *${SYSTEM_IDENTITY} — Verified and locked in database.* ${queue.observation_count} observations confirmed.`;
   } else {
     await supabase
       .from("telegram_approval_queue")
       .update({ status: "rejected", resolved_at: now })
       .eq("id", queueId);
 
-    return `❌ *Rejected.* Observations remain unverified for manual review.`;
+    return `❌ *${SYSTEM_IDENTITY} — Rejected.* Observations remain unverified for manual review.`;
   }
+}
+
+// ─── Handle retry callback ──────────────────────────────────────
+async function handleRetry(jobId: string): Promise<string> {
+  const { data: job, error } = await supabase
+    .from("ingestion_jobs")
+    .select("*, documents(file_name)")
+    .eq("id", jobId)
+    .single();
+
+  if (error || !job) return "❌ Job not found.";
+  if (job.status !== "failed") return `⏳ Job is currently *${job.status}*. Can only retry failed jobs.`;
+
+  // Reset job to queued
+  await supabase
+    .from("ingestion_jobs")
+    .update({ status: "queued", last_error: null, started_at: null, completed_at: null })
+    .eq("id", jobId);
+
+  // Reset document status
+  if (job.document_id) {
+    await supabase.from("documents").update({ status: "pending" }).eq("id", job.document_id);
+  }
+
+  // Trigger processing
+  try {
+    const SUPABASE_ANON_KEY = Deno.env.get("SUPABASE_PUBLISHABLE_KEY") || SUPABASE_SERVICE_ROLE_KEY;
+    await fetch(`${SUPABASE_URL}/functions/v1/process-document`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${SUPABASE_ANON_KEY}`,
+      },
+      body: JSON.stringify({ job_id: jobId }),
+    });
+  } catch (e) {
+    console.error("Retry trigger failed:", e);
+  }
+
+  const doc = job.documents as any;
+  return `🔄 *${SYSTEM_IDENTITY} — Manual Retry Initiated*\n\nJob for "${doc?.file_name || "Unknown"}" has been re-queued and processing is starting now.`;
+}
+
+// ─── Handle archive callback ────────────────────────────────────
+async function handleArchive(jobId: string): Promise<string> {
+  const { data: job, error } = await supabase
+    .from("ingestion_jobs")
+    .select("*, documents(file_name)")
+    .eq("id", jobId)
+    .single();
+
+  if (error || !job) return "❌ Job not found.";
+
+  await supabase
+    .from("ingestion_jobs")
+    .update({ status: "archived", completed_at: new Date().toISOString() })
+    .eq("id", jobId);
+
+  const doc = job.documents as any;
+  return `🗑️ *${SYSTEM_IDENTITY} — Job Archived*\n\n"${doc?.file_name || "Unknown"}" has been archived. It won't be retried unless you manually re-queue it.`;
+}
+
+// ─── Handle explain more callback ───────────────────────────────
+async function handleExplainMore(jobId: string): Promise<string> {
+  const { data: job, error } = await supabase
+    .from("ingestion_jobs")
+    .select("*, documents(file_name, mime_type, file_name)")
+    .eq("id", jobId)
+    .single();
+
+  if (error || !job) return "❌ Job not found.";
+
+  const model = await getActiveModel();
+  const doc = job.documents as any;
+
+  const prompt = `You are the ${SYSTEM_IDENTITY}. A document processing job failed and the boss wants a detailed troubleshooting session.
+
+Job Details:
+- File: ${doc?.file_name || "Unknown"}
+- MIME Type: ${doc?.mime_type || "Unknown"}
+- Attempts: ${job.attempt_count}
+- Last Error: ${job.last_error || "No error recorded"}
+
+Provide a detailed but plain-English explanation of:
+1. What likely went wrong
+2. The most probable root cause
+3. Exactly what steps to take to fix it
+4. Whether this is likely a one-time issue or recurring
+
+Be specific, actionable, and friendly. No jargon.`;
+
+  const response = await getAIResponse(prompt, model);
+  return `💬 *${SYSTEM_IDENTITY} — Troubleshooting Session*\n\n📁 *File:* ${doc?.file_name || "Unknown"}\n\n${response}`;
 }
 
 // ─── /status ────────────────────────────────────────────────────
 async function handleStatusCommand(): Promise<string> {
   const { data: pending } = await supabase.from("telegram_approval_queue").select("id").eq("status", "pending");
-  const { data: jobs } = await supabase.from("ingestion_jobs").select("id, status").in("status", ["queued", "running"]);
+  const { data: jobs } = await supabase.from("ingestion_jobs").select("id, status").in("status", ["queued", "processing", "retrying"]);
+  const { data: failedJobs } = await supabase.from("ingestion_jobs").select("id").eq("status", "failed");
   const { data: docs } = await supabase.from("documents").select("id").eq("status", "completed");
   const model = await getActiveModel();
 
   return [
-    `🎯 *Fendi Control Center*`,
+    `🎯 *${SYSTEM_IDENTITY} — Status Report*`,
     ``,
     `📄 Documents processed: ${docs?.length || 0}`,
     `⏳ Pending approvals: ${pending?.length || 0}`,
     `🔄 Active jobs: ${jobs?.length || 0}`,
+    `❌ Failed jobs: ${failedJobs?.length || 0}`,
     `🧠 Active model: *${model}* (${model === "grok" ? "Frost\\_Grok" : "Frost\\_Gemini"})`,
   ].join("\n");
 }
@@ -197,7 +296,7 @@ async function handleModelCommand(newModel: string): Promise<string> {
 
   const emoji = model === "grok" ? "⚡" : "💎";
   const key = model === "grok" ? "Frost\\_Grok" : "Frost\\_Gemini";
-  return `${emoji} Switched to *${model.charAt(0).toUpperCase() + model.slice(1)}* using ${key}. All responses now route through this engine.`;
+  return `${emoji} *${SYSTEM_IDENTITY}* — Switched to *${model.charAt(0).toUpperCase() + model.slice(1)}* using ${key}.`;
 }
 
 // ─── /pending ───────────────────────────────────────────────────
@@ -209,7 +308,7 @@ async function handlePendingCommand(): Promise<string> {
     .order("created_at", { ascending: false })
     .limit(5);
 
-  if (!pending || pending.length === 0) return "✅ No pending approvals!";
+  if (!pending || pending.length === 0) return `✅ *${SYSTEM_IDENTITY}* — No pending approvals!`;
 
   const lines = pending.map((p: any, i: number) => {
     const doc = p.documents as any;
@@ -217,7 +316,28 @@ async function handlePendingCommand(): Promise<string> {
     return `${i + 1}. 📄 ${doc?.file_name || "Unknown"} (${client?.name || "Unknown"}) — ${p.observation_count} obs`;
   });
 
-  return [`📋 *Pending Approvals:*`, ``, ...lines].join("\n");
+  return [`📋 *${SYSTEM_IDENTITY} — Pending Approvals:*`, ``, ...lines].join("\n");
+}
+
+// ─── /failed ────────────────────────────────────────────────────
+async function handleFailedCommand(): Promise<string> {
+  const { data: failed } = await supabase
+    .from("ingestion_jobs")
+    .select("*, documents(file_name), clients(name)")
+    .eq("status", "failed")
+    .order("completed_at", { ascending: false })
+    .limit(5);
+
+  if (!failed || failed.length === 0) return `✅ *${SYSTEM_IDENTITY}* — No failed jobs!`;
+
+  const lines = failed.map((j: any, i: number) => {
+    const doc = j.documents as any;
+    const client = j.clients as any;
+    const shortError = (j.last_error || "Unknown").slice(0, 80);
+    return `${i + 1}. ❌ ${doc?.file_name || "Unknown"} (${client?.name || "Unknown"})\n   Attempts: ${j.attempt_count} | ${shortError}`;
+  });
+
+  return [`🚨 *${SYSTEM_IDENTITY} — Failed Jobs:*`, ``, ...lines].join("\n");
 }
 
 // ─── Cross-project helpers ──────────────────────────────────────
@@ -236,19 +356,61 @@ function getProjectClient(project: any) {
   return createClient(project.supabase_url, key);
 }
 
-// ─── /projects ──────────────────────────────────────────────────
 async function handleProjectsCommand(): Promise<string> {
   const projects = await getConnectedProjects();
-  if (projects.length === 0) return "📂 No projects connected yet. Add them via the dashboard.";
+  if (projects.length === 0) return `📂 *${SYSTEM_IDENTITY}* — No projects connected yet.`;
 
   const lines = projects.map((p: any, i: number) => {
     return `${i + 1}. ${p.is_active ? "🟢" : "🔴"} *${p.name}*\n   ${p.description || "No description"}`;
   });
 
-  return [`📂 *Connected Projects (${projects.length}):*`, ``, ...lines, ``, `Use /query <project\\_name> <sql> to query a project.`].join("\n");
+  return [`📂 *${SYSTEM_IDENTITY} — Connected Projects (${projects.length}):*`, ``, ...lines].join("\n");
 }
 
-// ─── /query <project> <question> ────────────────────────────────
+async function handleStatsCommand(projectName: string): Promise<string> {
+  const projects = await getConnectedProjects();
+  if (projects.length === 0) return `📂 *${SYSTEM_IDENTITY}* — No projects connected.`;
+
+  if (!projectName) {
+    const results: string[] = [`📊 *${SYSTEM_IDENTITY} — Cross-Project Stats:*`, ``];
+    for (const project of projects) {
+      const client = getProjectClient(project);
+      if (!client) { results.push(`🔴 *${project.name}*: Missing API key`); continue; }
+      try {
+        const checks = ["users", "profiles", "clients", "documents", "orders", "products", "posts"];
+        const counts: string[] = [];
+        for (const table of checks) {
+          const { count } = await client.from(table).select("*", { count: "exact", head: true });
+          if (count !== null && count > 0) counts.push(`${table}: ${count}`);
+        }
+        if (counts.length > 0) {
+          results.push(`🟢 *${project.name}*`);
+          counts.forEach(c => results.push(`   • ${c}`));
+        } else {
+          results.push(`🟡 *${project.name}*: Connected (no standard tables)`);
+        }
+      } catch { results.push(`🔴 *${project.name}*: Connection error`); }
+    }
+    return results.join("\n");
+  }
+
+  const project = projects.find((p: any) => p.name.toLowerCase().includes(projectName.toLowerCase()));
+  if (!project) return `❌ Project "${projectName}" not found.`;
+  const client = getProjectClient(project);
+  if (!client) return `❌ Missing key for *${project.name}*.`;
+
+  try {
+    const checks = ["users", "profiles", "clients", "documents", "orders", "products", "posts", "fans", "artists", "campaigns", "marketing_spend"];
+    const counts: string[] = [];
+    for (const table of checks) {
+      const { count } = await client.from(table).select("*", { count: "exact", head: true });
+      if (count !== null && count > 0) counts.push(`• ${table}: ${count}`);
+    }
+    if (counts.length === 0) return `🟡 *${project.name}*: Connected but no standard tables.`;
+    return [`📊 *${SYSTEM_IDENTITY} — ${project.name} Stats:*`, ``, ...counts].join("\n");
+  } catch { return `⚠️ Error querying *${project.name}*.`; }
+}
+
 async function handleQueryCommand(args: string): Promise<string> {
   const firstSpace = args.indexOf(" ");
   if (firstSpace === -1) return "❌ Usage: /query <project\\_name> <question>";
@@ -258,101 +420,14 @@ async function handleQueryCommand(args: string): Promise<string> {
 
   const projects = await getConnectedProjects();
   const project = projects.find((p: any) => p.name.toLowerCase().includes(projectName));
-
-  if (!project) {
-    const available = projects.map((p: any) => p.name).join(", ");
-    return `❌ Project not found. Available: ${available || "none"}`;
-  }
+  if (!project) return `❌ Project not found. Available: ${projects.map((p: any) => p.name).join(", ") || "none"}`;
 
   const client = getProjectClient(project);
-  if (!client) return `❌ Missing secret key for *${project.name}*. Add the secret \`${project.secret_key_name}\` in Cloud settings.`;
+  if (!client) return `❌ Missing secret for *${project.name}*.`;
 
-  // Gather basic stats from the target project
-  try {
-    // Get table list via information_schema
-    const { data: tables } = await client.rpc("", {}).maybeSingle();
-    
-    // Since we can't run arbitrary SQL safely, use AI to interpret the question
-    // and gather what we can via standard Supabase client queries
-    const model = await getActiveModel();
-    const contextPrompt = `You are querying the "${project.name}" project. The user asks: "${question}". 
-    
-Since we're connecting via API, suggest what tables/data might be relevant and provide a helpful response based on the project name and description: "${project.description || 'No description'}". Be honest about what you can and cannot access.`;
-
-    return await getAIResponse(contextPrompt, model);
-  } catch (err) {
-    console.error("Cross-project query error:", err);
-    return `⚠️ Error querying *${project.name}*: ${(err as Error).message}`;
-  }
-}
-
-// ─── /stats <project> ───────────────────────────────────────────
-async function handleStatsCommand(projectName: string): Promise<string> {
-  if (!projectName) {
-    // Show stats for all connected projects
-    const projects = await getConnectedProjects();
-    if (projects.length === 0) return "📂 No projects connected.";
-
-    const results: string[] = [`📊 *Cross-Project Stats:*`, ``];
-    
-    for (const project of projects) {
-      const client = getProjectClient(project);
-      if (!client) {
-        results.push(`🔴 *${project.name}*: Missing API key`);
-        continue;
-      }
-      
-      try {
-        // Try to get a basic count from common tables
-        const checks = ["users", "profiles", "clients", "documents", "orders", "products", "posts"];
-        const counts: string[] = [];
-        
-        for (const table of checks) {
-          const { count } = await client.from(table).select("*", { count: "exact", head: true });
-          if (count !== null && count > 0) {
-            counts.push(`${table}: ${count}`);
-          }
-        }
-        
-        if (counts.length > 0) {
-          results.push(`🟢 *${project.name}*`);
-          counts.forEach(c => results.push(`   • ${c}`));
-        } else {
-          results.push(`🟡 *${project.name}*: Connected (no standard tables found)`);
-        }
-      } catch (err) {
-        results.push(`🔴 *${project.name}*: Connection error`);
-      }
-    }
-
-    return results.join("\n");
-  }
-
-  // Single project stats
-  const projects = await getConnectedProjects();
-  const project = projects.find((p: any) => p.name.toLowerCase().includes(projectName.toLowerCase()));
-  if (!project) return `❌ Project "${projectName}" not found.`;
-
-  const client = getProjectClient(project);
-  if (!client) return `❌ Missing key for *${project.name}*.`;
-
-  try {
-    const checks = ["users", "profiles", "clients", "documents", "orders", "products", "posts", "fans", "artists", "campaigns", "marketing_spend"];
-    const counts: string[] = [];
-
-    for (const table of checks) {
-      const { count } = await client.from(table).select("*", { count: "exact", head: true });
-      if (count !== null && count > 0) {
-        counts.push(`• ${table}: ${count}`);
-      }
-    }
-
-    if (counts.length === 0) return `🟡 *${project.name}*: Connected but no standard tables detected.`;
-
-    return [`📊 *${project.name} Stats:*`, ``, ...counts].join("\n");
-  } catch (err) {
-    return `⚠️ Error querying *${project.name}*.`;
-  }
+  const model = await getActiveModel();
+  const contextPrompt = `You are the ${SYSTEM_IDENTITY}. The boss is asking about the "${project.name}" project: "${question}". Project description: "${project.description || 'N/A'}". Provide a helpful response.`;
+  return await getAIResponse(contextPrompt, model);
 }
 
 // ─── Main Webhook Handler ───────────────────────────────────────
@@ -368,10 +443,32 @@ serve(async (req) => {
 
       if (cbChatId !== CHAT_ID) return new Response("ok");
 
-      const [action, queueId] = cb.data.split(":");
+      const [action, ...idParts] = cb.data.split(":");
+      const targetId = idParts.join(":");
       await answerCallbackQuery(cb.id, "Processing...");
 
-      const result = await handleApproval(queueId, action === "approve");
+      let result: string;
+
+      switch (action) {
+        case "approve":
+          result = await handleApproval(targetId, true);
+          break;
+        case "reject":
+          result = await handleApproval(targetId, false);
+          break;
+        case "retry":
+          result = await handleRetry(targetId);
+          break;
+        case "archive":
+          result = await handleArchive(targetId);
+          break;
+        case "explain":
+          result = await handleExplainMore(targetId);
+          break;
+        default:
+          result = "❓ Unknown action.";
+      }
+
       await editMessageReplyMarkup(cbChatId, cb.message.message_id);
       await sendMessage(cbChatId, result);
 
@@ -385,7 +482,6 @@ serve(async (req) => {
     const chatId = String(message.chat.id);
     const text = message.text.trim();
 
-    // Gate: only respond to authorized chat
     if (chatId !== CHAT_ID) {
       console.log(`🚫 Blocked message from unauthorized chat: ${chatId}`);
       return new Response("ok");
@@ -394,12 +490,13 @@ serve(async (req) => {
     // Command routing
     if (text === "/start") {
       await sendMessage(chatId, [
-        `🎯 *Fendi Control Center* — Online`,
+        `🎯 *${SYSTEM_IDENTITY} — Online*`,
         ``,
         `📊 /status — Pipeline overview`,
         `📋 /pending — Pending approvals`,
+        `🚨 /failed — Failed jobs`,
         `🧠 /model gemini|grok — Switch AI engine`,
-        `📂 /projects — List connected projects`,
+        `📂 /projects — Connected projects`,
         `📊 /stats — Cross-project statistics`,
         `🔍 /query <name> <question> — Query a project`,
         `💬 Any message — AI chat with context`,
@@ -411,12 +508,14 @@ serve(async (req) => {
       if (!model) {
         const current = await getActiveModel();
         const key = current === "grok" ? "Frost\\_Grok" : "Frost\\_Gemini";
-        await sendMessage(chatId, `🧠 Active: *${current}* (${key})\n\nSwitch: /model gemini or /model grok`);
+        await sendMessage(chatId, `🧠 *${SYSTEM_IDENTITY}* — Active: *${current}* (${key})\n\nSwitch: /model gemini or /model grok`);
       } else {
         await sendMessage(chatId, await handleModelCommand(model));
       }
     } else if (text === "/pending") {
       await sendMessage(chatId, await handlePendingCommand());
+    } else if (text === "/failed") {
+      await sendMessage(chatId, await handleFailedCommand());
     } else if (text === "/projects") {
       await sendMessage(chatId, await handleProjectsCommand());
     } else if (text.startsWith("/stats")) {
