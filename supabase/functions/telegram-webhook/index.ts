@@ -271,7 +271,7 @@ serve(async (req) => {
     } else if (text === "/status") {
       await sendMessage(chatId, await handleStatusCommand());
     } else if (text.startsWith("/model")) {
-      const model = text.replace("/model", "").trim();
+      const model = text.replace("/model", "").trim().split(/\s+/)[0];
       if (!model) {
         const current = await getActiveModel();
         const key = current === "grok" ? "Frost\\_Grok" : "Frost\\_Gemini";
