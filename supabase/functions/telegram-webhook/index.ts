@@ -38,14 +38,87 @@ async function editMessageReplyMarkup(chatId: string, messageId: number) {
   });
 }
 
-// ─── Get active AI model ────────────────────────────────────────
-async function getActiveModel(): Promise<string> {
+// ─── Model & conversation state helpers ─────────────────────────
+async function getActiveModel(): Promise<"gemini" | "grok"> {
   const { data } = await supabase
     .from("bot_settings")
     .select("setting_value")
     .eq("setting_key", "ai_model")
     .single();
-  return data?.setting_value || "gemini";
+
+  return data?.setting_value === "grok" ? "grok" : "gemini";
+}
+
+function getModelLabel(model: "gemini" | "grok"): string {
+  return model === "grok" ? "Grok" : "Gemini";
+}
+
+function formatAssistantMessage(model: "gemini" | "grok", text: string): string {
+  return `🤖 *${SYSTEM_IDENTITY}* _(Model: ${getModelLabel(model)})_\n\n${text}`;
+}
+
+function isExplicitModelSwitchRequest(userMessage: string, targetModel?: string): boolean {
+  if (!targetModel) return false;
+  const text = userMessage.toLowerCase();
+  const normalizedTarget = targetModel.toLowerCase();
+  return (
+    text.includes(`/model ${normalizedTarget}`) ||
+    text.includes(`switch to ${normalizedTarget}`) ||
+    text.includes(`use ${normalizedTarget}`) ||
+    text.includes(`change model to ${normalizedTarget}`)
+  );
+}
+
+type ConversationTurn = {
+  role: "user" | "assistant";
+  content: string;
+  model: "gemini" | "grok";
+  at: string;
+};
+
+async function getConversationTurns(chatId: string): Promise<ConversationTurn[]> {
+  const { data } = await supabase
+    .from("bot_settings")
+    .select("setting_value")
+    .eq("setting_key", `conversation:${chatId}`)
+    .single();
+
+  if (!data?.setting_value) return [];
+
+  try {
+    const parsed = JSON.parse(data.setting_value);
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    return [];
+  }
+}
+
+async function saveConversationTurns(chatId: string, turns: ConversationTurn[]): Promise<void> {
+  const limited = turns.slice(-20);
+  await supabase.from("bot_settings").upsert(
+    {
+      setting_key: `conversation:${chatId}`,
+      setting_value: JSON.stringify(limited),
+      updated_at: new Date().toISOString(),
+    },
+    { onConflict: "setting_key" }
+  );
+}
+
+async function appendConversationTurn(chatId: string, turn: ConversationTurn): Promise<void> {
+  const turns = await getConversationTurns(chatId);
+  turns.push(turn);
+  await saveConversationTurns(chatId, turns);
+}
+
+async function buildConversationContext(chatId: string): Promise<string> {
+  const turns = await getConversationTurns(chatId);
+  const recent = turns.slice(-12);
+  if (recent.length === 0) return "No prior conversation context.";
+
+  return recent
+    .map((t) => `${t.role.toUpperCase()} [${getModelLabel(t.model)}]: ${String(t.content || "").slice(0, 700)}`)
+    .join("\n\n");
 }
 
 // ─── Fetch last 3 processed documents for context ───────────────
@@ -234,12 +307,13 @@ const AGENT_TOOLS: ToolDef[] = [
   },
   {
     name: "switch_ai_model",
-    description: "Switch the active AI model between 'gemini' and 'grok'.",
+    description: "Switch the active AI model between 'gemini' and 'grok'. This is only allowed when the user explicitly requests a switch.",
     parameters: { type: "object", properties: { model: { type: "string", enum: ["gemini", "grok"], description: "The model to switch to" } }, required: ["model"] },
-    destructive: false,
+    destructive: true,
     execute: async (args: any) => {
-      await supabase.from("bot_settings").upsert({ setting_key: "ai_model", setting_value: args.model, updated_at: new Date().toISOString() }, { onConflict: "setting_key" });
-      return `Switched to ${args.model}.`;
+      const nextModel = args.model === "grok" ? "grok" : "gemini";
+      await supabase.from("bot_settings").upsert({ setting_key: "ai_model", setting_value: nextModel, updated_at: new Date().toISOString() }, { onConflict: "setting_key" });
+      return `Switched to ${nextModel}.`;
     },
   },
   {
@@ -496,7 +570,11 @@ async function deletePendingAction(actionId: string) {
 
 // ─── Agentic AI call with tool use ─────────────────────────────
 
-async function agenticGeminiCall(userMessage: string, docContext: string): Promise<{ text: string; toolCalls: Array<{ name: string; args: any }> }> {
+async function agenticGeminiCall(
+  userMessage: string,
+  docContext: string,
+  conversationContext: string
+): Promise<{ text: string; toolCalls: Array<{ name: string; args: any }> }> {
   const systemPrompt = `You are the ${SYSTEM_IDENTITY}. You serve Fendi Frost as a personal command center assistant.
 
 CRITICAL INSTRUCTION: You MUST use your available tools to fulfill requests. NEVER just describe what you would do — actually call the function. If the user asks to see comments, call the tool. If they ask to send a message, call the tool. Do NOT respond with text saying "I'll do X" without calling the corresponding function.
@@ -511,7 +589,10 @@ For destructive actions (retry, archive, approve, reject, Instagram DMs/replies)
 Be concise, professional, and use emoji sparingly.
 
 Recent Documents Context:
-${docContext}`;
+${docContext}
+
+Conversation Context (shared across all models):
+${conversationContext}`;
 
   const resp = await fetch(
     `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${GEMINI_KEY}`,
@@ -551,7 +632,11 @@ ${docContext}`;
   return { text: textResponse, toolCalls };
 }
 
-async function agenticGrokCall(userMessage: string, docContext: string): Promise<{ text: string; toolCalls: Array<{ name: string; args: any }> }> {
+async function agenticGrokCall(
+  userMessage: string,
+  docContext: string,
+  conversationContext: string
+): Promise<{ text: string; toolCalls: Array<{ name: string; args: any }> }> {
   const systemPrompt = `You are the ${SYSTEM_IDENTITY}. You serve Fendi Frost as a personal command center assistant.
 
 CRITICAL INSTRUCTION: You MUST use your available tools to fulfill requests. NEVER just describe what you would do — actually call the function. If the user asks to see comments, call the tool. If they ask to send a message, call the tool. Do NOT respond with text saying "I'll do X" without calling the corresponding function.
@@ -566,7 +651,10 @@ For destructive actions (retry, archive, approve, reject, Instagram DMs/replies)
 Be witty, direct, and concise. Use emoji sparingly.
 
 Recent Documents Context:
-${docContext}`;
+${docContext}
+
+Conversation Context (shared across all models):
+${conversationContext}`;
 
   const resp = await fetch("https://api.x.ai/v1/chat/completions", {
     method: "POST",
@@ -609,14 +697,30 @@ async function executeAgenticLoop(chatId: string, userMessage: string): Promise<
   const model = await getActiveModel();
   const docContext = await getRecentDocContext();
 
+  await appendConversationTurn(chatId, {
+    role: "user",
+    content: userMessage,
+    model,
+    at: new Date().toISOString(),
+  });
+
+  const conversationContext = await buildConversationContext(chatId);
+
   // Step 1: Get AI response with tool calls
   const result = model === "grok"
-    ? await agenticGrokCall(userMessage, docContext)
-    : await agenticGeminiCall(userMessage, docContext);
+    ? await agenticGrokCall(userMessage, docContext, conversationContext)
+    : await agenticGeminiCall(userMessage, docContext, conversationContext);
 
   // Step 2: If no tool calls, just send the text response
   if (result.toolCalls.length === 0) {
-    await sendMessage(chatId, result.text || "I'm not sure how to help with that. Try /start for available commands.");
+    const reply = formatAssistantMessage(model, result.text || "I'm not sure how to help with that. Try /start for available commands.");
+    await sendMessage(chatId, reply);
+    await appendConversationTurn(chatId, {
+      role: "assistant",
+      content: reply,
+      model,
+      at: new Date().toISOString(),
+    });
     return;
   }
 
@@ -628,6 +732,11 @@ async function executeAgenticLoop(chatId: string, userMessage: string): Promise<
     const tool = AGENT_TOOLS.find(t => t.name === tc.name);
     if (!tool) {
       toolResults.push(`❓ Unknown tool: ${tc.name}`);
+      continue;
+    }
+
+    if (tc.name === "switch_ai_model" && !isExplicitModelSwitchRequest(userMessage, tc.args?.model)) {
+      toolResults.push("🔒 Model switching is locked. Use `/model grok` or `/model gemini` when you explicitly want to switch.");
       continue;
     }
 
@@ -699,7 +808,14 @@ Now provide a clear, concise summary for the user based on the results. Use mark
       summary = data.candidates?.[0]?.content?.parts?.[0]?.text || toolResults.join("\n\n");
     }
 
-    await sendMessage(chatId, summary);
+    const finalSummary = formatAssistantMessage(model, summary);
+    await sendMessage(chatId, finalSummary);
+    await appendConversationTurn(chatId, {
+      role: "assistant",
+      content: finalSummary,
+      model,
+      at: new Date().toISOString(),
+    });
   } else if (confirmationButtons.length > 0) {
     // Has destructive actions needing confirmation
     const nonDestructiveResults = toolResults.filter(r => !r.startsWith("⏳"));
@@ -715,8 +831,15 @@ Now provide a clear, concise summary for the user based on the results. Use mark
       keyboard.push(confirmationButtons.slice(i, i + 2));
     }
 
-    await sendMessage(chatId, message.trim(), {
+    const confirmationMessage = formatAssistantMessage(model, message.trim());
+    await sendMessage(chatId, confirmationMessage, {
       reply_markup: { inline_keyboard: keyboard },
+    });
+    await appendConversationTurn(chatId, {
+      role: "assistant",
+      content: confirmationMessage,
+      model,
+      at: new Date().toISOString(),
     });
   }
 }
@@ -894,15 +1017,32 @@ serve(async (req) => {
         `• "Retry all failed jobs"`,
         `• "How are my projects doing?"`,
         `• "Approve all pending documents"`,
-        `• "Switch to Grok and give me a status report"`,
         `• "Show my recent Instagram comments"`,
         `• "DM @user thanks for the shoutout"`,
         `• "Reply to that Instagram comment saying thank you"`,
         ``,
+        `🔒 Model is locked until you switch it explicitly with /model grok or /model gemini.`,
         `💡 I'll ask for confirmation before doing anything destructive (including Instagram messages).`,
         ``,
         `_Legacy commands still work: /status, /pending, /failed, /model, /projects, /stats_`,
       ].join("\n"));
+      return new Response("ok");
+    }
+
+    if (text.toLowerCase() === "/model") {
+      const activeModel = await getActiveModel();
+      await sendMessage(chatId, `🤖 *${SYSTEM_IDENTITY}*\n\nActive model: *${getModelLabel(activeModel)}*\n🔒 Model switching is locked until you explicitly run /model grok or /model gemini.`);
+      return new Response("ok");
+    }
+
+    const modelSwitchMatch = text.match(/^\/model\s+(grok|gemini)$/i);
+    if (modelSwitchMatch) {
+      const requestedModel = modelSwitchMatch[1].toLowerCase() as "grok" | "gemini";
+      await supabase.from("bot_settings").upsert(
+        { setting_key: "ai_model", setting_value: requestedModel, updated_at: new Date().toISOString() },
+        { onConflict: "setting_key" }
+      );
+      await sendMessage(chatId, `✅ *${SYSTEM_IDENTITY}* switched to *${getModelLabel(requestedModel)}*.\n\nI'll stay on this model until you switch again.`);
       return new Response("ok");
     }
 
