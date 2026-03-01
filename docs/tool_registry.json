@@ -2,7 +2,7 @@
   "_meta": {
     "generated_from": "supabase/functions/telegram-webhook/index.ts AGENT_TOOLS array",
     "generated_at": "2026-03-01",
-    "scope": "Internal Lovable project tools only (no Instagram tools)"
+    "scope": "All AGENT_TOOLS callable by the Telegram webhook runtime"
   },
   "tools": [
     {
@@ -524,6 +524,115 @@
       "approval_mechanism": null,
       "destructive": false,
       "source_line": 474
+    },
+    {
+      "tool_name": "instagram_send_dm",
+      "purpose": "Sends an Instagram Direct Message to a user via the instagram-messaging edge function.",
+      "when_to_use": "User asks to DM someone on Instagram.",
+      "required_args": {
+        "recipient_id": "string — Instagram-scoped user ID (IGSID)",
+        "message": "string — message text"
+      },
+      "optional_args": {},
+      "returns": {
+        "success_message": "string — confirmation of DM sent"
+      },
+      "side_effects": "write (external API — Instagram Graph API)",
+      "permissions_secrets_used": ["SUPABASE_PUBLISHABLE_KEY", "Artist_Growth_Hub_Meta"],
+      "failure_modes": [
+        { "error": "Instagram API error", "agent_response": "Returns error message from Graph API" }
+      ],
+      "logging": { "tool_execution_logs": "1 row: attempted → succeeded or failed" },
+      "approval_required": true,
+      "approval_mechanism": "inline_confirm_button",
+      "destructive": true,
+      "source_line": 584
+    },
+    {
+      "tool_name": "instagram_reply_comment",
+      "purpose": "Replies to a comment on an Instagram post via the instagram-messaging edge function.",
+      "when_to_use": "User asks to reply to an Instagram comment.",
+      "required_args": {
+        "comment_id": "string — Instagram comment ID",
+        "reply_text": "string — reply text"
+      },
+      "optional_args": {},
+      "returns": {
+        "success_message": "string — confirmation of reply"
+      },
+      "side_effects": "write (external API — Instagram Graph API)",
+      "permissions_secrets_used": ["SUPABASE_PUBLISHABLE_KEY", "Artist_Growth_Hub_Meta"],
+      "failure_modes": [
+        { "error": "Instagram API error", "agent_response": "Returns error message from Graph API" }
+      ],
+      "logging": { "tool_execution_logs": "1 row: attempted → succeeded or failed" },
+      "approval_required": true,
+      "approval_mechanism": "inline_confirm_button",
+      "destructive": true,
+      "source_line": 601
+    },
+    {
+      "tool_name": "instagram_reply_story_mention",
+      "purpose": "Replies via DM to someone who mentioned you in their Instagram story.",
+      "when_to_use": "User asks to reply to an Instagram story mention.",
+      "required_args": {
+        "recipient_id": "string — Instagram-scoped user ID of the person who mentioned you",
+        "message": "string — reply message"
+      },
+      "optional_args": {},
+      "returns": {
+        "success_message": "string — confirmation of reply"
+      },
+      "side_effects": "write (external API — Instagram Graph API)",
+      "permissions_secrets_used": ["SUPABASE_PUBLISHABLE_KEY", "Artist_Growth_Hub_Meta"],
+      "failure_modes": [
+        { "error": "Instagram API error", "agent_response": "Returns error message from Graph API" }
+      ],
+      "logging": { "tool_execution_logs": "1 row: attempted → succeeded or failed" },
+      "approval_required": true,
+      "approval_mechanism": "inline_confirm_button",
+      "destructive": true,
+      "source_line": 618
+    },
+    {
+      "tool_name": "instagram_get_recent_comments",
+      "purpose": "Fetches recent comments on latest Instagram posts.",
+      "when_to_use": "User asks to see Instagram comments, what people are saying.",
+      "required_args": {},
+      "optional_args": {},
+      "returns": {
+        "data": "array — recent comments with post info"
+      },
+      "side_effects": "read_only (external API — Instagram Graph API)",
+      "permissions_secrets_used": ["SUPABASE_PUBLISHABLE_KEY", "Artist_Growth_Hub_Meta"],
+      "failure_modes": [
+        { "error": "Instagram API error", "agent_response": "Returns error message from Graph API" }
+      ],
+      "logging": { "tool_execution_logs": "1 row: attempted → succeeded or failed" },
+      "approval_required": false,
+      "approval_mechanism": null,
+      "destructive": false,
+      "source_line": 635
+    },
+    {
+      "tool_name": "instagram_get_conversations",
+      "purpose": "Lists recent Instagram DM conversations with latest messages.",
+      "when_to_use": "User asks about Instagram DMs, conversations, messages.",
+      "required_args": {},
+      "optional_args": {},
+      "returns": {
+        "data": "array — recent DM conversations"
+      },
+      "side_effects": "read_only (external API — Instagram Graph API)",
+      "permissions_secrets_used": ["SUPABASE_PUBLISHABLE_KEY", "Artist_Growth_Hub_Meta"],
+      "failure_modes": [
+        { "error": "Instagram API error", "agent_response": "Returns error message from Graph API" }
+      ],
+      "logging": { "tool_execution_logs": "1 row: attempted → succeeded or failed" },
+      "approval_required": false,
+      "approval_mechanism": null,
+      "destructive": false,
+      "source_line": 652
     }
   ],
   "edge_functions": [
