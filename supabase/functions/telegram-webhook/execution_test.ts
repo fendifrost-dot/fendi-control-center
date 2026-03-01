@@ -378,40 +378,57 @@ Deno.test("J1: unregistered tool call is blocked with exact message", () => {
   assertMatch(guardMsg, /No internal workflow exists for that request yet/);
 });
 
-Deno.test("J2: all AGENT_TOOLS must have matching tool_registry entry", () => {
-  // Registry tool names (mirrors tool_registry.json internal tools)
-  const REGISTRY_TOOL_NAMES = [
-    "get_system_status", "list_pending_approvals", "list_failed_jobs",
-    "retry_failed_job", "archive_job", "approve_document", "reject_document",
-    "switch_ai_model", "list_connected_projects", "get_project_stats",
-    "get_recent_documents", "trigger_drive_sync", "list_drive_files",
-    "get_client_summary", "get_active_jobs_summary",
-  ];
-  // Every internal tool must be in both the runtime array and registry
-  for (const tool of REGISTRY_TOOL_NAMES) {
-    assertEquals(ALL_TOOL_NAMES.includes(tool), true,
-      `${tool} is in registry but missing from AGENT_TOOLS runtime`);
+Deno.test("J2: tool_registry.json entries match AGENT_TOOLS runtime list", async () => {
+  // Parse the ACTUAL registry file — not a hardcoded copy
+  const registryRaw = await Deno.readTextFile(
+    new URL("../../../docs/tool_registry.json", import.meta.url)
+  );
+  const registry = JSON.parse(registryRaw);
+  const registryToolNames: string[] = registry.tools.map((t: any) => t.tool_name);
+
+  // Every registry tool must exist in the runtime AGENT_TOOLS list
+  for (const name of registryToolNames) {
+    assertEquals(ALL_TOOL_NAMES.includes(name), true,
+      `Registry has '${name}' but AGENT_TOOLS runtime does NOT — drift detected`);
+  }
+
+  // Every internal (non-Instagram) runtime tool must exist in the registry
+  const INTERNAL_TOOLS = ALL_TOOL_NAMES.filter(t => !t.startsWith("instagram_"));
+  for (const name of INTERNAL_TOOLS) {
+    assertEquals(registryToolNames.includes(name), true,
+      `AGENT_TOOLS has '${name}' but tool_registry.json does NOT — drift detected`);
   }
 });
 
-Deno.test("J3: workflow references only registered tools", () => {
-  // All tool names referenced in workflows must exist in registry
-  const workflowTools = [
-    "get_system_status", "list_pending_approvals", "approve_document",
-    "reject_document", "list_failed_jobs", "retry_failed_job", "archive_job",
-    "switch_ai_model", "trigger_drive_sync", "list_drive_files",
-    "get_client_summary", "list_connected_projects", "get_project_stats",
-    "get_recent_documents", "get_active_jobs_summary",
-  ];
-  for (const tool of workflowTools) {
-    assertEquals(ALL_TOOL_NAMES.includes(tool), true,
-      `Workflow references '${tool}' which is not in AGENT_TOOLS`);
+Deno.test("J3: workflow_playbooks.json references only registered tools", async () => {
+  const registryRaw = await Deno.readTextFile(
+    new URL("../../../docs/tool_registry.json", import.meta.url)
+  );
+  const registry = JSON.parse(registryRaw);
+  const registryToolNames: string[] = registry.tools.map((t: any) => t.tool_name);
+
+  const playbookRaw = await Deno.readTextFile(
+    new URL("../../../docs/workflow_playbooks.json", import.meta.url)
+  );
+  const playbooks = JSON.parse(playbookRaw);
+
+  // Extract tool names referenced in workflow step actions
+  const toolPattern = /\b(get_\w+|list_\w+|trigger_\w+|retry_\w+|archive_\w+|approve_\w+|reject_\w+|switch_\w+)\b/g;
+  for (const wf of playbooks.workflows) {
+    for (const step of wf.steps) {
+      const matches = step.action.match(toolPattern) || [];
+      for (const toolRef of matches) {
+        // Only check tool names that look like our tools (exist in ALL_TOOL_NAMES)
+        if (ALL_TOOL_NAMES.includes(toolRef)) {
+          assertEquals(registryToolNames.includes(toolRef), true,
+            `Workflow '${wf.workflow_name}' references '${toolRef}' which is missing from tool_registry.json`);
+        }
+      }
+    }
   }
 });
 
 Deno.test("J4: text-only response to a tool-mapped request is a violation", () => {
-  // If a user asks "what are the active jobs?" and the agent returns text
-  // without calling get_active_jobs_summary, that's a violation.
   const agentResponse = { text: "You have 869 active jobs...", toolCalls: [] };
   const expectedTool = "get_active_jobs_summary";
   const violation = agentResponse.toolCalls.length === 0
@@ -427,21 +444,32 @@ Deno.test("J5: no-workflow message is exact string", () => {
     "Fallback message must be this exact string, not a paraphrase");
 });
 
-Deno.test("J6: system prompt contains enforcement rules", () => {
-  // Verify the system prompt includes the mandatory rules
-  const promptSnippets = [
+Deno.test("J6: REAL index.ts source contains all enforcement strings", async () => {
+  // Read the actual production source — NOT a fake samplePrompt
+  const source = await Deno.readTextFile(
+    new URL("./index.ts", import.meta.url)
+  );
+
+  const requiredStrings = [
     "NO TOOL, NO CLAIM",
     "NO WORKFLOW, NO ACTION",
-    "No internal workflow exists for that request yet.",
+    'No internal workflow exists for that request yet.',
     "EVIDENCE OVER CLAIMS",
+    "GUARDRAIL: AI tried to call unregistered tool",
+    "FATAL: Tool execution logging failed",
   ];
-  const samplePrompt = `CRITICAL RULES — MANDATORY:
-1. NO TOOL, NO CLAIM: You MUST use your available tools to fulfill requests.
-2. NO WORKFLOW, NO ACTION: If the user's request does not correspond to ANY of your available tools, respond EXACTLY with: "No internal workflow exists for that request yet."
-3. EVIDENCE OVER CLAIMS: All data must come from tool calls.`;
 
-  for (const snippet of promptSnippets) {
-    assertEquals(samplePrompt.includes(snippet), true,
-      `System prompt must contain '${snippet}'`);
+  for (const s of requiredStrings) {
+    assertEquals(source.includes(s), true,
+      `index.ts MUST contain '${s}' — enforcement is missing from production code`);
   }
+});
+
+Deno.test("J7: guardrail message in index.ts blocks with exact pattern", async () => {
+  const source = await Deno.readTextFile(
+    new URL("./index.ts", import.meta.url)
+  );
+  // The actual runtime guard must produce this exact user-facing pattern
+  assertMatch(source, /Tool '\$\{tc\.name\}' is not in the tool registry\. No internal workflow exists for that request yet\./,
+    "Runtime guardrail must output the exact blocking message with tool name interpolation");
 });
