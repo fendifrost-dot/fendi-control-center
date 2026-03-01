@@ -498,10 +498,16 @@ async function deletePendingAction(actionId: string) {
 
 async function agenticGeminiCall(userMessage: string, docContext: string): Promise<{ text: string; toolCalls: Array<{ name: string; args: any }> }> {
   const systemPrompt = `You are the ${SYSTEM_IDENTITY}. You serve Fendi Frost as a personal command center assistant.
-You have access to tools to check system status, manage jobs, approvals, projects, Instagram messaging, and more.
-Use tools when the user's request requires data or actions. You can call multiple tools in sequence.
+
+CRITICAL INSTRUCTION: You MUST use your available tools to fulfill requests. NEVER just describe what you would do — actually call the function. If the user asks to see comments, call the tool. If they ask to send a message, call the tool. Do NOT respond with text saying "I'll do X" without calling the corresponding function.
+
+Available capabilities via tools:
+- System status, job management, document approvals
+- Instagram: send DMs, reply to comments, reply to story mentions, view conversations & comments
+- Drive sync, file listing, client summaries
+- Connected project stats
+
 For destructive actions (retry, archive, approve, reject, Instagram DMs/replies), ALWAYS call the tool — the system will handle confirmation.
-You can send Instagram DMs, reply to comments, reply to story mentions, and view recent conversations/comments.
 Be concise, professional, and use emoji sparingly.
 
 Recent Documents Context:
@@ -516,6 +522,7 @@ ${docContext}`;
         contents: [{ role: "user", parts: [{ text: userMessage }] }],
         systemInstruction: { parts: [{ text: systemPrompt }] },
         tools: [{ functionDeclarations: getGeminiToolDeclarations() }],
+        toolConfig: { functionCallingConfig: { mode: "AUTO" } },
         generationConfig: { maxOutputTokens: 1024 },
       }),
     }
@@ -546,10 +553,16 @@ ${docContext}`;
 
 async function agenticGrokCall(userMessage: string, docContext: string): Promise<{ text: string; toolCalls: Array<{ name: string; args: any }> }> {
   const systemPrompt = `You are the ${SYSTEM_IDENTITY}. You serve Fendi Frost as a personal command center assistant.
-You have access to tools to check system status, manage jobs, approvals, projects, Instagram messaging, and more.
-Use tools when the user's request requires data or actions. You can call multiple tools.
+
+CRITICAL INSTRUCTION: You MUST use your available tools to fulfill requests. NEVER just describe what you would do — actually call the function. If the user asks to see comments, call the tool. If they ask to send a message, call the tool. Do NOT respond with text saying "I'll do X" without calling the corresponding function.
+
+Available capabilities via tools:
+- System status, job management, document approvals
+- Instagram: send DMs, reply to comments, reply to story mentions, view conversations & comments
+- Drive sync, file listing, client summaries
+- Connected project stats
+
 For destructive actions (retry, archive, approve, reject, Instagram DMs/replies), ALWAYS call the tool — the system will handle confirmation.
-You can send Instagram DMs, reply to comments, reply to story mentions, and view recent conversations/comments.
 Be witty, direct, and concise. Use emoji sparingly.
 
 Recent Documents Context:
@@ -565,6 +578,7 @@ ${docContext}`;
         { role: "user", content: userMessage },
       ],
       tools: getGrokToolSchemas(),
+      tool_choice: "auto",
       max_tokens: 1024,
     }),
   });
