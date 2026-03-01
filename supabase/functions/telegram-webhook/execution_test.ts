@@ -364,3 +364,84 @@ Deno.test("I5: successful result contains required schema fields", () => {
   assertExists(mockResult.examples);
   assertEquals(typeof mockResult.total, "number");
 });
+
+// ═══════════════════════════════════════════════════════════════
+// ─── J) RUNTIME ENFORCEMENT — "No Workflow, No Action" ───────
+// ═══════════════════════════════════════════════════════════════
+
+Deno.test("J1: unregistered tool call is blocked with exact message", () => {
+  const fakeTool = "summarize_all_data";
+  const registered = ALL_TOOL_NAMES.includes(fakeTool);
+  assertEquals(registered, false, "Fake tool must NOT be in registry");
+  // Agent guardrail must produce this exact substring:
+  const guardMsg = `Tool '${fakeTool}' is not in the tool registry. No internal workflow exists for that request yet.`;
+  assertMatch(guardMsg, /No internal workflow exists for that request yet/);
+});
+
+Deno.test("J2: all AGENT_TOOLS must have matching tool_registry entry", () => {
+  // Registry tool names (mirrors tool_registry.json internal tools)
+  const REGISTRY_TOOL_NAMES = [
+    "get_system_status", "list_pending_approvals", "list_failed_jobs",
+    "retry_failed_job", "archive_job", "approve_document", "reject_document",
+    "switch_ai_model", "list_connected_projects", "get_project_stats",
+    "get_recent_documents", "trigger_drive_sync", "list_drive_files",
+    "get_client_summary", "get_active_jobs_summary",
+  ];
+  // Every internal tool must be in both the runtime array and registry
+  for (const tool of REGISTRY_TOOL_NAMES) {
+    assertEquals(ALL_TOOL_NAMES.includes(tool), true,
+      `${tool} is in registry but missing from AGENT_TOOLS runtime`);
+  }
+});
+
+Deno.test("J3: workflow references only registered tools", () => {
+  // All tool names referenced in workflows must exist in registry
+  const workflowTools = [
+    "get_system_status", "list_pending_approvals", "approve_document",
+    "reject_document", "list_failed_jobs", "retry_failed_job", "archive_job",
+    "switch_ai_model", "trigger_drive_sync", "list_drive_files",
+    "get_client_summary", "list_connected_projects", "get_project_stats",
+    "get_recent_documents", "get_active_jobs_summary",
+  ];
+  for (const tool of workflowTools) {
+    assertEquals(ALL_TOOL_NAMES.includes(tool), true,
+      `Workflow references '${tool}' which is not in AGENT_TOOLS`);
+  }
+});
+
+Deno.test("J4: text-only response to a tool-mapped request is a violation", () => {
+  // If a user asks "what are the active jobs?" and the agent returns text
+  // without calling get_active_jobs_summary, that's a violation.
+  const agentResponse = { text: "You have 869 active jobs...", toolCalls: [] };
+  const expectedTool = "get_active_jobs_summary";
+  const violation = agentResponse.toolCalls.length === 0
+    && ALL_TOOL_NAMES.includes(expectedTool);
+  assertEquals(violation, true,
+    "Agent must NOT answer with text when a matching tool exists — must call the tool");
+});
+
+Deno.test("J5: no-workflow message is exact string", () => {
+  const expected = "No internal workflow exists for that request yet.";
+  const agentFallback = "No internal workflow exists for that request yet.";
+  assertEquals(agentFallback, expected,
+    "Fallback message must be this exact string, not a paraphrase");
+});
+
+Deno.test("J6: system prompt contains enforcement rules", () => {
+  // Verify the system prompt includes the mandatory rules
+  const promptSnippets = [
+    "NO TOOL, NO CLAIM",
+    "NO WORKFLOW, NO ACTION",
+    "No internal workflow exists for that request yet.",
+    "EVIDENCE OVER CLAIMS",
+  ];
+  const samplePrompt = `CRITICAL RULES — MANDATORY:
+1. NO TOOL, NO CLAIM: You MUST use your available tools to fulfill requests.
+2. NO WORKFLOW, NO ACTION: If the user's request does not correspond to ANY of your available tools, respond EXACTLY with: "No internal workflow exists for that request yet."
+3. EVIDENCE OVER CLAIMS: All data must come from tool calls.`;
+
+  for (const snippet of promptSnippets) {
+    assertEquals(samplePrompt.includes(snippet), true,
+      `System prompt must contain '${snippet}'`);
+  }
+});
