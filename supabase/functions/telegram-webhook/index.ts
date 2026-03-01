@@ -39,14 +39,32 @@ async function editMessageReplyMarkup(chatId: string, messageId: number) {
 }
 
 // ─── Model & conversation state helpers ─────────────────────────
-async function getActiveModel(): Promise<"gemini" | "grok"> {
+async function getActiveModel(chatId?: string): Promise<{ model: "gemini" | "grok"; session_created?: boolean }> {
+  // Try chat-scoped session first
+  if (chatId) {
+    const { data: session } = await supabase
+      .from("bot_settings")
+      .select("setting_value")
+      .eq("setting_key", `session:${chatId}:active_model`)
+      .single();
+    if (session?.setting_value) {
+      return { model: session.setting_value === "grok" ? "grok" : "gemini" };
+    }
+  }
+
+  // Fall back to global setting
   const { data } = await supabase
     .from("bot_settings")
     .select("setting_value")
     .eq("setting_key", "ai_model")
     .single();
 
-  return data?.setting_value === "grok" ? "grok" : "gemini";
+  if (data?.setting_value) {
+    return { model: data.setting_value === "grok" ? "grok" : "gemini" };
+  }
+
+  // No session exists — default to grok
+  return { model: "grok", session_created: true };
 }
 
 function getModelLabel(model: "gemini" | "grok"): string {
@@ -182,22 +200,38 @@ const AGENT_TOOLS: ToolDef[] = [
     description: "Get overall system status: document counts, pending approvals, active/failed jobs, and current AI model.",
     parameters: { type: "object", properties: {}, required: [] },
     destructive: false,
-    execute: async () => {
-      const { count: docsProcessed } = await supabase.from("documents").select("*", { count: "exact", head: true }).eq("status", "completed");
-      const { count: pendingApprovals } = await supabase.from("telegram_approval_queue").select("*", { count: "exact", head: true }).eq("status", "pending");
-      const { count: activeJobs } = await supabase.from("ingestion_jobs").select("*", { count: "exact", head: true }).in("status", ["queued", "processing", "retrying"]);
-      const { count: failedJobs } = await supabase.from("ingestion_jobs").select("*", { count: "exact", head: true }).eq("status", "failed");
+    execute: async (_args: any, context?: { chatId?: string }) => {
+      const errors: { table: string; query: string; error_message: string }[] = [];
+
+      const q1 = await supabase.from("documents").select("*", { count: "exact", head: true }).eq("status", "completed");
+      if (q1.error) { console.error("get_system_status: documents query error:", q1.error.message); errors.push({ table: "documents", query: "count completed", error_message: q1.error.message }); }
+
+      const q2 = await supabase.from("telegram_approval_queue").select("*", { count: "exact", head: true }).eq("status", "pending");
+      if (q2.error) { console.error("get_system_status: telegram_approval_queue query error:", q2.error.message); errors.push({ table: "telegram_approval_queue", query: "count pending", error_message: q2.error.message }); }
+
+      const q3 = await supabase.from("ingestion_jobs").select("*", { count: "exact", head: true }).in("status", ["queued", "processing", "retrying"]);
+      if (q3.error) { console.error("get_system_status: ingestion_jobs active query error:", q3.error.message); errors.push({ table: "ingestion_jobs", query: "count active", error_message: q3.error.message }); }
+
+      const q4 = await supabase.from("ingestion_jobs").select("*", { count: "exact", head: true }).eq("status", "failed");
+      if (q4.error) { console.error("get_system_status: ingestion_jobs failed query error:", q4.error.message); errors.push({ table: "ingestion_jobs", query: "count failed", error_message: q4.error.message }); }
+
       const oneHourAgo = new Date(Date.now() - 60 * 60 * 1000).toISOString();
-      const { count: recentToolCalls } = await supabase.from("tool_execution_logs").select("*", { count: "exact", head: true }).gte("started_at", oneHourAgo);
-      const model = await getActiveModel();
-      return JSON.stringify({
-        documents_processed: docsProcessed ?? 0,
-        pending_approvals: pendingApprovals ?? 0,
-        active_jobs: activeJobs ?? 0,
-        failed_jobs: failedJobs ?? 0,
-        recent_tool_calls_1h: recentToolCalls ?? 0,
-        active_model: model,
-      });
+      const q5 = await supabase.from("tool_execution_logs").select("*", { count: "exact", head: true }).gte("started_at", oneHourAgo);
+      if (q5.error) { console.error("get_system_status: tool_execution_logs query error:", q5.error.message); errors.push({ table: "tool_execution_logs", query: "count recent 1h", error_message: q5.error.message }); }
+
+      const modelResult = await getActiveModel(context?.chatId);
+
+      const result: Record<string, any> = {
+        documents_processed: q1.count ?? 0,
+        pending_approvals: q2.count ?? 0,
+        active_jobs: q3.count ?? 0,
+        failed_jobs: q4.count ?? 0,
+        recent_tool_calls_1h: q5.count ?? 0,
+        active_model: modelResult.model,
+      };
+      if (modelResult.session_created) result.session_created = true;
+      if (errors.length > 0) result.errors = errors;
+      return JSON.stringify(result);
     },
   },
   {
@@ -740,7 +774,7 @@ async function logToolFailure(logId: string, error: string, startedAt: number) {
 // ─── Execute agentic loop ──────────────────────────────────────
 
 async function executeAgenticLoop(chatId: string, userMessage: string): Promise<void> {
-  const model = await getActiveModel();
+  const { model } = await getActiveModel(chatId);
   const docContext = await getRecentDocContext();
   const requestId = crypto.randomUUID();
 
@@ -984,7 +1018,7 @@ async function handleExplainMore(jobId: string): Promise<string> {
   if (error || !job) return "❌ Job not found.";
   const doc = job.documents as any;
   const prompt = `A document processing job failed. File: ${doc?.file_name || "Unknown"}, MIME: ${doc?.mime_type || "Unknown"}, Attempts: ${job.attempt_count}, Error: ${job.last_error || "No error"}. Explain what went wrong and how to fix it in plain English.`;
-  const model = await getActiveModel();
+  const { model } = await getActiveModel();
   const docContext = await getRecentDocContext();
 
   let response: string;
@@ -1094,7 +1128,7 @@ serve(async (req) => {
     }
 
     if (text.toLowerCase() === "/model") {
-      const activeModel = await getActiveModel();
+      const { model: activeModel } = await getActiveModel(chatId);
       await sendMessage(chatId, `🤖 *${SYSTEM_IDENTITY}*\n\nActive model: *${getModelLabel(activeModel)}*\n🔒 Model switching is locked until you explicitly run /model grok or /model gemini.`);
       return new Response("ok");
     }

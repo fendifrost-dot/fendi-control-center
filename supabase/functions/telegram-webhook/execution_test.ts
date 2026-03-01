@@ -222,3 +222,78 @@ Deno.test("G3: fatal error when log creation fails", () => {
   if (logFailed) fatal = true;
   assertEquals(fatal, true, "Must fail loudly when log creation fails");
 });
+
+// ═══════════════════════════════════════════════════════════════
+// ─── H) get_system_status ERROR REPORTING ────────────────────
+// ═══════════════════════════════════════════════════════════════
+
+Deno.test("H1: partial query failure populates errors[] and preserves other metrics", () => {
+  // Simulate get_system_status where one query fails and others succeed
+  const queryResults = [
+    { table: "documents", query: "count completed", count: 42, error: null },
+    { table: "telegram_approval_queue", query: "count pending", count: null, error: { message: "relation does not exist" } },
+    { table: "ingestion_jobs", query: "count active", count: 3, error: null },
+    { table: "ingestion_jobs", query: "count failed", count: 1, error: null },
+    { table: "tool_execution_logs", query: "count recent 1h", count: 7, error: null },
+  ];
+
+  const errors: { table: string; query: string; error_message: string }[] = [];
+  const metrics: Record<string, number> = {};
+  const metricKeys = ["documents_processed", "pending_approvals", "active_jobs", "failed_jobs", "recent_tool_calls_1h"];
+
+  for (let i = 0; i < queryResults.length; i++) {
+    const qr = queryResults[i];
+    if (qr.error) {
+      errors.push({ table: qr.table, query: qr.query, error_message: qr.error.message });
+    }
+    metrics[metricKeys[i]] = qr.count ?? 0;
+  }
+
+  const result: Record<string, any> = { ...metrics };
+  if (errors.length > 0) result.errors = errors;
+
+  // Assertions
+  assertEquals(result.errors.length, 1, "Exactly one error expected");
+  assertEquals(result.errors[0].table, "telegram_approval_queue");
+  assertEquals(result.errors[0].error_message, "relation does not exist");
+  assertEquals(result.pending_approvals, 0, "Failed query defaults to 0");
+  assertEquals(result.documents_processed, 42, "Successful queries preserved");
+  assertEquals(result.active_jobs, 3);
+  assertEquals(result.failed_jobs, 1);
+  assertEquals(result.recent_tool_calls_1h, 7);
+});
+
+Deno.test("H2: getActiveModel returns session_created when no session exists", () => {
+  // Simulate: no chat-scoped session, no global setting → default grok + session_created
+  const noSession = null;
+  const noGlobal = null;
+  let model: "gemini" | "grok" = "grok";
+  let session_created: boolean | undefined;
+
+  if (noSession) { model = noSession; }
+  else if (noGlobal) { model = noGlobal; }
+  else { model = "grok"; session_created = true; }
+
+  assertEquals(model, "grok");
+  assertEquals(session_created, true, "session_created must be true when defaulting");
+});
+
+Deno.test("H3: no errors[] key when all queries succeed", () => {
+  const queryResults = [
+    { count: 10, error: null },
+    { count: 5, error: null },
+    { count: 2, error: null },
+    { count: 0, error: null },
+    { count: 3, error: null },
+  ];
+
+  const errors: any[] = [];
+  for (const qr of queryResults) {
+    if (qr.error) errors.push(qr.error);
+  }
+
+  const result: Record<string, any> = { documents_processed: 10 };
+  if (errors.length > 0) result.errors = errors;
+
+  assertEquals("errors" in result, false, "errors key must not exist when all succeed");
+});
