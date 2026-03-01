@@ -360,6 +360,48 @@
       "safe_failure_behavior": "Job not found → '❌ Job not found.'",
       "evidence_produced": {},
       "approval_points": []
+    },
+    {
+      "workflow_name": "active_jobs_summary",
+      "trigger_examples": [
+        "briefly describe active jobs",
+        "what are the active jobs?",
+        "summarize the 869 jobs",
+        "break down the active jobs",
+        "what's processing right now?"
+      ],
+      "preconditions": [],
+      "steps": [
+        {
+          "step": 1,
+          "action": "logToolAttempt for get_active_jobs_summary",
+          "writes_to": "tool_execution_logs"
+        },
+        {
+          "step": 2,
+          "action": "Execute get_active_jobs_summary — queries ingestion_jobs with status IN ('processing','queued'), aggregates by_status, by_job_type, age_buckets, top_errors, examples",
+          "reads_from": ["ingestion_jobs"]
+        },
+        {
+          "step": 3,
+          "action": "logToolSuccess or logToolFailure",
+          "writes_to": "tool_execution_logs"
+        },
+        {
+          "step": 4,
+          "action": "Feed structured JSON to AI for concise human-readable summary. Include: total count, status breakdown, age distribution, top errors if any."
+        },
+        {
+          "step": 5,
+          "action": "If user requests detail, offer drilldowns: list_failed_jobs (for failures), retry_failed_job (for retries), list_drive_files (for file context)"
+        }
+      ],
+      "stop_conditions": ["Summary sent to user with structured breakdown"],
+      "safe_failure_behavior": "If ingestion_jobs query fails: return HARD ERROR with error message. No silent fallback to '0 active jobs'.",
+      "evidence_produced": {
+        "tool_execution_logs": "1 row with status='succeeded' and response_json containing full breakdown"
+      },
+      "approval_points": []
     }
   ]
 }

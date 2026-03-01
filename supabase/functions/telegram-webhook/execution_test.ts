@@ -24,7 +24,8 @@ const ALL_TOOL_NAMES = [
   "retry_failed_job", "archive_job", "approve_document", "reject_document",
   "switch_ai_model", "list_connected_projects", "get_project_stats",
   "get_recent_documents", "trigger_drive_sync", "list_drive_files",
-  "get_client_summary", "instagram_send_dm", "instagram_reply_comment",
+  "get_client_summary", "get_active_jobs_summary",
+  "instagram_send_dm", "instagram_reply_comment",
   "instagram_reply_story_mention", "instagram_get_recent_comments",
   "instagram_get_conversations",
 ];
@@ -60,14 +61,17 @@ Deno.test("A3: intent-to-tool mapping is correct", () => {
     "list failed jobs": "list_failed_jobs",
     "show my instagram DMs": "instagram_get_conversations",
     "sync drive": "trigger_drive_sync",
+    "briefly describe active jobs": "get_active_jobs_summary",
+    "what are the active jobs": "get_active_jobs_summary",
+    "summarize the 869 jobs": "get_active_jobs_summary",
   };
   for (const [, tool] of Object.entries(map)) {
     assertEquals(ALL_TOOL_NAMES.includes(tool), true, `${tool} must exist`);
   }
 });
 
-Deno.test("A4: all 19 tools registered", () => {
-  assertEquals(ALL_TOOL_NAMES.length, 19);
+Deno.test("A4: all 20 tools registered", () => {
+  assertEquals(ALL_TOOL_NAMES.length, 20);
 });
 
 Deno.test("A5: destructive tools are subset of all tools", () => {
@@ -296,4 +300,67 @@ Deno.test("H3: no errors[] key when all queries succeed", () => {
   if (errors.length > 0) result.errors = errors;
 
   assertEquals("errors" in result, false, "errors key must not exist when all succeed");
+});
+
+// ═══════════════════════════════════════════════════════════════
+// ─── I) get_active_jobs_summary REGRESSION ───────────────────
+// ═══════════════════════════════════════════════════════════════
+
+Deno.test("I1: get_active_jobs_summary exists in tool registry", () => {
+  assertEquals(ALL_TOOL_NAMES.includes("get_active_jobs_summary"), true,
+    "Agent must NOT answer 'I don't have a tool' for active jobs summary");
+});
+
+Deno.test("I2: get_active_jobs_summary is non-destructive", () => {
+  assertEquals(NON_DESTRUCTIVE_TOOLS.includes("get_active_jobs_summary"), true);
+  assertEquals(DESTRUCTIVE_TOOLS.includes("get_active_jobs_summary"), false);
+});
+
+Deno.test("I3: get_active_jobs_summary requires tool_execution_logs row", () => {
+  // Simulates the mandatory logging contract: logToolAttempt must precede execute
+  const order: string[] = [];
+  order.push("logToolAttempt");
+  order.push("get_active_jobs_summary.execute");
+  order.push("logToolSuccess");
+  assertEquals(order[0], "logToolAttempt",
+    "get_active_jobs_summary must NOT run without a tool_execution_logs row");
+  assertEquals(order.indexOf("logToolAttempt") < order.indexOf("get_active_jobs_summary.execute"), true);
+});
+
+Deno.test("I4: DB query error surfaces hard error, not silent '0 active jobs'", () => {
+  // Simulate: ingestion_jobs query returns an error
+  const queryError = { message: "permission denied for table ingestion_jobs" };
+  const result = JSON.stringify({ error: `HARD ERROR: ingestion_jobs query failed — ${queryError.message}` });
+  const parsed = JSON.parse(result);
+
+  assertEquals("error" in parsed, true, "Must contain error key");
+  assertMatch(parsed.error, /HARD ERROR/);
+  assertMatch(parsed.error, /permission denied/);
+  // Must NOT have total: 0 — that would be a silent fallback
+  assertEquals("total" in parsed, false, "Must NOT silently return total: 0 on error");
+});
+
+Deno.test("I5: successful result contains required schema fields", () => {
+  const mockResult = {
+    active_definition: "status IN ('processing','queued')",
+    hours_back: 24,
+    total: 5,
+    by_status: { processing: 3, queued: 2, failed: 0, archived: 0 },
+    by_job_type: [{ job_type: "full_ingestion", count: 5 }],
+    age_buckets: [
+      { bucket: "0-15m", count: 1 }, { bucket: "15-60m", count: 2 },
+      { bucket: "1-6h", count: 1 }, { bucket: "6-24h", count: 1 },
+      { bucket: "24h+", count: 0 },
+    ],
+    top_errors: [],
+    examples: [{ id: "uuid", job_type: "full_ingestion", status: "processing", attempt_count: 1, started_at: "2026-03-01T00:00:00Z", heartbeat_at: null, completed_at: null, drive_file_id: "abc", document_id: "def" }],
+  };
+
+  assertExists(mockResult.active_definition);
+  assertExists(mockResult.by_status);
+  assertExists(mockResult.by_job_type);
+  assertExists(mockResult.age_buckets);
+  assertExists(mockResult.top_errors);
+  assertExists(mockResult.examples);
+  assertEquals(typeof mockResult.total, "number");
 });

@@ -475,6 +475,55 @@
       "approval_mechanism": null,
       "destructive": false,
       "source_line": 456
+    },
+    {
+      "tool_name": "get_active_jobs_summary",
+      "purpose": "Returns a structured breakdown of active ingestion jobs: counts by status, job type, age buckets, top errors, and example rows. Derived from real ingestion_jobs rows.",
+      "when_to_use": "User asks to describe, summarize, or break down active/queued jobs. E.g. 'what are the active jobs', 'briefly describe active jobs', 'summarize the 869 jobs'.",
+      "required_args": {},
+      "optional_args": {
+        "status_filter": {
+          "type": "string",
+          "enum": ["processing", "queued", "failed", "archived"],
+          "description": "Filter to a specific status. Default: shows processing+queued.",
+          "example": "failed"
+        },
+        "hours_back": {
+          "type": "number",
+          "description": "Only include jobs created in the last N hours. Default: 24.",
+          "example": 48
+        },
+        "limit": {
+          "type": "number",
+          "description": "Max example rows to return (max 50, default 50).",
+          "example": 10
+        }
+      },
+      "returns": {
+        "active_definition": "string — SQL predicate used e.g. \"status IN ('processing','queued')\"",
+        "hours_back": "number — hours window applied",
+        "total": "number — total matching jobs (may exceed limit)",
+        "by_status": "{ processing: number, queued: number, failed: number, archived: number }",
+        "by_job_type": "[{ job_type: string, count: number }]",
+        "age_buckets": "[{ bucket: '0-15m|15-60m|1-6h|6-24h|24h+', count: number }]",
+        "top_errors": "[{ last_error: string, count: number }] — top 5 truncated to 200 chars",
+        "examples": "[{ id, job_type, status, attempt_count, started_at, heartbeat_at, completed_at, drive_file_id, document_id }] — first 5 rows"
+      },
+      "side_effects": "read_only",
+      "permissions_secrets_used": ["SUPABASE_URL", "SUPABASE_SERVICE_ROLE_KEY"],
+      "failure_modes": [
+        {
+          "error": "ingestion_jobs query fails",
+          "agent_response": "Returns { error: 'HARD ERROR: ingestion_jobs query failed — {message}' }. No silent fallback to 0."
+        }
+      ],
+      "logging": {
+        "tool_execution_logs": "1 row: attempted → succeeded or failed"
+      },
+      "approval_required": false,
+      "approval_mechanism": null,
+      "destructive": false,
+      "source_line": 474
     }
   ],
   "edge_functions": [
