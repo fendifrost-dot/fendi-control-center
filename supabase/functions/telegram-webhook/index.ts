@@ -722,15 +722,18 @@ async function agenticGeminiCall(
 ): Promise<{ text: string; toolCalls: Array<{ name: string; args: any }> }> {
   const systemPrompt = `You are the ${SYSTEM_IDENTITY}. You serve Fendi Frost as a personal command center assistant.
 
-CRITICAL INSTRUCTION: You MUST use your available tools to fulfill requests. NEVER just describe what you would do — actually call the function. If the user asks to see comments, call the tool. If they ask to send a message, call the tool. Do NOT respond with text saying "I'll do X" without calling the corresponding function.
+CRITICAL RULES — MANDATORY:
+1. NO TOOL, NO CLAIM: You MUST use your available tools to fulfill requests. NEVER describe what you would do — actually call the function. If the user asks to see comments, call the tool. Do NOT respond with text saying "I'll do X" without calling the corresponding function.
+2. NO WORKFLOW, NO ACTION: If the user's request does not correspond to ANY of your available tools, respond EXACTLY with: "No internal workflow exists for that request yet." and optionally offer to create one.
+3. EVIDENCE OVER CLAIMS: All data must come from tool calls. Never invent counts, names, or metrics.
+4. For destructive actions (retry, archive, approve, reject, Instagram DMs/replies), ALWAYS call the tool — the system will handle confirmation.
 
 Available capabilities via tools:
-- System status, job management, document approvals
+- System status, job management (active jobs summary, failed jobs), document approvals
 - Instagram: send DMs, reply to comments, reply to story mentions, view conversations & comments
 - Drive sync, file listing, client summaries
 - Connected project stats
 
-For destructive actions (retry, archive, approve, reject, Instagram DMs/replies), ALWAYS call the tool — the system will handle confirmation.
 Be concise, professional, and use emoji sparingly.
 
 Recent Documents Context:
@@ -784,15 +787,18 @@ async function agenticGrokCall(
 ): Promise<{ text: string; toolCalls: Array<{ name: string; args: any }> }> {
   const systemPrompt = `You are the ${SYSTEM_IDENTITY}. You serve Fendi Frost as a personal command center assistant.
 
-CRITICAL INSTRUCTION: You MUST use your available tools to fulfill requests. NEVER just describe what you would do — actually call the function. If the user asks to see comments, call the tool. If they ask to send a message, call the tool. Do NOT respond with text saying "I'll do X" without calling the corresponding function.
+CRITICAL RULES — MANDATORY:
+1. NO TOOL, NO CLAIM: You MUST use your available tools to fulfill requests. NEVER describe what you would do — actually call the function. If the user asks to see comments, call the tool. Do NOT respond with text saying "I'll do X" without calling the corresponding function.
+2. NO WORKFLOW, NO ACTION: If the user's request does not correspond to ANY of your available tools, respond EXACTLY with: "No internal workflow exists for that request yet." and optionally offer to create one.
+3. EVIDENCE OVER CLAIMS: All data must come from tool calls. Never invent counts, names, or metrics.
+4. For destructive actions (retry, archive, approve, reject, Instagram DMs/replies), ALWAYS call the tool — the system will handle confirmation.
 
 Available capabilities via tools:
-- System status, job management, document approvals
+- System status, job management (active jobs summary, failed jobs), document approvals
 - Instagram: send DMs, reply to comments, reply to story mentions, view conversations & comments
 - Drive sync, file listing, client summaries
 - Connected project stats
 
-For destructive actions (retry, archive, approve, reject, Instagram DMs/replies), ALWAYS call the tool — the system will handle confirmation.
 Be witty, direct, and concise. Use emoji sparingly.
 
 Recent Documents Context:
@@ -920,7 +926,8 @@ async function executeAgenticLoop(chatId: string, userMessage: string): Promise<
   for (const tc of result.toolCalls) {
     const tool = AGENT_TOOLS.find(t => t.name === tc.name);
     if (!tool) {
-      toolResults.push(`❓ Unknown tool: ${tc.name}`);
+      console.error(`GUARDRAIL: AI tried to call unregistered tool '${tc.name}' — blocked.`);
+      toolResults.push(`🚫 Tool '${tc.name}' is not in the tool registry. No internal workflow exists for that request yet.`);
       continue;
     }
 
