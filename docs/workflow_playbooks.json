@@ -1,0 +1,365 @@
+{
+  "_meta": {
+    "generated_from": "supabase/functions/telegram-webhook/index.ts agentic loop + tool definitions",
+    "generated_at": "2026-03-01",
+    "scope": "Internal workflows only"
+  },
+  "workflows": [
+    {
+      "workflow_name": "system_status_check",
+      "trigger_examples": [
+        "what's the system status?",
+        "how's the system doing?",
+        "status",
+        "/status",
+        "what's broken today?"
+      ],
+      "preconditions": [],
+      "steps": [
+        {
+          "step": 1,
+          "action": "logToolAttempt(requestId, 'get_system_status', {}, model, chatId, userMessage)",
+          "writes_to": "tool_execution_logs"
+        },
+        {
+          "step": 2,
+          "action": "Execute get_system_status tool — queries documents, telegram_approval_queue, ingestion_jobs, tool_execution_logs with exact count",
+          "reads_from": ["documents", "telegram_approval_queue", "ingestion_jobs", "tool_execution_logs", "bot_settings"]
+        },
+        {
+          "step": 3,
+          "action": "logToolSuccess or logToolFailure",
+          "writes_to": "tool_execution_logs"
+        },
+        {
+          "step": 4,
+          "action": "Feed JSON result to AI for human-readable summary, send to Telegram"
+        }
+      ],
+      "stop_conditions": ["All count queries complete (with or without errors)"],
+      "safe_failure_behavior": "Individual query failures are captured in errors[] array; other metrics still returned. Console.error logged for each failure.",
+      "evidence_produced": {
+        "tool_execution_logs": "1 row with status='succeeded' and response_json containing all metrics",
+        "errors_array": "Present in response if any query failed"
+      },
+      "approval_points": []
+    },
+    {
+      "workflow_name": "model_switch",
+      "trigger_examples": [
+        "/model grok",
+        "/model gemini",
+        "switch to grok",
+        "use gemini",
+        "change model to grok"
+      ],
+      "preconditions": ["Must be an explicit model switch request (validated by isExplicitModelSwitchRequest)"],
+      "steps": [
+        {
+          "step": 1,
+          "action": "Regex match /model (grok|gemini) — handled BEFORE agentic loop"
+        },
+        {
+          "step": 2,
+          "action": "UPSERT bot_settings SET setting_value={model} WHERE setting_key='ai_model'",
+          "writes_to": "bot_settings"
+        },
+        {
+          "step": 3,
+          "action": "Send confirmation message to Telegram"
+        }
+      ],
+      "stop_conditions": ["bot_settings updated"],
+      "safe_failure_behavior": "If AI tries to call switch_ai_model without explicit user request, the guard returns '🔒 Model switching is locked'",
+      "evidence_produced": {
+        "bot_settings": "Row with setting_key='ai_model' updated"
+      },
+      "approval_points": ["Model switch via agentic loop requires inline button confirmation (destructive=true)"]
+    },
+    {
+      "workflow_name": "document_approval",
+      "trigger_examples": [
+        "approve all pending documents",
+        "approve that document",
+        "what's pending for approval?"
+      ],
+      "preconditions": ["telegram_approval_queue must have entries with status='pending'"],
+      "steps": [
+        {
+          "step": 1,
+          "action": "AI calls list_pending_approvals to show pending items",
+          "reads_from": ["telegram_approval_queue", "documents", "clients"]
+        },
+        {
+          "step": 2,
+          "action": "AI calls approve_document(queue_id) — marked destructive, generates confirmation button"
+        },
+        {
+          "step": 3,
+          "action": "User clicks ✅ confirm button → handleAgentConfirm executes approve_document",
+          "writes_to": ["observations", "telegram_approval_queue"]
+        }
+      ],
+      "stop_conditions": ["Queue entry status changed to 'approved' or 'rejected'"],
+      "safe_failure_behavior": "If queue_id not found: '❌ Approval record not found.' If already processed: 'Already processed.'",
+      "evidence_produced": {
+        "observations": "is_verified=true, verified_at set, verified_via='telegram'",
+        "telegram_approval_queue": "status='approved', resolved_at set",
+        "tool_execution_logs": "1 row for list_pending_approvals + 1 row for approve_document"
+      },
+      "approval_points": ["Inline Telegram button required before approve_document executes"]
+    },
+    {
+      "workflow_name": "document_rejection",
+      "trigger_examples": [
+        "reject that document",
+        "reject document for client X"
+      ],
+      "preconditions": ["telegram_approval_queue must have entry with status='pending'"],
+      "steps": [
+        {
+          "step": 1,
+          "action": "AI calls reject_document(queue_id) — destructive, generates confirmation button"
+        },
+        {
+          "step": 2,
+          "action": "User confirms → handleAgentConfirm executes reject_document",
+          "writes_to": ["telegram_approval_queue"]
+        }
+      ],
+      "stop_conditions": ["Queue entry status changed to 'rejected'"],
+      "safe_failure_behavior": "If not found or already processed: error returned",
+      "evidence_produced": {
+        "telegram_approval_queue": "status='rejected', resolved_at set",
+        "tool_execution_logs": "1 row"
+      },
+      "approval_points": ["Inline Telegram button"]
+    },
+    {
+      "workflow_name": "failed_job_management",
+      "trigger_examples": [
+        "show failed jobs",
+        "what failed?",
+        "retry that job",
+        "archive all failed jobs"
+      ],
+      "preconditions": ["ingestion_jobs must have entries with status='failed'"],
+      "steps": [
+        {
+          "step": 1,
+          "action": "AI calls list_failed_jobs",
+          "reads_from": ["ingestion_jobs", "documents", "clients"]
+        },
+        {
+          "step": 2,
+          "action": "If retry requested: AI calls retry_failed_job(job_id) — destructive, confirmation required"
+        },
+        {
+          "step": 3,
+          "action": "On confirm: UPDATE ingestion_jobs SET status='queued', POST to process-document edge function",
+          "writes_to": ["ingestion_jobs", "documents"]
+        }
+      ],
+      "stop_conditions": ["Job re-queued and process-document triggered, OR job archived"],
+      "safe_failure_behavior": "Job not found → error. Job not failed → 'can only retry failed jobs'. process-document trigger failure → logged but job still re-queued.",
+      "evidence_produced": {
+        "ingestion_jobs": "status changed to 'queued' or 'archived'",
+        "tool_execution_logs": "1 row per tool call"
+      },
+      "approval_points": ["Inline Telegram button for retry_failed_job and archive_job"]
+    },
+    {
+      "workflow_name": "drive_sync",
+      "trigger_examples": [
+        "sync drive",
+        "scan for new files",
+        "check drive for updates",
+        "trigger drive sync"
+      ],
+      "preconditions": ["Google_Cloud_Key and DRIVE_FOLDER_ID secrets must be configured"],
+      "steps": [
+        {
+          "step": 1,
+          "action": "logToolAttempt for trigger_drive_sync",
+          "writes_to": "tool_execution_logs"
+        },
+        {
+          "step": 2,
+          "action": "POST to drive-sync edge function",
+          "reads_from": ["Google Drive API"],
+          "writes_to": ["clients", "documents", "ingestion_jobs", "drive_sync_runs", "drive_sync_events"]
+        },
+        {
+          "step": 3,
+          "action": "logToolSuccess with sync summary",
+          "writes_to": "tool_execution_logs"
+        },
+        {
+          "step": 4,
+          "action": "AI summarizes results and sends to Telegram"
+        }
+      ],
+      "stop_conditions": ["drive-sync returns summary JSON"],
+      "safe_failure_behavior": "HTTP error → '❌ Drive sync failed ({status})'. Network error → '❌ Drive sync error: {error}'",
+      "evidence_produced": {
+        "drive_sync_runs": "1 new row with status='completed' or 'completed_with_errors'",
+        "drive_sync_events": "1 row per file processed",
+        "ingestion_jobs": "1 row per new/updated document",
+        "tool_execution_logs": "1 row"
+      },
+      "approval_points": []
+    },
+    {
+      "workflow_name": "document_ingestion_processing",
+      "trigger_examples": [
+        "process pending documents",
+        "run ingestion"
+      ],
+      "preconditions": ["ingestion_jobs with status='queued' must exist", "Documents must have been synced from Drive"],
+      "steps": [
+        {
+          "step": 1,
+          "action": "process-document edge function picks up queued job"
+        },
+        {
+          "step": 2,
+          "action": "Downloads file from Google Drive (PDF or Google Doc → PDF export)"
+        },
+        {
+          "step": 3,
+          "action": "Sends to Gemini for analysis with structured extraction prompt"
+        },
+        {
+          "step": 4,
+          "action": "Stores observations in observations table (append-only)",
+          "writes_to": ["observations", "extracted_pages", "documents", "ingestion_jobs"]
+        },
+        {
+          "step": 5,
+          "action": "Sends Telegram notification via notify-telegram with approval buttons",
+          "writes_to": ["telegram_approval_queue"]
+        }
+      ],
+      "stop_conditions": ["ingestion_job status='completed' and Telegram notification sent"],
+      "safe_failure_behavior": "On failure: job status='failed', last_error set, SOS notification sent to Telegram with retry/archive/explain buttons",
+      "evidence_produced": {
+        "observations": "New rows with extracted data",
+        "documents": "status='completed'",
+        "ingestion_jobs": "status='completed', completed_at set",
+        "telegram_approval_queue": "New pending entry"
+      },
+      "approval_points": ["Document approval via Telegram buttons after processing"]
+    },
+    {
+      "workflow_name": "client_overview",
+      "trigger_examples": [
+        "show all clients",
+        "client summary",
+        "how many documents per client?"
+      ],
+      "preconditions": [],
+      "steps": [
+        {
+          "step": 1,
+          "action": "AI calls get_client_summary",
+          "reads_from": ["clients", "documents"]
+        },
+        {
+          "step": 2,
+          "action": "AI formats and sends summary to Telegram"
+        }
+      ],
+      "stop_conditions": ["Summary sent"],
+      "safe_failure_behavior": "No clients → 'No clients found.'",
+      "evidence_produced": {
+        "tool_execution_logs": "1 row"
+      },
+      "approval_points": []
+    },
+    {
+      "workflow_name": "file_browsing",
+      "trigger_examples": [
+        "show all files",
+        "list documents for client X",
+        "show pending files",
+        "what files do we have?"
+      ],
+      "preconditions": [],
+      "steps": [
+        {
+          "step": 1,
+          "action": "AI calls list_drive_files with optional client_name, status, limit filters",
+          "reads_from": ["documents", "clients"]
+        },
+        {
+          "step": 2,
+          "action": "AI formats results and sends to Telegram"
+        }
+      ],
+      "stop_conditions": ["Results sent"],
+      "safe_failure_behavior": "No matches → 'No files found matching your criteria.'",
+      "evidence_produced": {
+        "tool_execution_logs": "1 row"
+      },
+      "approval_points": []
+    },
+    {
+      "workflow_name": "connected_project_stats",
+      "trigger_examples": [
+        "how are my projects doing?",
+        "project stats",
+        "check connected projects",
+        "/projects",
+        "/stats"
+      ],
+      "preconditions": ["connected_projects table must have active entries"],
+      "steps": [
+        {
+          "step": 1,
+          "action": "AI calls list_connected_projects or get_project_stats",
+          "reads_from": ["connected_projects"]
+        },
+        {
+          "step": 2,
+          "action": "For get_project_stats: HTTP GET to each project's /functions/v1/project-stats endpoint"
+        },
+        {
+          "step": 3,
+          "action": "AI formats and sends summary to Telegram"
+        }
+      ],
+      "stop_conditions": ["Stats gathered and sent"],
+      "safe_failure_behavior": "No projects → 'No connected projects.' Unreachable project → reachable=false in response.",
+      "evidence_produced": {
+        "tool_execution_logs": "1 row per tool call"
+      },
+      "approval_points": []
+    },
+    {
+      "workflow_name": "error_explanation",
+      "trigger_examples": [
+        "explain that error",
+        "what went wrong with job X?"
+      ],
+      "preconditions": ["A failed ingestion_job must exist"],
+      "steps": [
+        {
+          "step": 1,
+          "action": "handleExplainMore(jobId) — fetches job + document details"
+        },
+        {
+          "step": 2,
+          "action": "Sends error context to active AI model for plain-English explanation"
+        },
+        {
+          "step": 3,
+          "action": "Returns formatted troubleshooting response"
+        }
+      ],
+      "stop_conditions": ["Explanation sent"],
+      "safe_failure_behavior": "Job not found → '❌ Job not found.'",
+      "evidence_produced": {},
+      "approval_points": []
+    }
+  ]
+}

@@ -1,0 +1,524 @@
+{
+  "_meta": {
+    "generated_from": "supabase/functions/telegram-webhook/index.ts AGENT_TOOLS array",
+    "generated_at": "2026-03-01",
+    "scope": "Internal Lovable project tools only (no Instagram tools)"
+  },
+  "tools": [
+    {
+      "tool_name": "get_system_status",
+      "purpose": "Returns real-time system metrics: document counts, pending approvals, active/failed jobs, recent tool calls, and active AI model.",
+      "when_to_use": "User asks about system health, status, what's happening, or overview.",
+      "required_args": {},
+      "optional_args": {},
+      "returns": {
+        "documents_processed": "number — count from documents WHERE status='completed'",
+        "pending_approvals": "number — count from telegram_approval_queue WHERE status='pending'",
+        "active_jobs": "number — count from ingestion_jobs WHERE status IN ('queued','processing','retrying')",
+        "failed_jobs": "number — count from ingestion_jobs WHERE status='failed'",
+        "recent_tool_calls_1h": "number — count from tool_execution_logs WHERE started_at >= 1 hour ago",
+        "active_model": "string — 'gemini' or 'grok'",
+        "session_created": "boolean (optional) — true if no session existed and default was used",
+        "errors": "array (optional) — [{table, query, error_message}] for any failed count queries"
+      },
+      "side_effects": "read_only",
+      "permissions_secrets_used": ["SUPABASE_URL", "SUPABASE_SERVICE_ROLE_KEY"],
+      "failure_modes": [
+        {
+          "error": "Individual count query fails",
+          "agent_response": "Metric falls back to 0 but error is included in errors[] array and logged to console"
+        }
+      ],
+      "logging": {
+        "tool_execution_logs": "1 row: attempted → succeeded (with JSON result) or failed"
+      },
+      "approval_required": false,
+      "approval_mechanism": null,
+      "destructive": false,
+      "source_line": 198
+    },
+    {
+      "tool_name": "list_pending_approvals",
+      "purpose": "Lists up to 10 documents waiting for Telegram approval with client names and observation counts.",
+      "when_to_use": "User asks about pending approvals, what needs review, or what's waiting.",
+      "required_args": {},
+      "optional_args": {},
+      "returns": {
+        "type": "array",
+        "items": {
+          "id": "uuid — approval queue entry ID",
+          "file_name": "string — document file name",
+          "client": "string — client name",
+          "observation_count": "number"
+        }
+      },
+      "side_effects": "read_only",
+      "permissions_secrets_used": ["SUPABASE_URL", "SUPABASE_SERVICE_ROLE_KEY"],
+      "failure_modes": [
+        {
+          "error": "No pending approvals",
+          "agent_response": "Returns empty array []"
+        }
+      ],
+      "logging": {
+        "tool_execution_logs": "1 row: attempted → succeeded or failed"
+      },
+      "approval_required": false,
+      "approval_mechanism": null,
+      "destructive": false,
+      "source_line": 238
+    },
+    {
+      "tool_name": "list_failed_jobs",
+      "purpose": "Lists up to 10 failed ingestion jobs with file names, error messages, and attempt counts.",
+      "when_to_use": "User asks about failures, broken jobs, what went wrong.",
+      "required_args": {},
+      "optional_args": {},
+      "returns": {
+        "type": "array",
+        "items": {
+          "id": "uuid — job ID",
+          "file_name": "string",
+          "client": "string",
+          "attempt_count": "number",
+          "last_error": "string"
+        }
+      },
+      "side_effects": "read_only",
+      "permissions_secrets_used": ["SUPABASE_URL", "SUPABASE_SERVICE_ROLE_KEY"],
+      "failure_modes": [
+        {
+          "error": "No failed jobs",
+          "agent_response": "Returns empty array []"
+        }
+      ],
+      "logging": {
+        "tool_execution_logs": "1 row: attempted → succeeded or failed"
+      },
+      "approval_required": false,
+      "approval_mechanism": null,
+      "destructive": false,
+      "source_line": 258
+    },
+    {
+      "tool_name": "retry_failed_job",
+      "purpose": "Re-queues a specific failed ingestion job and triggers the process-document edge function.",
+      "when_to_use": "User asks to retry a specific failed job by ID.",
+      "required_args": {
+        "job_id": {
+          "type": "string",
+          "description": "UUID of the failed job",
+          "example": "a1b2c3d4-e5f6-7890-abcd-ef1234567890"
+        }
+      },
+      "optional_args": {},
+      "returns": "string — success message with file name or error",
+      "side_effects": "write",
+      "permissions_secrets_used": ["SUPABASE_URL", "SUPABASE_SERVICE_ROLE_KEY", "SUPABASE_PUBLISHABLE_KEY"],
+      "failure_modes": [
+        {
+          "error": "Job not found",
+          "agent_response": "Returns '❌ Job not found.'"
+        },
+        {
+          "error": "Job is not in 'failed' status",
+          "agent_response": "Returns 'Job is currently {status}, can only retry failed jobs.'"
+        },
+        {
+          "error": "process-document function invocation fails",
+          "agent_response": "Job is still re-queued; trigger failure is logged to console"
+        }
+      ],
+      "logging": {
+        "tool_execution_logs": "1 row: attempted → succeeded or failed",
+        "ingestion_jobs": "UPDATE status='queued', clear last_error/started_at/completed_at",
+        "documents": "UPDATE status='pending' on associated document"
+      },
+      "approval_required": true,
+      "approval_mechanism": "Inline Telegram button (agent_confirm:{actionId} / agent_cancel:{actionId})",
+      "destructive": true,
+      "source_line": 279
+    },
+    {
+      "tool_name": "archive_job",
+      "purpose": "Archives a job so it won't be retried. Sets status to 'archived'.",
+      "when_to_use": "User asks to archive or dismiss a job.",
+      "required_args": {
+        "job_id": {
+          "type": "string",
+          "description": "UUID of the job to archive",
+          "example": "a1b2c3d4-e5f6-7890-abcd-ef1234567890"
+        }
+      },
+      "optional_args": {},
+      "returns": "string — confirmation with file name",
+      "side_effects": "write",
+      "permissions_secrets_used": ["SUPABASE_URL", "SUPABASE_SERVICE_ROLE_KEY"],
+      "failure_modes": [
+        {
+          "error": "Job not found",
+          "agent_response": "Returns '❌ Job not found.'"
+        }
+      ],
+      "logging": {
+        "tool_execution_logs": "1 row: attempted → succeeded or failed",
+        "ingestion_jobs": "UPDATE status='archived', completed_at=now()"
+      },
+      "approval_required": true,
+      "approval_mechanism": "Inline Telegram button",
+      "destructive": true,
+      "source_line": 306
+    },
+    {
+      "tool_name": "approve_document",
+      "purpose": "Approves a pending document: verifies all its observations and marks the queue entry as approved.",
+      "when_to_use": "User asks to approve a specific document from the approval queue.",
+      "required_args": {
+        "queue_id": {
+          "type": "string",
+          "description": "UUID of the telegram_approval_queue entry",
+          "example": "a1b2c3d4-e5f6-7890-abcd-ef1234567890"
+        }
+      },
+      "optional_args": {},
+      "returns": "string — count of verified observations",
+      "side_effects": "write",
+      "permissions_secrets_used": ["SUPABASE_URL", "SUPABASE_SERVICE_ROLE_KEY"],
+      "failure_modes": [
+        {
+          "error": "Queue entry not found",
+          "agent_response": "Returns '❌ Approval record not found.'"
+        },
+        {
+          "error": "Already processed",
+          "agent_response": "Returns 'Already processed.'"
+        }
+      ],
+      "logging": {
+        "tool_execution_logs": "1 row: attempted → succeeded or failed",
+        "observations": "UPDATE is_verified=true, verified_at, verified_via='telegram' for all matching document+client",
+        "telegram_approval_queue": "UPDATE status='approved', resolved_at"
+      },
+      "approval_required": true,
+      "approval_mechanism": "Inline Telegram button",
+      "destructive": true,
+      "source_line": 318
+    },
+    {
+      "tool_name": "reject_document",
+      "purpose": "Rejects a pending document, leaving observations unverified.",
+      "when_to_use": "User asks to reject a document from the approval queue.",
+      "required_args": {
+        "queue_id": {
+          "type": "string",
+          "description": "UUID of the telegram_approval_queue entry",
+          "example": "a1b2c3d4-e5f6-7890-abcd-ef1234567890"
+        }
+      },
+      "optional_args": {},
+      "returns": "string — rejection confirmation",
+      "side_effects": "write",
+      "permissions_secrets_used": ["SUPABASE_URL", "SUPABASE_SERVICE_ROLE_KEY"],
+      "failure_modes": [
+        {
+          "error": "Queue entry not found",
+          "agent_response": "Returns '❌ Approval record not found.'"
+        },
+        {
+          "error": "Already processed",
+          "agent_response": "Returns 'Already processed.'"
+        }
+      ],
+      "logging": {
+        "tool_execution_logs": "1 row: attempted → succeeded or failed",
+        "telegram_approval_queue": "UPDATE status='rejected', resolved_at"
+      },
+      "approval_required": true,
+      "approval_mechanism": "Inline Telegram button",
+      "destructive": true,
+      "source_line": 332
+    },
+    {
+      "tool_name": "switch_ai_model",
+      "purpose": "Switches the active AI model between 'gemini' and 'grok'.",
+      "when_to_use": "ONLY when user explicitly requests a model switch via /model grok, /model gemini, or 'switch to grok/gemini'.",
+      "required_args": {
+        "model": {
+          "type": "string",
+          "enum": ["gemini", "grok"],
+          "description": "The model to switch to",
+          "example": "grok"
+        }
+      },
+      "optional_args": {},
+      "returns": "string — confirmation of switch",
+      "side_effects": "write",
+      "permissions_secrets_used": ["SUPABASE_URL", "SUPABASE_SERVICE_ROLE_KEY"],
+      "failure_modes": [],
+      "logging": {
+        "tool_execution_logs": "1 row: attempted → succeeded or failed",
+        "bot_settings": "UPSERT setting_key='ai_model'"
+      },
+      "approval_required": true,
+      "approval_mechanism": "Guarded by isExplicitModelSwitchRequest() — AI cannot switch without explicit user command",
+      "destructive": true,
+      "source_line": 346
+    },
+    {
+      "tool_name": "list_connected_projects",
+      "purpose": "Lists all active connected external projects.",
+      "when_to_use": "User asks about connected projects or external integrations.",
+      "required_args": {},
+      "optional_args": {},
+      "returns": {
+        "type": "array",
+        "items": {
+          "name": "string",
+          "description": "string | null",
+          "is_active": "boolean"
+        }
+      },
+      "side_effects": "read_only",
+      "permissions_secrets_used": ["SUPABASE_URL", "SUPABASE_SERVICE_ROLE_KEY"],
+      "failure_modes": [],
+      "logging": {
+        "tool_execution_logs": "1 row: attempted → succeeded or failed"
+      },
+      "approval_required": false,
+      "approval_mechanism": null,
+      "destructive": false,
+      "source_line": 357
+    },
+    {
+      "tool_name": "get_project_stats",
+      "purpose": "Fetches table record counts from connected external projects via their project-stats edge function.",
+      "when_to_use": "User asks about stats or health of a connected project.",
+      "required_args": {},
+      "optional_args": {
+        "project_name": {
+          "type": "string",
+          "description": "Partial match on project name. Omit for all projects.",
+          "example": "Artist Growth"
+        }
+      },
+      "returns": {
+        "type": "array",
+        "items": {
+          "name": "string",
+          "stats": "Record<string, number> | null",
+          "reachable": "boolean"
+        }
+      },
+      "side_effects": "external_api",
+      "permissions_secrets_used": ["SUPABASE_URL", "SUPABASE_SERVICE_ROLE_KEY"],
+      "failure_modes": [
+        {
+          "error": "No connected projects",
+          "agent_response": "Returns 'No connected projects.'"
+        },
+        {
+          "error": "Project unreachable",
+          "agent_response": "reachable=false in results"
+        }
+      ],
+      "logging": {
+        "tool_execution_logs": "1 row: attempted → succeeded or failed"
+      },
+      "approval_required": false,
+      "approval_mechanism": null,
+      "destructive": false,
+      "source_line": 366
+    },
+    {
+      "tool_name": "get_recent_documents",
+      "purpose": "Fetches recently updated documents with their details.",
+      "when_to_use": "User asks about recent documents, latest files, or what was processed.",
+      "required_args": {},
+      "optional_args": {
+        "limit": {
+          "type": "number",
+          "description": "Number of documents (max 20, default 5)",
+          "example": 10
+        }
+      },
+      "returns": {
+        "type": "array",
+        "items": {
+          "id": "uuid",
+          "file_name": "string",
+          "doc_type": "string | null",
+          "bureau": "string | null",
+          "status": "string",
+          "client": "string",
+          "created_at": "timestamp"
+        }
+      },
+      "side_effects": "read_only",
+      "permissions_secrets_used": ["SUPABASE_URL", "SUPABASE_SERVICE_ROLE_KEY"],
+      "failure_modes": [],
+      "logging": {
+        "tool_execution_logs": "1 row: attempted → succeeded or failed"
+      },
+      "approval_required": false,
+      "approval_mechanism": null,
+      "destructive": false,
+      "source_line": 386
+    },
+    {
+      "tool_name": "trigger_drive_sync",
+      "purpose": "Invokes the drive-sync edge function to scan Google Drive for new/updated files and queue them for processing.",
+      "when_to_use": "User asks to sync, scan, or check for new files from Drive.",
+      "required_args": {},
+      "optional_args": {},
+      "returns": "string — summary with folders_scanned, total_processed, total_errors, run_id",
+      "side_effects": "external_api",
+      "permissions_secrets_used": ["SUPABASE_URL", "SUPABASE_SERVICE_ROLE_KEY", "SUPABASE_PUBLISHABLE_KEY", "Google_Cloud_Key", "DRIVE_FOLDER_ID"],
+      "failure_modes": [
+        {
+          "error": "drive-sync function returns non-200",
+          "agent_response": "Returns '❌ Drive sync failed ({status}): {errText}'"
+        },
+        {
+          "error": "Network/fetch error",
+          "agent_response": "Returns '❌ Drive sync error: {error}'"
+        }
+      ],
+      "logging": {
+        "tool_execution_logs": "1 row: attempted → succeeded or failed",
+        "drive_sync_runs": "1 new row created by drive-sync function",
+        "drive_sync_events": "1 row per file processed by drive-sync function",
+        "ingestion_jobs": "1 row per new/updated document queued by drive-sync function"
+      },
+      "approval_required": false,
+      "approval_mechanism": null,
+      "destructive": false,
+      "source_line": 405
+    },
+    {
+      "tool_name": "list_drive_files",
+      "purpose": "Lists documents stored in the system from Google Drive, optionally filtered by client name or status.",
+      "when_to_use": "User asks to see files, list documents, or browse by client/status.",
+      "required_args": {},
+      "optional_args": {
+        "client_name": {
+          "type": "string",
+          "description": "Partial match on client name",
+          "example": "Fendi"
+        },
+        "status": {
+          "type": "string",
+          "description": "Filter by status: pending, processing, completed, failed",
+          "example": "completed"
+        },
+        "limit": {
+          "type": "number",
+          "description": "Max 50, default 20",
+          "example": 10
+        }
+      },
+      "returns": {
+        "type": "array",
+        "items": {
+          "id": "uuid",
+          "file_name": "string",
+          "doc_type": "string | null",
+          "bureau": "string | null",
+          "status": "string",
+          "mime_type": "string",
+          "client": "string",
+          "created_at": "timestamp",
+          "updated_at": "timestamp"
+        }
+      },
+      "side_effects": "read_only",
+      "permissions_secrets_used": ["SUPABASE_URL", "SUPABASE_SERVICE_ROLE_KEY"],
+      "failure_modes": [
+        {
+          "error": "No files match criteria",
+          "agent_response": "Returns 'No files found matching your criteria.'"
+        }
+      ],
+      "logging": {
+        "tool_execution_logs": "1 row: attempted → succeeded or failed"
+      },
+      "approval_required": false,
+      "approval_mechanism": null,
+      "destructive": false,
+      "source_line": 429
+    },
+    {
+      "tool_name": "get_client_summary",
+      "purpose": "Returns all clients with document counts broken down by status.",
+      "when_to_use": "User asks about clients, client overview, or per-client document stats.",
+      "required_args": {},
+      "optional_args": {},
+      "returns": {
+        "type": "array",
+        "items": {
+          "name": "string",
+          "total_documents": "number",
+          "by_status": "Record<string, number>"
+        }
+      },
+      "side_effects": "read_only",
+      "permissions_secrets_used": ["SUPABASE_URL", "SUPABASE_SERVICE_ROLE_KEY"],
+      "failure_modes": [
+        {
+          "error": "No clients",
+          "agent_response": "Returns 'No clients found.'"
+        }
+      ],
+      "logging": {
+        "tool_execution_logs": "1 row: attempted → succeeded or failed"
+      },
+      "approval_required": false,
+      "approval_mechanism": null,
+      "destructive": false,
+      "source_line": 456
+    }
+  ],
+  "edge_functions": [
+    {
+      "function_name": "drive-sync",
+      "purpose": "Scans Google Drive folder for new/updated documents, creates client records, and queues ingestion jobs.",
+      "invoked_by": "trigger_drive_sync tool (via HTTP POST)",
+      "secrets_used": ["Google_Cloud_Key", "DRIVE_FOLDER_ID", "SUPABASE_URL", "SUPABASE_SERVICE_ROLE_KEY"],
+      "tables_written": ["clients", "documents", "ingestion_jobs", "drive_sync_runs", "drive_sync_events"]
+    },
+    {
+      "function_name": "process-document",
+      "purpose": "Downloads a document from Drive, analyzes it with Gemini/Grok, stores observations, and notifies via Telegram.",
+      "invoked_by": "retry_failed_job tool (via HTTP POST) or direct invocation",
+      "secrets_used": ["Frost_Gemini", "Google_Cloud_Key", "SUPABASE_URL", "SUPABASE_SERVICE_ROLE_KEY", "Frost_Grok"],
+      "tables_written": ["documents", "observations", "extracted_pages", "ingestion_jobs", "telegram_approval_queue"]
+    },
+    {
+      "function_name": "notify-telegram",
+      "purpose": "Sends Telegram notifications: SOS alerts, direct messages, document processing notifications with approval buttons.",
+      "invoked_by": "process-document function (internal)",
+      "secrets_used": ["FendiAIbot", "TELEGRAM_CHAT_ID", "SUPABASE_URL", "SUPABASE_SERVICE_ROLE_KEY"],
+      "tables_written": ["telegram_approval_queue"]
+    },
+    {
+      "function_name": "setup-telegram-webhook",
+      "purpose": "Registers the Telegram webhook URL with the Telegram Bot API.",
+      "invoked_by": "Manual one-time setup",
+      "secrets_used": ["FendiAIbot", "SUPABASE_URL"],
+      "tables_written": []
+    },
+    {
+      "function_name": "telegram-webhook",
+      "purpose": "Main Telegram bot handler: receives messages/callbacks, runs agentic AI loop with tool calls, manages conversations.",
+      "invoked_by": "Telegram Bot API (webhook)",
+      "secrets_used": ["FendiAIbot", "TELEGRAM_CHAT_ID", "SUPABASE_URL", "SUPABASE_SERVICE_ROLE_KEY", "Frost_Gemini", "Frost_Grok", "SUPABASE_PUBLISHABLE_KEY"],
+      "tables_written": ["bot_settings", "tool_execution_logs", "ingestion_jobs", "documents", "observations", "telegram_approval_queue"]
+    },
+    {
+      "function_name": "meta-token-validate",
+      "purpose": "Validates the Meta Page Access Token and checks for required Graph API scopes.",
+      "invoked_by": "Manual diagnostic call",
+      "secrets_used": ["Artist_Growth_Hub_Meta"],
+      "tables_written": []
+    }
+  ]
+}
