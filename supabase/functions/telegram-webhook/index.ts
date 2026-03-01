@@ -359,6 +359,93 @@ const AGENT_TOOLS: ToolDef[] = [
       return JSON.stringify(summaries);
     },
   },
+
+  // ─── Instagram Messaging Tools ────────────────────────────────
+  {
+    name: "instagram_send_dm",
+    description: "Send an Instagram Direct Message to a user. Requires recipient_id (Instagram-scoped user ID) and message text. [DESTRUCTIVE - requires user confirmation]",
+    parameters: { type: "object", properties: { recipient_id: { type: "string", description: "Instagram-scoped user ID (IGSID) of the recipient" }, message: { type: "string", description: "The message text to send" } }, required: ["recipient_id", "message"] },
+    destructive: true,
+    execute: async (args: any) => {
+      const ANON_KEY = Deno.env.get("SUPABASE_PUBLISHABLE_KEY") || SUPABASE_SERVICE_ROLE_KEY;
+      const resp = await fetch(`${SUPABASE_URL}/functions/v1/instagram-messaging`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${ANON_KEY}` },
+        body: JSON.stringify({ action: "send_dm", recipient_id: args.recipient_id, message: args.message }),
+      });
+      const data = await resp.json();
+      if (!resp.ok || !data.success) return `❌ DM failed: ${data.error || "Unknown error"}`;
+      return `✅ Instagram DM sent to ${args.recipient_id}.`;
+    },
+  },
+  {
+    name: "instagram_reply_comment",
+    description: "Reply to a comment on an Instagram post. Requires comment_id and reply_text. [DESTRUCTIVE - requires user confirmation]",
+    parameters: { type: "object", properties: { comment_id: { type: "string", description: "The ID of the Instagram comment to reply to" }, reply_text: { type: "string", description: "The reply text" } }, required: ["comment_id", "reply_text"] },
+    destructive: true,
+    execute: async (args: any) => {
+      const ANON_KEY = Deno.env.get("SUPABASE_PUBLISHABLE_KEY") || SUPABASE_SERVICE_ROLE_KEY;
+      const resp = await fetch(`${SUPABASE_URL}/functions/v1/instagram-messaging`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${ANON_KEY}` },
+        body: JSON.stringify({ action: "reply_comment", comment_id: args.comment_id, reply_text: args.reply_text }),
+      });
+      const data = await resp.json();
+      if (!resp.ok || !data.success) return `❌ Comment reply failed: ${data.error || "Unknown error"}`;
+      return `✅ Replied to Instagram comment ${args.comment_id}.`;
+    },
+  },
+  {
+    name: "instagram_reply_story_mention",
+    description: "Reply to someone who mentioned you in their Instagram story via DM. Requires recipient_id and message. [DESTRUCTIVE - requires user confirmation]",
+    parameters: { type: "object", properties: { recipient_id: { type: "string", description: "Instagram-scoped user ID of the person who mentioned you" }, message: { type: "string", description: "The reply message" } }, required: ["recipient_id", "message"] },
+    destructive: true,
+    execute: async (args: any) => {
+      const ANON_KEY = Deno.env.get("SUPABASE_PUBLISHABLE_KEY") || SUPABASE_SERVICE_ROLE_KEY;
+      const resp = await fetch(`${SUPABASE_URL}/functions/v1/instagram-messaging`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${ANON_KEY}` },
+        body: JSON.stringify({ action: "reply_story_mention", recipient_id: args.recipient_id, message: args.message }),
+      });
+      const data = await resp.json();
+      if (!resp.ok || !data.success) return `❌ Story mention reply failed: ${data.error || "Unknown error"}`;
+      return `✅ Replied to story mention from ${args.recipient_id}.`;
+    },
+  },
+  {
+    name: "instagram_get_recent_comments",
+    description: "Fetch recent comments on your latest Instagram posts to see what people are saying.",
+    parameters: { type: "object", properties: {}, required: [] },
+    destructive: false,
+    execute: async () => {
+      const ANON_KEY = Deno.env.get("SUPABASE_PUBLISHABLE_KEY") || SUPABASE_SERVICE_ROLE_KEY;
+      const resp = await fetch(`${SUPABASE_URL}/functions/v1/instagram-messaging`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${ANON_KEY}` },
+        body: JSON.stringify({ action: "get_recent_comments" }),
+      });
+      const data = await resp.json();
+      if (!resp.ok || !data.success) return `❌ Could not fetch comments: ${data.error || "Unknown error"}`;
+      return JSON.stringify(data.data);
+    },
+  },
+  {
+    name: "instagram_get_conversations",
+    description: "List recent Instagram DM conversations with latest messages.",
+    parameters: { type: "object", properties: {}, required: [] },
+    destructive: false,
+    execute: async () => {
+      const ANON_KEY = Deno.env.get("SUPABASE_PUBLISHABLE_KEY") || SUPABASE_SERVICE_ROLE_KEY;
+      const resp = await fetch(`${SUPABASE_URL}/functions/v1/instagram-messaging`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${ANON_KEY}` },
+        body: JSON.stringify({ action: "get_conversations" }),
+      });
+      const data = await resp.json();
+      if (!resp.ok || !data.success) return `❌ Could not fetch conversations: ${data.error || "Unknown error"}`;
+      return JSON.stringify(data.data);
+    },
+  },
 ];
 
 // ─── Build tool schemas for AI models ───────────────────────────
@@ -411,9 +498,10 @@ async function deletePendingAction(actionId: string) {
 
 async function agenticGeminiCall(userMessage: string, docContext: string): Promise<{ text: string; toolCalls: Array<{ name: string; args: any }> }> {
   const systemPrompt = `You are the ${SYSTEM_IDENTITY}. You serve Fendi Frost as a personal command center assistant.
-You have access to tools to check system status, manage jobs, approvals, projects, and more.
+You have access to tools to check system status, manage jobs, approvals, projects, Instagram messaging, and more.
 Use tools when the user's request requires data or actions. You can call multiple tools in sequence.
-For destructive actions (retry, archive, approve, reject), ALWAYS call the tool — the system will handle confirmation.
+For destructive actions (retry, archive, approve, reject, Instagram DMs/replies), ALWAYS call the tool — the system will handle confirmation.
+You can send Instagram DMs, reply to comments, reply to story mentions, and view recent conversations/comments.
 Be concise, professional, and use emoji sparingly.
 
 Recent Documents Context:
@@ -458,9 +546,10 @@ ${docContext}`;
 
 async function agenticGrokCall(userMessage: string, docContext: string): Promise<{ text: string; toolCalls: Array<{ name: string; args: any }> }> {
   const systemPrompt = `You are the ${SYSTEM_IDENTITY}. You serve Fendi Frost as a personal command center assistant.
-You have access to tools to check system status, manage jobs, approvals, projects, and more.
+You have access to tools to check system status, manage jobs, approvals, projects, Instagram messaging, and more.
 Use tools when the user's request requires data or actions. You can call multiple tools.
-For destructive actions (retry, archive, approve, reject), ALWAYS call the tool — the system will handle confirmation.
+For destructive actions (retry, archive, approve, reject, Instagram DMs/replies), ALWAYS call the tool — the system will handle confirmation.
+You can send Instagram DMs, reply to comments, reply to story mentions, and view recent conversations/comments.
 Be witty, direct, and concise. Use emoji sparingly.
 
 Recent Documents Context:
@@ -792,8 +881,11 @@ serve(async (req) => {
         `• "How are my projects doing?"`,
         `• "Approve all pending documents"`,
         `• "Switch to Grok and give me a status report"`,
+        `• "Show my recent Instagram comments"`,
+        `• "DM @user thanks for the shoutout"`,
+        `• "Reply to that Instagram comment saying thank you"`,
         ``,
-        `💡 I'll ask for confirmation before doing anything destructive.`,
+        `💡 I'll ask for confirmation before doing anything destructive (including Instagram messages).`,
         ``,
         `_Legacy commands still work: /status, /pending, /failed, /model, /projects, /stats_`,
       ].join("\n"));

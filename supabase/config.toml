@@ -17,3 +17,6 @@ verify_jwt = false
 
 [functions.meta-token-validate]
 verify_jwt = false
+
+[functions.instagram-messaging]
+verify_jwt = false
