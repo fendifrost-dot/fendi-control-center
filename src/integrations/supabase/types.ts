@@ -623,6 +623,57 @@ export type Database = {
         }
         Relationships: []
       }
+      tool_execution_logs: {
+        Row: {
+          args: Json | null
+          chat_id: string | null
+          completed_at: string | null
+          elapsed_ms: number | null
+          error: string | null
+          http_status: number | null
+          id: string
+          model: string | null
+          request_id: string
+          response_json: Json | null
+          started_at: string
+          status: string
+          tool_name: string
+          user_message: string | null
+        }
+        Insert: {
+          args?: Json | null
+          chat_id?: string | null
+          completed_at?: string | null
+          elapsed_ms?: number | null
+          error?: string | null
+          http_status?: number | null
+          id?: string
+          model?: string | null
+          request_id: string
+          response_json?: Json | null
+          started_at?: string
+          status?: string
+          tool_name: string
+          user_message?: string | null
+        }
+        Update: {
+          args?: Json | null
+          chat_id?: string | null
+          completed_at?: string | null
+          elapsed_ms?: number | null
+          error?: string | null
+          http_status?: number | null
+          id?: string
+          model?: string | null
+          request_id?: string
+          response_json?: Json | null
+          started_at?: string
+          status?: string
+          tool_name?: string
+          user_message?: string | null
+        }
+        Relationships: []
+      }
     }
     Views: {
       current_inquiries: {

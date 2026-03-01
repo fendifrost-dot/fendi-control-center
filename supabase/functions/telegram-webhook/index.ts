@@ -691,11 +691,55 @@ ${conversationContext}`;
   return { text: choice?.message?.content || "", toolCalls };
 }
 
+// ─── Execution logging helpers ─────────────────────────────────
+
+async function logToolAttempt(requestId: string, toolName: string, args: any, model: string, chatId: string, userMessage: string): Promise<string> {
+  const { data, error } = await supabase.from("tool_execution_logs").insert({
+    request_id: requestId,
+    tool_name: toolName,
+    args,
+    status: "attempted",
+    model,
+    chat_id: chatId,
+    user_message: userMessage,
+    started_at: new Date().toISOString(),
+  }).select("id").single();
+  if (error || !data) {
+    console.error("FATAL: Failed to create tool_execution_logs row", error);
+    throw new Error(`Execution logging failed for ${toolName}: no log row created`);
+  }
+  return data.id;
+}
+
+async function logToolSuccess(logId: string, result: string, startedAt: number, httpStatus?: number) {
+  const elapsed = Date.now() - startedAt;
+  let responseJson: any = null;
+  try { responseJson = JSON.parse(result); } catch { responseJson = { text: result.slice(0, 2000) }; }
+  await supabase.from("tool_execution_logs").update({
+    status: "succeeded",
+    elapsed_ms: elapsed,
+    completed_at: new Date().toISOString(),
+    http_status: httpStatus ?? 200,
+    response_json: responseJson,
+  }).eq("id", logId);
+}
+
+async function logToolFailure(logId: string, error: string, startedAt: number) {
+  const elapsed = Date.now() - startedAt;
+  await supabase.from("tool_execution_logs").update({
+    status: "failed",
+    elapsed_ms: elapsed,
+    completed_at: new Date().toISOString(),
+    error: error.slice(0, 5000),
+  }).eq("id", logId);
+}
+
 // ─── Execute agentic loop ──────────────────────────────────────
 
 async function executeAgenticLoop(chatId: string, userMessage: string): Promise<void> {
   const model = await getActiveModel();
   const docContext = await getRecentDocContext();
+  const requestId = crypto.randomUUID();
 
   await appendConversationTurn(chatId, {
     role: "user",
@@ -724,7 +768,7 @@ async function executeAgenticLoop(chatId: string, userMessage: string): Promise<
     return;
   }
 
-  // Step 3: Execute tool calls
+  // Step 3: Execute tool calls with mandatory logging
   const toolResults: string[] = [];
   const confirmationButtons: Array<{ text: string; callback_data: string }> = [];
 
@@ -740,6 +784,18 @@ async function executeAgenticLoop(chatId: string, userMessage: string): Promise<
       continue;
     }
 
+    // Log attempt BEFORE execution — hard rule: no log = fail loudly
+    let logId: string;
+    const startedAt = Date.now();
+    try {
+      logId = await logToolAttempt(requestId, tc.name, tc.args, model, chatId, userMessage);
+    } catch (logErr) {
+      const errMsg = `🚨 FATAL: Tool execution logging failed for ${tc.name}. Aborting tool call.`;
+      console.error(errMsg, logErr);
+      await sendMessage(chatId, formatAssistantMessage(model, errMsg));
+      return;
+    }
+
     if (tool.destructive) {
       // Store pending action and create confirmation button
       const actionId = crypto.randomUUID().slice(0, 8);
@@ -753,14 +809,19 @@ async function executeAgenticLoop(chatId: string, userMessage: string): Promise<
         { text: `❌ Cancel`, callback_data: `agent_cancel:${actionId}` },
       );
       toolResults.push(`⏳ *${label}* — Awaiting your confirmation.`);
+      // Update log to succeeded (destructive actions are deferred, logging the intent)
+      await logToolSuccess(logId, "Awaiting confirmation", startedAt);
     } else {
       // Execute immediately
       try {
         const output = await tool.execute(tc.args);
+        await logToolSuccess(logId, output, startedAt);
         toolResults.push(output);
       } catch (e) {
+        const errStr = e instanceof Error ? e.message : String(e);
+        await logToolFailure(logId, errStr, startedAt);
         console.error(`Tool ${tc.name} error:`, e);
-        toolResults.push(`❌ Error executing ${tc.name}.`);
+        toolResults.push(`❌ Error executing ${tc.name}: ${errStr}`);
       }
     }
   }
