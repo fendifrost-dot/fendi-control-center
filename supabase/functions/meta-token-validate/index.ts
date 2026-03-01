@@ -55,8 +55,16 @@ serve(async (req) => {
     const appId = tokenData.app_id || "unknown";
     const expiresAt = tokenData.expires_at ? new Date(tokenData.expires_at * 1000).toISOString() : "never";
 
-    // Check required scopes
-    const requiredScopes = ["pages_messaging", "instagram_basic", "instagram_manage_messages"];
+    // Check required scopes (only current/valid Meta permissions — no deprecated ones)
+    // Deprecated and must NOT be requested: manage_pages, pages_show_list
+    const requiredScopes = [
+      "pages_messaging",           // Send/receive Messenger messages
+      "pages_read_engagement",     // Read page posts & comments
+      "pages_manage_metadata",     // Subscribe to webhooks
+      "instagram_basic",           // Basic IG account info
+      "instagram_manage_messages", // IG Direct messages
+      "instagram_manage_comments", // Reply to IG comments
+    ];
     const missingScopes = requiredScopes.filter((s) => !scopes.includes(s));
 
     const result = {
