@@ -8,7 +8,11 @@ const corsHeaders = {
 };
 
 const GOOGLE_API_KEY = Deno.env.get("Google_Cloud_Key")!;
-const DRIVE_FOLDER_ID = Deno.env.get("DRIVE_FOLDER_ID")!;
+const RAW_DRIVE_FOLDER = Deno.env.get("DRIVE_FOLDER_ID")!;
+// Extract folder ID if a full URL was provided
+const DRIVE_FOLDER_ID = RAW_DRIVE_FOLDER.includes("/folders/")
+  ? RAW_DRIVE_FOLDER.split("/folders/").pop()!.split("?")[0]
+  : RAW_DRIVE_FOLDER;
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
 const SUPABASE_SERVICE_ROLE_KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
 
@@ -71,6 +75,8 @@ serve(async (req) => {
 
   try {
     console.log("🔄 Starting Drive sync...");
+    console.log("📂 DRIVE_FOLDER_ID:", JSON.stringify(DRIVE_FOLDER_ID));
+    console.log("🔑 GOOGLE_API_KEY length:", GOOGLE_API_KEY?.length);
 
     // Create a sync run
     const { data: run, error: runError } = await supabase
