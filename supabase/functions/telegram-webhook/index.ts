@@ -471,6 +471,114 @@ const AGENT_TOOLS: ToolDef[] = [
     },
   },
 
+  {
+    name: "get_active_jobs_summary",
+    description: "Get a structured breakdown of active (processing/queued) ingestion jobs: counts by status, job type, age buckets, top errors, and example rows. Use when the user asks 'what are the active jobs', 'describe the jobs', or 'summarize the N jobs'.",
+    parameters: {
+      type: "object",
+      properties: {
+        status_filter: { type: "string", enum: ["processing", "queued", "failed", "archived"], description: "Filter to a specific status. Default: shows processing+queued." },
+        hours_back: { type: "number", description: "Only include jobs created in the last N hours. Default: 24." },
+        limit: { type: "number", description: "Max example rows to return. Default: 50, max: 50." },
+      },
+      required: [],
+    },
+    destructive: false,
+    execute: async (args: any) => {
+      const hoursBack = args.hours_back ?? 24;
+      const limit = Math.min(args.limit ?? 50, 50);
+      const cutoff = new Date(Date.now() - hoursBack * 60 * 60 * 1000).toISOString();
+
+      const statusFilter: string[] = args.status_filter
+        ? [args.status_filter]
+        : ["processing", "queued"];
+
+      // Main query — fetch rows (capped at limit)
+      const { data: jobs, error } = await supabase
+        .from("ingestion_jobs")
+        .select("id, job_type, status, attempt_count, started_at, heartbeat_at, completed_at, created_at, drive_file_id, document_id, last_error")
+        .in("status", statusFilter)
+        .gte("created_at", cutoff)
+        .order("created_at", { ascending: false })
+        .limit(limit);
+
+      if (error) {
+        const errMsg = `HARD ERROR: ingestion_jobs query failed — ${error.message}`;
+        console.error("get_active_jobs_summary:", errMsg);
+        return JSON.stringify({ error: errMsg });
+      }
+
+      // Total count (may exceed limit)
+      const { count: totalCount, error: countErr } = await supabase
+        .from("ingestion_jobs")
+        .select("*", { count: "exact", head: true })
+        .in("status", statusFilter)
+        .gte("created_at", cutoff);
+
+      if (countErr) {
+        console.error("get_active_jobs_summary count error:", countErr.message);
+      }
+
+      const total = totalCount ?? jobs.length;
+      const allJobs = jobs || [];
+
+      // by_status
+      const byStatus: Record<string, number> = { processing: 0, queued: 0, failed: 0, archived: 0 };
+      for (const j of allJobs) { byStatus[j.status] = (byStatus[j.status] || 0) + 1; }
+
+      // by_job_type
+      const jobTypeCounts: Record<string, number> = {};
+      for (const j of allJobs) { jobTypeCounts[j.job_type] = (jobTypeCounts[j.job_type] || 0) + 1; }
+      const byJobType = Object.entries(jobTypeCounts).map(([job_type, count]) => ({ job_type, count }));
+
+      // age_buckets based on COALESCE(heartbeat_at, started_at, created_at)
+      const buckets = { "0-15m": 0, "15-60m": 0, "1-6h": 0, "6-24h": 0, "24h+": 0 };
+      const now = Date.now();
+      for (const j of allJobs) {
+        const ref = new Date(j.heartbeat_at || j.started_at || j.created_at).getTime();
+        const ageMin = (now - ref) / 60000;
+        if (ageMin <= 15) buckets["0-15m"]++;
+        else if (ageMin <= 60) buckets["15-60m"]++;
+        else if (ageMin <= 360) buckets["1-6h"]++;
+        else if (ageMin <= 1440) buckets["6-24h"]++;
+        else buckets["24h+"]++;
+      }
+      const ageBuckets = Object.entries(buckets).map(([bucket, count]) => ({ bucket, count }));
+
+      // top_errors (from rows that have last_error)
+      const errCounts: Record<string, number> = {};
+      for (const j of allJobs) {
+        if (j.last_error) {
+          const key = j.last_error.slice(0, 200);
+          errCounts[key] = (errCounts[key] || 0) + 1;
+        }
+      }
+      const topErrors = Object.entries(errCounts)
+        .map(([last_error, count]) => ({ last_error, count }))
+        .sort((a, b) => b.count - a.count)
+        .slice(0, 5);
+
+      // examples (first 5 rows)
+      const examples = allJobs.slice(0, 5).map((j: any) => ({
+        id: j.id, job_type: j.job_type, status: j.status,
+        attempt_count: j.attempt_count, started_at: j.started_at,
+        heartbeat_at: j.heartbeat_at, completed_at: j.completed_at,
+        drive_file_id: j.drive_file_id, document_id: j.document_id,
+      }));
+
+      return JSON.stringify({
+        active_definition: "status IN (" + statusFilter.map(s => `'${s}'`).join(",") + ")",
+        hours_back: hoursBack,
+        total,
+        by_status: byStatus,
+        by_job_type: byJobType,
+        age_buckets: ageBuckets,
+        top_errors: topErrors,
+        examples,
+      });
+    },
+  },
+
   // ─── Instagram Messaging Tools ────────────────────────────────
   {
     name: "instagram_send_dm",
