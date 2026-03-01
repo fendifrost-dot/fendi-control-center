@@ -183,16 +183,19 @@ const AGENT_TOOLS: ToolDef[] = [
     parameters: { type: "object", properties: {}, required: [] },
     destructive: false,
     execute: async () => {
-      const { data: pending } = await supabase.from("telegram_approval_queue").select("id").eq("status", "pending");
-      const { data: jobs } = await supabase.from("ingestion_jobs").select("id, status").in("status", ["queued", "processing", "retrying"]);
-      const { data: failedJobs } = await supabase.from("ingestion_jobs").select("id").eq("status", "failed");
-      const { data: docs } = await supabase.from("documents").select("id").eq("status", "completed");
+      const { count: docsProcessed } = await supabase.from("documents").select("*", { count: "exact", head: true }).eq("status", "completed");
+      const { count: pendingApprovals } = await supabase.from("telegram_approval_queue").select("*", { count: "exact", head: true }).eq("status", "pending");
+      const { count: activeJobs } = await supabase.from("ingestion_jobs").select("*", { count: "exact", head: true }).in("status", ["queued", "processing", "retrying"]);
+      const { count: failedJobs } = await supabase.from("ingestion_jobs").select("*", { count: "exact", head: true }).eq("status", "failed");
+      const oneHourAgo = new Date(Date.now() - 60 * 60 * 1000).toISOString();
+      const { count: recentToolCalls } = await supabase.from("tool_execution_logs").select("*", { count: "exact", head: true }).gte("started_at", oneHourAgo);
       const model = await getActiveModel();
       return JSON.stringify({
-        documents_processed: docs?.length || 0,
-        pending_approvals: pending?.length || 0,
-        active_jobs: jobs?.length || 0,
-        failed_jobs: failedJobs?.length || 0,
+        documents_processed: docsProcessed ?? 0,
+        pending_approvals: pendingApprovals ?? 0,
+        active_jobs: activeJobs ?? 0,
+        failed_jobs: failedJobs ?? 0,
+        recent_tool_calls_1h: recentToolCalls ?? 0,
         active_model: model,
       });
     },
