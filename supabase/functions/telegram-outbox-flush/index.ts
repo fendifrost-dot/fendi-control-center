@@ -35,50 +35,22 @@ serve(async (req) => {
     const chatId = body.chat_id || CHAT_ID;
     const now = new Date().toISOString();
 
-    // Atomic claim: update status to 'sending' and return claimed rows in one call
-    // This prevents double-send on concurrent flush calls
-    const { data: claimed, error: claimErr } = await supabase.rpc("claim_outbox_rows", {
+    // Atomic claim via RPC — uses FOR UPDATE SKIP LOCKED to prevent double-send
+    const { data: rows, error: claimErr } = await supabase.rpc("claim_outbox_rows", {
       p_chat_id: chatId,
       p_limit: max,
       p_now: now,
     });
 
-    // Fallback if RPC doesn't exist: use select-then-update (less safe but functional)
-    let rows = claimed;
     if (claimErr) {
-      console.warn("[FLUSH] RPC claim_outbox_rows not found, falling back to select+update:", claimErr.message);
-      const { data: due } = await supabase
-        .from("telegram_outbox")
-        .select("id, kind, payload, attempt_count")
-        .in("status", ["queued", "failed"])
-        .eq("chat_id", chatId)
-        .lte("next_attempt_at", now)
-        .order("created_at", { ascending: true })
-        .limit(max);
-
-      if (!due || due.length === 0) return json({ sent: 0, failed: 0, message: "No due items" });
-
-      // Claim them by setting status='sending' for these specific IDs
-      const ids = due.map(r => r.id);
-      await supabase
-        .from("telegram_outbox")
-        .update({ status: "sending", last_attempt_at: now })
-        .in("id", ids)
-        .in("status", ["queued", "failed"]); // double-check status to avoid racing
-
-      // Re-increment attempt_count per row during send loop
-      rows = due;
+      console.error("[FLUSH] claim_outbox_rows RPC failed:", claimErr.message);
+      return json({ error: "RPC failed: " + claimErr.message }, 500);
     }
 
     if (!rows || rows.length === 0) return json({ sent: 0, failed: 0, message: "No due items" });
 
     let sent = 0, failed = 0;
     for (const row of rows) {
-      // Increment attempt_count for this row
-      await supabase.from("telegram_outbox").update({
-        attempt_count: (row.attempt_count ?? 0) + 1,
-      }).eq("id", row.id);
-
       try {
         const resp = await fetch(`${TELEGRAM_API}/${row.kind || "sendMessage"}`, {
           method: "POST",
