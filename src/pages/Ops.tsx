@@ -1,4 +1,4 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useCallback, useRef, useMemo } from "react";
 import { supabase } from "@/integrations/supabase/client";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
@@ -8,12 +8,14 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { Sheet, SheetContent, SheetHeader, SheetTitle } from "@/components/ui/sheet";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { ScrollArea } from "@/components/ui/scroll-area";
+import { Switch } from "@/components/ui/switch";
 import { RefreshCw, Zap } from "lucide-react";
 import { useToast } from "@/hooks/use-toast";
 
 const short = (id: string | null) => id ? id.slice(0, 8) : "—";
 const truncate = (s: string | null, n = 120) => s ? (s.length > n ? s.slice(0, n) + "…" : s) : "—";
 const fmtDate = (d: string | null) => d ? new Date(d).toLocaleString() : "—";
+const fmtTime = (d: Date) => d.toLocaleTimeString();
 
 type TaskRow = {
   id: string; created_at: string; updated_at: string; status: string;
@@ -30,12 +32,15 @@ type OutboxRow = {
 
 const statusColor = (s: string) => {
   switch (s) {
-    case "succeeded": case "sent": return "default";
-    case "running": case "sending": case "queued": return "secondary";
-    case "failed": return "destructive";
-    default: return "outline";
+    case "succeeded": case "sent": return "default" as const;
+    case "running": case "sending": case "queued": return "secondary" as const;
+    case "failed": return "destructive" as const;
+    default: return "outline" as const;
   }
 };
+
+const countByStatus = <T extends { status: string }>(rows: T[], statuses: string[]) =>
+  statuses.map(s => ({ s, n: rows.filter(r => r.status === s).length }));
 
 export default function Ops() {
   const { toast } = useToast();
@@ -49,8 +54,11 @@ export default function Ops() {
   const [outboxTaskFilter, setOutboxTaskFilter] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const [flushing, setFlushing] = useState(false);
+  const [autoRefresh, setAutoRefresh] = useState(true);
+  const [lastRefreshed, setLastRefreshed] = useState<Date>(new Date());
+  const drawerOpen = selectedTask !== null || selectedOutbox !== null;
 
-  const fetchData = async () => {
+  const fetchData = useCallback(async () => {
     setLoading(true);
     try {
       let tq = supabase.from("tasks").select("*").order("created_at", { ascending: false }).limit(50);
@@ -64,10 +72,18 @@ export default function Ops() {
       if (outboxTaskFilter) oq = oq.eq("task_id", outboxTaskFilter);
       const { data: oData } = await oq;
       setOutbox((oData as OutboxRow[]) || []);
+      setLastRefreshed(new Date());
     } finally { setLoading(false); }
-  };
+  }, [taskStatusFilter, outboxStatusFilter, outboxTaskFilter, taskSearch]);
 
-  useEffect(() => { fetchData(); }, [taskStatusFilter, outboxStatusFilter, outboxTaskFilter]);
+  useEffect(() => { fetchData(); }, [fetchData]);
+
+  // Auto-refresh: every 5s, paused when drawer open
+  useEffect(() => {
+    if (!autoRefresh || drawerOpen) return;
+    const id = setInterval(fetchData, 5000);
+    return () => clearInterval(id);
+  }, [autoRefresh, drawerOpen, fetchData]);
 
   const handleFlushFailed = async () => {
     setFlushing(true);
@@ -95,17 +111,42 @@ export default function Ops() {
     return rj[field] ?? null;
   };
 
+  const taskStats = useMemo(() => countByStatus(tasks, ["queued", "running", "succeeded", "failed"]), [tasks]);
+  const outboxStats = useMemo(() => countByStatus(outbox, ["queued", "sending", "sent", "failed"]), [outbox]);
+
   return (
     <div className="min-h-screen bg-background p-4">
-      <div className="flex items-center justify-between mb-4">
+      {/* Header */}
+      <div className="flex items-center justify-between mb-3">
         <h1 className="text-2xl font-bold text-foreground">Ops Dashboard</h1>
-        <div className="flex gap-2">
+        <div className="flex items-center gap-3">
+          <span className="text-xs text-muted-foreground">Last: {fmtTime(lastRefreshed)}</span>
+          <div className="flex items-center gap-1.5">
+            <Switch checked={autoRefresh} onCheckedChange={setAutoRefresh} className="h-4 w-8" />
+            <span className="text-xs text-muted-foreground">Auto</span>
+          </div>
           <Button variant="outline" size="sm" onClick={fetchData} disabled={loading}>
             <RefreshCw className={`h-4 w-4 mr-1 ${loading ? "animate-spin" : ""}`} /> Refresh
           </Button>
           <Button variant="destructive" size="sm" onClick={handleFlushFailed} disabled={flushing}>
-            <Zap className="h-4 w-4 mr-1" /> Flush Failed Outbox
+            <Zap className="h-4 w-4 mr-1" /> Flush Failed
           </Button>
+        </div>
+      </div>
+
+      {/* Summary stats */}
+      <div className="flex flex-wrap gap-4 mb-3">
+        <div className="flex items-center gap-1.5 text-xs text-muted-foreground">
+          <span className="font-semibold">Tasks:</span>
+          {taskStats.map(({ s, n }) => (
+            <Badge key={s} variant={statusColor(s)} className="text-[10px] px-1.5 py-0">{s} {n}</Badge>
+          ))}
+        </div>
+        <div className="flex items-center gap-1.5 text-xs text-muted-foreground">
+          <span className="font-semibold">Outbox:</span>
+          {outboxStats.map(({ s, n }) => (
+            <Badge key={s} variant={statusColor(s)} className="text-[10px] px-1.5 py-0">{s} {n}</Badge>
+          ))}
         </div>
       </div>
 
@@ -129,7 +170,7 @@ export default function Ops() {
             </div>
           </CardHeader>
           <CardContent className="p-0">
-            <ScrollArea className="h-[calc(100vh-220px)]">
+            <ScrollArea className="h-[calc(100vh-280px)]">
               <Table>
                 <TableHeader>
                   <TableRow>
@@ -185,7 +226,7 @@ export default function Ops() {
             </div>
           </CardHeader>
           <CardContent className="p-0">
-            <ScrollArea className="h-[calc(100vh-220px)]">
+            <ScrollArea className="h-[calc(100vh-280px)]">
               <Table>
                 <TableHeader>
                   <TableRow>
