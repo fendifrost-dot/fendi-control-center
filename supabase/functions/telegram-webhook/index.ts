@@ -1082,21 +1082,34 @@ async function logToolFailure(logId: string, error: string, startedAt: number) {
 // ─── Execute agentic loop ──────────────────────────────────────
 
 async function executeAgenticLoop(chatId: string, userMessage: string, opts: { taskId: string; sessionModel: "grok" | "gemini" | "chatgpt"; lane?: "lane1_do" | "lane2_assistant"; allowTools?: boolean; workflowKey?: string }): Promise<void> {
-  // ── STEP 2: HARD EXECUTION GUARD ──
+  // ── HARD EXECUTION GUARD ──
   if (opts.lane !== "lane1_do" || opts.allowTools !== true) {
     console.error(`[TOOLS_BLOCKED] attempted tool execution outside execution lane task=${opts.taskId}`);
     throw new Error("TOOLS_BLOCKED: agentic loop cannot run outside /do execution lane");
   }
 
-  // ── STEP 3: REQUIRE WORKFLOW KEY ──
+  // ── EXECUTION CONTEXT ASSERTION ──
+  const executionContext = {
+    lane: opts.lane,
+    allowTools: opts.allowTools,
+    workflowKey: opts.workflowKey,
+    taskId: opts.taskId,
+  };
+  console.log("[EXECUTION_CONTEXT]", JSON.stringify(executionContext));
+
+  if (executionContext.lane !== "lane1_do") {
+    throw new Error("EXECUTION_CONTEXT_INVALID_LANE");
+  }
+
+  // ── REQUIRE WORKFLOW KEY ──
   if (!opts.workflowKey) {
     throw new Error("WORKFLOW_REQUIRED_FOR_EXECUTION");
   }
 
-  // ── STEP 5: EXECUTION LOG ──
+  // ── EXECUTION LOG ──
   console.log(`[LANE1_EXECUTION] workflow=${opts.workflowKey} task=${opts.taskId} model=${opts.sessionModel}`);
 
-  // ── STEP 6: STORE EXECUTION CONTEXT ──
+  // ── STORE EXECUTION CONTEXT ──
   await supabase.from("tasks").update({
     status: "running",
     selected_workflow: opts.workflowKey,
@@ -1107,13 +1120,19 @@ async function executeAgenticLoop(chatId: string, userMessage: string, opts: { t
     },
   }).eq("id", opts.taskId);
 
-  // ── STEP 4: LOAD TOOLS FROM WORKFLOW ──
-  // Fetch workflow registry to get the tool list for this workflow
+  // ── LOAD TOOLS FROM WORKFLOW ──
   const workflows = await fetchWorkflowRegistry();
   const matchedWorkflow = workflows.find(w => w.key === opts.workflowKey);
-  const workflowToolNames: string[] | undefined = matchedWorkflow?.tools?.length
+
+  // ── VALIDATE WORKFLOW EXISTS ──
+  if (!matchedWorkflow) {
+    console.error(`[WORKFLOW_INVALID] key=${opts.workflowKey}`);
+    throw new Error("WORKFLOW_NOT_FOUND_IN_REGISTRY");
+  }
+
+  const workflowToolNames: string[] | undefined = matchedWorkflow.tools?.length
     ? matchedWorkflow.tools
-    : undefined; // undefined = allow all (fallback for workflows without explicit tool lists)
+    : undefined;
 
   if (workflowToolNames) {
     console.log(`[LANE1_EXECUTION] Scoped tools for workflow '${opts.workflowKey}': ${workflowToolNames.join(", ")}`);
@@ -1140,6 +1159,7 @@ async function executeAgenticLoop(chatId: string, userMessage: string, opts: { t
     ? await agenticGrokCall(userMessage, docContext, conversationContext, workflowToolNames)
     : await agenticGeminiCall(userMessage, docContext, conversationContext, workflowToolNames);
   console.log(`[CHECKPOINT-E2] AI call DONE taskId=${opts.taskId} toolCalls=${result.toolCalls.length} hasText=${!!result.text} ts=${Date.now()}`);
+  console.log(`[AI_RESPONSE] workflow=${opts.workflowKey} toolCalls=${result.toolCalls.length}`);
   await supabase.from("tasks").update({ result_json: { progress_step: "E_ai_done", tool_count: result.toolCalls.length } }).eq("id", opts.taskId);
 
   // Step 2: If no tool calls, just send the text response
@@ -1157,7 +1177,7 @@ async function executeAgenticLoop(chatId: string, userMessage: string, opts: { t
     await supabase.from("tasks").update({
       status: "succeeded",
       selected_tools: [],
-      result_json: { text_response: responseText.slice(0, 2000), model_used: opts.sessionModel },
+      result_json: { execution_complete: true, workflow: opts.workflowKey, text_response: responseText.slice(0, 2000), model_used: opts.sessionModel },
     }).eq("id", opts.taskId);
     await sendMessage(chatId, `✅ Done: \`${opts.taskId}\``, {}, `task:${opts.taskId}:done`);
     return;
@@ -1170,8 +1190,8 @@ async function executeAgenticLoop(chatId: string, userMessage: string, opts: { t
   for (const tc of result.toolCalls) {
     // WORKFLOW-SCOPED GUARDRAIL: block tools not in this workflow's declared tool list
     if (workflowToolNames && !workflowToolNames.includes(tc.name)) {
-      console.error(`[TOOLS_BLOCKED] AI called '${tc.name}' which is not in workflow '${opts.workflowKey}' tool list [${workflowToolNames.join(",")}] — blocked.`);
-      toolResults.push(`🚫 Tool '${tc.name}' is not allowed in workflow '${opts.workflowKey}'.`);
+      console.error(`[WORKFLOW_TOOL_BLOCKED] tool=${tc.name} workflow=${opts.workflowKey}`);
+      toolResults.push(`🚫 Tool '${tc.name}' is not allowed for workflow '${opts.workflowKey}'.`);
       continue;
     }
 
@@ -1290,7 +1310,7 @@ Now provide a clear, concise summary for the user based on the results. Use mark
     await supabase.from("tasks").update({
       status: "succeeded",
       selected_tools: executedToolNames,
-      result_json: { progress_step: "F_succeeded", summary: summary.slice(0, 2000), toolResults: toolResults.map(r => r.slice(0, 500)), model_used: opts.sessionModel },
+      result_json: { execution_complete: true, workflow: opts.workflowKey, progress_step: "F_succeeded", summary: summary.slice(0, 2000), toolResults: toolResults.map(r => r.slice(0, 500)), model_used: opts.sessionModel },
     }).eq("id", opts.taskId);
     console.log(`[CHECKPOINT-F2] Task marked succeeded, sending Done msg taskId=${opts.taskId} ts=${Date.now()}`);
     await sendMessage(chatId, `✅ Done: \`${opts.taskId}\``, {}, `task:${opts.taskId}:done`);
@@ -1325,7 +1345,7 @@ Now provide a clear, concise summary for the user based on the results. Use mark
     await supabase.from("tasks").update({
       status: "succeeded",
       selected_tools: executedToolNames,
-      result_json: { awaiting_confirmation: true, toolResults: toolResults.map(r => r.slice(0, 500)), model_used: opts.sessionModel },
+      result_json: { execution_complete: true, workflow: opts.workflowKey, awaiting_confirmation: true, toolResults: toolResults.map(r => r.slice(0, 500)), model_used: opts.sessionModel },
     }).eq("id", opts.taskId);
     await sendMessage(chatId, `✅ Done: \`${opts.taskId}\``, {}, `task:${opts.taskId}:done`);
 
@@ -1334,7 +1354,7 @@ Now provide a clear, concise summary for the user based on the results. Use mark
     await supabase.from("tasks").update({
       status: "succeeded",
       selected_tools: [],
-      result_json: { text_response: (result.text || "").slice(0, 2000), model_used: opts.sessionModel },
+      result_json: { execution_complete: true, workflow: opts.workflowKey, text_response: (result.text || "").slice(0, 2000), model_used: opts.sessionModel },
     }).eq("id", opts.taskId);
     await sendMessage(chatId, `✅ Done: \`${opts.taskId}\``, {}, `task:${opts.taskId}:done`);
   }
