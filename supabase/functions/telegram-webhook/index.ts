@@ -362,10 +362,10 @@ async function fetchProjectStats(project: any): Promise<{ name: string; tables: 
 // ─── System health check ────────────────────────────────────────
 function systemHealthCheck() {
   return {
-    timestamp: Date.now(),
+    timestamp_ms: Date.now(),
     uptime_ms: Math.round(performance.now()),
     tool_count: AGENT_TOOLS.length,
-    implemented_workflows: Array.from(IMPLEMENTED_WORKFLOW_KEYS),
+    implemented_workflow_count: IMPLEMENTED_WORKFLOW_KEYS.size,
   };
 }
 
@@ -1089,6 +1089,11 @@ async function logToolFailure(logId: string, error: string, startedAt: number) {
   }).eq("id", logId);
 }
 
+// ─── Structured log helper ─────────────────────────────────────
+function logEvent(e: Record<string, any>) {
+  console.log(JSON.stringify({ ts: Date.now(), ...e }));
+}
+
 // ─── Execute agentic loop ──────────────────────────────────────
 
 async function executeAgenticLoop(chatId: string, userMessage: string, opts: { taskId: string; sessionModel: "grok" | "gemini" | "chatgpt"; lane?: "lane1_do" | "lane2_assistant"; allowTools?: boolean; workflowKey?: string }): Promise<void> {
@@ -1097,20 +1102,14 @@ async function executeAgenticLoop(chatId: string, userMessage: string, opts: { t
 
   // ── HARD EXECUTION GUARD ──
   if (opts.lane !== "lane1_do" || opts.allowTools !== true) {
-    console.error(JSON.stringify({ event: "tools_blocked", taskId: opts.taskId, lane: opts.lane, allowTools: opts.allowTools, ts: Date.now() }));
+    console.error(JSON.stringify({ ts: Date.now(), event: "tools_blocked", taskId: opts.taskId, lane: opts.lane, allowTools: opts.allowTools }));
     throw new Error("TOOLS_BLOCKED: agentic loop cannot run outside /do execution lane");
   }
 
   // ── EXECUTION CONTEXT ASSERTION ──
-  const executionContext = {
-    lane: opts.lane,
-    allowTools: opts.allowTools,
-    workflowKey: opts.workflowKey,
-    taskId: opts.taskId,
-  };
-  console.log(JSON.stringify({ event: "execution_context", ...executionContext, ts: Date.now() }));
+  logEvent({ event: "execution_context", lane: opts.lane, allowTools: opts.allowTools, workflowKey: opts.workflowKey, taskId: opts.taskId });
 
-  if (executionContext.lane !== "lane1_do") {
+  if (opts.lane !== "lane1_do") {
     throw new Error("EXECUTION_CONTEXT_INVALID_LANE");
   }
 
@@ -1119,31 +1118,33 @@ async function executeAgenticLoop(chatId: string, userMessage: string, opts: { t
     throw new Error("WORKFLOW_REQUIRED_FOR_EXECUTION");
   }
 
-  // ── STEP 3: PREVENT DUPLICATE EXECUTION ──
-  const { data: existingTask } = await supabase
+  // ── EXECUTION LOCK: prevent duplicate execution ──
+  const lockId = crypto.randomUUID();
+  const { data: locked } = await supabase
     .from("tasks")
-    .select("status")
+    .update({
+      status: "running",
+      selected_workflow: opts.workflowKey,
+      result_json: {
+        execution_lane: "lane1_do",
+        selected_workflow: opts.workflowKey,
+        model_used: opts.sessionModel,
+        execution_lock: lockId,
+        execution_lock_ts: Date.now(),
+      },
+    })
     .eq("id", opts.taskId)
-    .single();
+    .in("status", ["queued", "running"])
+    .is("result_json->execution_lock", null)
+    .select("id")
+    .maybeSingle();
 
-  if (existingTask?.status === "running") {
-    console.warn(JSON.stringify({ event: "duplicate_execution_blocked", taskId: opts.taskId, ts: Date.now() }));
-    throw new Error("TASK_ALREADY_RUNNING");
+  if (!locked) {
+    console.warn(JSON.stringify({ ts: Date.now(), event: "duplicate_execution_blocked", taskId: opts.taskId }));
+    throw new Error("TASK_LOCK_NOT_ACQUIRED");
   }
 
-  // ── STEP 4: STRUCTURED EXECUTION START LOG ──
-  console.log(JSON.stringify({ event: "lane1_execution_start", workflow: opts.workflowKey, taskId: opts.taskId, model: opts.sessionModel, ts: Date.now() }));
-
-  // ── STORE EXECUTION CONTEXT ──
-  await supabase.from("tasks").update({
-    status: "running",
-    selected_workflow: opts.workflowKey,
-    result_json: {
-      execution_lane: "lane1_do",
-      selected_workflow: opts.workflowKey,
-      model_used: opts.sessionModel,
-    },
-  }).eq("id", opts.taskId);
+  logEvent({ event: "lane1_execution_start", workflow: opts.workflowKey, taskId: opts.taskId, model: opts.sessionModel, lockId });
 
   // ── LOAD TOOLS FROM WORKFLOW ──
   const workflows = await fetchWorkflowRegistry();
@@ -1151,7 +1152,7 @@ async function executeAgenticLoop(chatId: string, userMessage: string, opts: { t
 
   // ── VALIDATE WORKFLOW EXISTS ──
   if (!matchedWorkflow) {
-    console.error(`[WORKFLOW_INVALID] key=${opts.workflowKey}`);
+    console.error(JSON.stringify({ ts: Date.now(), event: "workflow_invalid", key: opts.workflowKey }));
     throw new Error("WORKFLOW_NOT_FOUND_IN_REGISTRY");
   }
 
@@ -1159,11 +1160,7 @@ async function executeAgenticLoop(chatId: string, userMessage: string, opts: { t
     ? matchedWorkflow.tools
     : undefined;
 
-  if (workflowToolNames) {
-    console.log(`[LANE1_EXECUTION] Scoped tools for workflow '${opts.workflowKey}': ${workflowToolNames.join(", ")}`);
-  } else {
-    console.log(`[LANE1_EXECUTION] Workflow '${opts.workflowKey}' has no explicit tool list — using all registered tools`);
-  }
+  logEvent({ event: "workflow_tools_loaded", workflow: opts.workflowKey, tools: workflowToolNames || "all", taskId: opts.taskId });
 
   const model: "grok" | "gemini" = opts.sessionModel === "chatgpt" ? "grok" : opts.sessionModel as "grok" | "gemini";
   const docContext = await getRecentDocContext();
@@ -1179,12 +1176,12 @@ async function executeAgenticLoop(chatId: string, userMessage: string, opts: { t
   const conversationContext = await buildConversationContext(chatId);
 
   // Step 1: Get AI response with workflow-scoped tool calls
-  console.log(`[CHECKPOINT-E1] AI call START taskId=${opts.taskId} model=${model} workflow=${opts.workflowKey} ts=${Date.now()}`);
+  logEvent({ event: "ai_call_start", taskId: opts.taskId, model, workflow: opts.workflowKey });
   const result = model === "grok"
     ? await agenticGrokCall(userMessage, docContext, conversationContext, workflowToolNames)
     : await agenticGeminiCall(userMessage, docContext, conversationContext, workflowToolNames);
-  console.log(JSON.stringify({ event: "ai_response", workflow: opts.workflowKey, toolCalls: result.toolCalls.length, hasText: !!result.text, model, taskId: opts.taskId, ts: Date.now() }));
-  await supabase.from("tasks").update({ result_json: { progress_step: "E_ai_done", tool_count: result.toolCalls.length } }).eq("id", opts.taskId);
+  logEvent({ event: "ai_response", taskId: opts.taskId, workflow: opts.workflowKey, model, toolCalls: result.toolCalls.length, hasText: !!result.text });
+  await supabase.from("tasks").update({ result_json: { progress_step: "E_ai_done", tool_count: result.toolCalls.length, execution_lock: lockId } }).eq("id", opts.taskId);
 
   // Step 2: If no tool calls, just send the text response
   if (result.toolCalls.length === 0) {
@@ -1215,7 +1212,7 @@ async function executeAgenticLoop(chatId: string, userMessage: string, opts: { t
   for (const tc of result.toolCalls) {
     // WORKFLOW-SCOPED GUARDRAIL: block tools not in this workflow's declared tool list
     if (workflowToolNames && !workflowToolNames.includes(tc.name)) {
-      console.error(`[WORKFLOW_TOOL_BLOCKED] tool=${tc.name} workflow=${opts.workflowKey}`);
+      console.error(JSON.stringify({ ts: Date.now(), event: "workflow_tool_blocked", tool: tc.name, workflow: opts.workflowKey, taskId: opts.taskId }));
       toolResults.push(`🚫 Tool '${tc.name}' is not allowed for workflow '${opts.workflowKey}'.`);
       continue;
     }
@@ -1326,7 +1323,7 @@ Now provide a clear, concise summary for the user based on the results. Use mark
     }
 
     const finalSummary = formatAssistantMessage(model, summary);
-    console.log(`[CHECKPOINT-F] Sending final summary taskId=${opts.taskId} ts=${Date.now()}`);
+    logEvent({ event: "sending_summary", taskId: opts.taskId, workflow: opts.workflowKey });
     await sendMessage(chatId, finalSummary, {}, `task:${opts.taskId}:summary`);
     await appendConversationTurn(chatId, {
       role: "assistant",
@@ -1342,7 +1339,7 @@ Now provide a clear, concise summary for the user based on the results. Use mark
       selected_tools: executedToolNames,
       result_json: { execution_complete: true, workflow: opts.workflowKey, progress_step: "F_succeeded", summary: summary.slice(0, 2000), toolResults: toolResults.map(r => r.slice(0, 500)), model_used: opts.sessionModel, execution_duration_ms: executionDuration },
     }).eq("id", opts.taskId);
-    console.log(`[CHECKPOINT-F2] Task marked succeeded, sending Done msg taskId=${opts.taskId} ts=${Date.now()}`);
+    logEvent({ event: "task_succeeded", taskId: opts.taskId, workflow: opts.workflowKey, execution_duration_ms: executionDuration });
     await sendMessage(chatId, `✅ Done: \`${opts.taskId}\``, {}, `task:${opts.taskId}:done`);
 
   } else if (confirmationButtons.length > 0) {
@@ -1372,19 +1369,21 @@ Now provide a clear, concise summary for the user based on the results. Use mark
     });
 
     // ── TASK LIFECYCLE: mark succeeded (awaiting user confirmation for destructive actions) ──
+    const executionDuration = Date.now() - executionStart;
     await supabase.from("tasks").update({
       status: "succeeded",
       selected_tools: executedToolNames,
-      result_json: { execution_complete: true, workflow: opts.workflowKey, awaiting_confirmation: true, toolResults: toolResults.map(r => r.slice(0, 500)), model_used: opts.sessionModel },
+      result_json: { execution_complete: true, workflow: opts.workflowKey, awaiting_confirmation: true, toolResults: toolResults.map(r => r.slice(0, 500)), model_used: opts.sessionModel, execution_duration_ms: executionDuration },
     }).eq("id", opts.taskId);
     await sendMessage(chatId, `✅ Done: \`${opts.taskId}\``, {}, `task:${opts.taskId}:done`);
 
   } else {
     // No tool calls at all — mark succeeded with text-only result
+    const executionDuration = Date.now() - executionStart;
     await supabase.from("tasks").update({
       status: "succeeded",
       selected_tools: [],
-      result_json: { execution_complete: true, workflow: opts.workflowKey, text_response: (result.text || "").slice(0, 2000), model_used: opts.sessionModel },
+      result_json: { execution_complete: true, workflow: opts.workflowKey, text_response: (result.text || "").slice(0, 2000), model_used: opts.sessionModel, execution_duration_ms: executionDuration },
     }).eq("id", opts.taskId);
     await sendMessage(chatId, `✅ Done: \`${opts.taskId}\``, {}, `task:${opts.taskId}:done`);
   }
@@ -1659,7 +1658,7 @@ serve(async (req) => {
         const statusResult = statusTool ? await statusTool.execute({}) : "Tool get_system_status not found";
         const health = systemHealthCheck();
         const model = session.active_model as "grok" | "gemini";
-        const reply = formatAssistantMessage(model, `📊 *System Status*\n\n${statusResult}\n\n🏥 *Health:* uptime=${Math.round(health.uptime_ms / 1000)}s tools=${health.tool_count} workflows=${health.implemented_workflows.length}`);
+        const reply = formatAssistantMessage(model, `📊 *System Status*\n\n${statusResult}\n\n🏥 *Health:* uptime=${Math.round(health.uptime_ms / 1000)}s tools=${health.tool_count} workflows=${health.implemented_workflow_count}`);
         await sendMessage(chatId, reply);
         await supabase.from("tasks").update({
           status: "succeeded",
@@ -1713,6 +1712,49 @@ serve(async (req) => {
       await sendMessage(chatId, helpText, {}, `task:${taskId}:help`);
       await supabase.from("tasks").update({ status: "succeeded", result_json: { action: "help" } }).eq("id", taskId);
       await sendMessage(chatId, `✅ Done: \`${taskId}\``, {}, `task:${taskId}:done`);
+      _currentTaskId = null;
+      return new Response("ok");
+    }
+
+    // ── /metrics — execution metrics ──
+    if (text.toLowerCase() === "/metrics") {
+      await supabase.from("tasks").update({ status: "running" }).eq("id", taskId);
+      try {
+        const { data: recentTasks } = await supabase
+          .from("tasks")
+          .select("id, status, selected_workflow, result_json, created_at")
+          .order("created_at", { ascending: false })
+          .limit(20);
+
+        const health = systemHealthCheck();
+        const taskSummaries = (recentTasks || []).map((t: any) => ({
+          id: t.id?.slice(0, 8),
+          status: t.status,
+          workflow: t.selected_workflow || "—",
+          duration_ms: t.result_json?.execution_duration_ms ?? null,
+          created: t.created_at,
+        }));
+
+        const lines = [
+          `📊 *${SYSTEM_IDENTITY} — Metrics*`,
+          ``,
+          `🏥 *Health:* uptime=${Math.round(health.uptime_ms / 1000)}s tools=${health.tool_count} workflows=${health.implemented_workflow_count}`,
+          ``,
+          `*Last 20 Tasks:*`,
+          ...taskSummaries.map((t: any) => `\`${t.id}\` ${t.status} | ${t.workflow}${t.duration_ms != null ? ` | ${t.duration_ms}ms` : ""}`),
+        ];
+
+        await sendMessage(chatId, lines.join("\n"), {}, `task:${taskId}:metrics`);
+        await supabase.from("tasks").update({
+          status: "succeeded",
+          result_json: { progress_step: "shortcut_metrics", health, task_count: taskSummaries.length },
+        }).eq("id", taskId);
+        await sendMessage(chatId, `✅ Done: \`${taskId}\``, {}, `task:${taskId}:done`);
+      } catch (metricsErr) {
+        const errMsg = metricsErr instanceof Error ? metricsErr.message : String(metricsErr);
+        await supabase.from("tasks").update({ status: "failed", error: errMsg }).eq("id", taskId);
+        await sendMessage(chatId, `❌ Failed: \`${taskId}\` — ${errMsg.slice(0, 200)}`);
+      }
       _currentTaskId = null;
       return new Response("ok");
     }
