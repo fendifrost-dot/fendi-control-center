@@ -1593,11 +1593,16 @@ serve(async (req) => {
         ``,
         `*Commands:*`,
         `• /status — System status`,
+        `• /metrics — Metrics + recent tasks`,
         `• /ping — Connectivity test`,
         `• /workflows — See all registered workflows`,
         `• /help — Quick help`,
         `• /do <workflow> — Execute a workflow`,
         `• /model — Check or switch AI model`,
+        ``,
+        `📈 *Observability:*`,
+        `• /status — health snapshot`,
+        `• /metrics — last 20 tasks + durations`,
         ``,
         `🔒 I will NEVER execute tools unless you use \`/do\` or a direct command.`,
       ].join("\n"));
@@ -1701,13 +1706,14 @@ serve(async (req) => {
         ``,
         `*Commands:*`,
         `• /status — System status`,
+        `• /metrics — Metrics + recent tasks`,
         `• /ping — Connectivity test`,
         `• /resend\\_failed — Retry failed outbox items`,
         `• /workflows — See all available workflows`,
         `• /do <workflow> — Execute a specific workflow`,
         `• /model — Check or switch AI model`,
         ``,
-        `💡 Tip: run \`/workflows\` to see all available workflows, then \`/do <key>\` to execute.`,
+        `💡 Tip: run \`/metrics\` to inspect recent task runs and durations.`,
       ].join("\n");
       await sendMessage(chatId, helpText, {}, `task:${taskId}:help`);
       await supabase.from("tasks").update({ status: "succeeded", result_json: { action: "help" } }).eq("id", taskId);
