@@ -12,6 +12,79 @@ const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
 const TELEGRAM_API = `https://api.telegram.org/bot${BOT_TOKEN}`;
 const SYSTEM_IDENTITY = "Fendi Control Center AI";
 
+// ─── Implemented workflow keys → handler names (deterministic routing) ───
+const IMPLEMENTED_WORKFLOW_KEYS = new Set([
+  "ping", "system_status", "resend_failed", "list_workflows", "help",
+]);
+
+// ─── Workflow registry fetch ────────────────────────────────────
+interface WorkflowEntry {
+  key: string; name: string; description: string;
+  trigger_phrases: string[]; tools: string[];
+}
+
+function _normalizeText(s: string): string {
+  return (s ?? "").trim().toLowerCase();
+}
+
+function _matchWorkflows(input: string, workflows: WorkflowEntry[]): { matches: WorkflowEntry[]; chosen?: WorkflowEntry } {
+  const norm = _normalizeText(input);
+  if (!norm) return { matches: [] };
+  const matched: WorkflowEntry[] = [];
+  for (const wf of workflows) {
+    for (const phrase of wf.trigger_phrases) {
+      const np = _normalizeText(phrase);
+      if (norm === np || norm.includes(np) || (norm.length >= 4 && np.includes(norm))) {
+        matched.push(wf); break;
+      }
+    }
+  }
+  if (matched.length === 1) return { matches: matched, chosen: matched[0] };
+  return { matches: matched };
+}
+
+function _formatWorkflowList(workflows: WorkflowEntry[]): string {
+  if (!workflows.length) return "No workflows registered.";
+  const lines = workflows.map((wf) => {
+    const status = IMPLEMENTED_WORKFLOW_KEYS.has(wf.key) ? "✅ Implemented" : "⚠️ Not Implemented";
+    const triggers = (wf.trigger_phrases || []).slice(0, 4).join(", ");
+    const tools = (wf.tools || []).join(", ") || "—";
+    return `*${wf.name}* — \`${wf.key}\`\n  ${wf.description}\n  Triggers: ${triggers}\n  Tools: ${tools}\n  Status: ${status}`;
+  });
+  return `📋 *Workflow Registry*\n\n${lines.join("\n\n")}`;
+}
+
+function _formatNoMatch(workflows: WorkflowEntry[]): string {
+  const suggestions = workflows.slice(0, 6)
+    .map((wf) => `• *${wf.name}* — try: \`${wf.trigger_phrases[0] || wf.key}\``)
+    .join("\n");
+  return `❓ No matching workflow for that request.\n\nRun /workflows to see everything available.\n\nSuggestions:\n${suggestions}`;
+}
+
+async function fetchWorkflowRegistry(): Promise<WorkflowEntry[]> {
+  try {
+    const { data, error } = await supabase.rpc("list_workflows");
+    if (error || !data) {
+      console.error("[WORKFLOW] RPC list_workflows failed:", error?.message);
+      return [];
+    }
+    // Runtime shape guard
+    if (!Array.isArray(data)) return [];
+    return data.filter((w: any) => w.key && w.name);
+  } catch (e) {
+    console.error("[WORKFLOW] fetchWorkflowRegistry exception:", e);
+    return [];
+  }
+}
+
+async function sendHeaderOnce(taskId: string, chatId: string, model: "gemini" | "grok") {
+  const headerText = `🤖 *${SYSTEM_IDENTITY}* _(Model: ${getModelLabel(model)})_`;
+  await enqueueTelegram(taskId, chatId, "sendMessage", {
+    chat_id: chatId, text: headerText, parse_mode: "Markdown",
+  }, `task:${taskId}:header`);
+  await flushTelegramOutbox(chatId, 1);
+}
+
 // ─── Outbox-aware Telegram delivery ─────────────────────────────
 let _currentTaskId: string | null = null;
 
@@ -831,7 +904,7 @@ async function agenticGeminiCall(
 
 CRITICAL RULES — MANDATORY:
 1. NO TOOL, NO CLAIM: You MUST use your available tools to fulfill requests. NEVER describe what you would do — actually call the function. If the user asks to see comments, call the tool. Do NOT respond with text saying "I'll do X" without calling the corresponding function.
-2. NO WORKFLOW, NO ACTION: If the user's request does not correspond to ANY of your available tools, respond EXACTLY with: "No internal workflow exists for that request yet." and optionally offer to create one.
+2. NO WORKFLOW, NO ACTION: If the user's request does not correspond to ANY of your available tools, respond with a short message suggesting they run /workflows to see available commands. Never invent workflows.
 3. EVIDENCE OVER CLAIMS: All data must come from tool calls. Never invent counts, names, or metrics.
 4. For destructive actions (retry, archive, approve, reject, Instagram DMs/replies), ALWAYS call the tool — the system will handle confirmation.
 
@@ -896,7 +969,7 @@ async function agenticGrokCall(
 
 CRITICAL RULES — MANDATORY:
 1. NO TOOL, NO CLAIM: You MUST use your available tools to fulfill requests. NEVER describe what you would do — actually call the function. If the user asks to see comments, call the tool. Do NOT respond with text saying "I'll do X" without calling the corresponding function.
-2. NO WORKFLOW, NO ACTION: If the user's request does not correspond to ANY of your available tools, respond EXACTLY with: "No internal workflow exists for that request yet." and optionally offer to create one.
+2. NO WORKFLOW, NO ACTION: If the user's request does not correspond to ANY of your available tools, respond with a short message suggesting they run /workflows to see available commands. Never invent workflows.
 3. EVIDENCE OVER CLAIMS: All data must come from tool calls. Never invent counts, names, or metrics.
 4. For destructive actions (retry, archive, approve, reject, Instagram DMs/replies), ALWAYS call the tool — the system will handle confirmation.
 
@@ -1021,8 +1094,7 @@ async function executeAgenticLoop(chatId: string, userMessage: string, opts: { t
 
   // Step 2: If no tool calls, just send the text response
   if (result.toolCalls.length === 0) {
-    const responseText = result.text || "I'm not sure how to help with that. Try /start for available commands.";
-    const isNoWorkflow = responseText.includes("No internal workflow exists for that request yet");
+    const responseText = result.text || "I'm not sure how to help with that. Try /workflows for available commands.";
     const reply = formatAssistantMessage(model, responseText);
     await sendMessage(chatId, reply);
     await appendConversationTurn(chatId, {
@@ -1032,22 +1104,12 @@ async function executeAgenticLoop(chatId: string, userMessage: string, opts: { t
       at: new Date().toISOString(),
     });
 
-    if (isNoWorkflow) {
-      await supabase.from("tasks").update({
-        status: "failed",
-        error: "NO_WORKFLOW",
-        selected_tools: [],
-        result_json: { text_response: responseText.slice(0, 2000), model_used: opts.sessionModel },
-      }).eq("id", opts.taskId);
-      await sendMessage(chatId, `❌ Failed: \`${opts.taskId}\` — NO_WORKFLOW`, {}, `task:${opts.taskId}:failed`);
-    } else {
-      await supabase.from("tasks").update({
-        status: "succeeded",
-        selected_tools: [],
-        result_json: { text_response: responseText.slice(0, 2000), model_used: opts.sessionModel },
-      }).eq("id", opts.taskId);
-      await sendMessage(chatId, `✅ Done: \`${opts.taskId}\``, {}, `task:${opts.taskId}:done`);
-    }
+    await supabase.from("tasks").update({
+      status: "succeeded",
+      selected_tools: [],
+      result_json: { text_response: responseText.slice(0, 2000), model_used: opts.sessionModel },
+    }).eq("id", opts.taskId);
+    await sendMessage(chatId, `✅ Done: \`${opts.taskId}\``, {}, `task:${opts.taskId}:done`);
     return;
   }
 
@@ -1059,7 +1121,7 @@ async function executeAgenticLoop(chatId: string, userMessage: string, opts: { t
     const tool = AGENT_TOOLS.find(t => t.name === tc.name);
     if (!tool) {
       console.error(`GUARDRAIL: AI tried to call unregistered tool '${tc.name}' — blocked.`);
-      toolResults.push(`🚫 Tool '${tc.name}' is not in the tool registry. No internal workflow exists for that request yet.`);
+      toolResults.push(`🚫 Tool '${tc.name}' is not in the tool registry. Run /workflows to see available commands.`);
       continue;
     }
 
@@ -1501,6 +1563,85 @@ serve(async (req) => {
         await sendMessage(chatId, `❌ Failed: \`${taskId}\` — ${errMsg.slice(0, 200)}`);
       }
       return new Response("ok");
+    }
+
+    // ── /workflows — list from DB registry ──
+    if (text.toLowerCase() === "/workflows") {
+      await supabase.from("tasks").update({ status: "running" }).eq("id", taskId);
+      const workflows = await fetchWorkflowRegistry();
+      const listText = workflows.length > 0
+        ? _formatWorkflowList(workflows)
+        : "⚠️ Workflow registry unavailable right now. Try /status or try again.";
+      await sendMessage(chatId, listText, {}, `task:${taskId}:workflows`);
+      await supabase.from("tasks").update({ status: "succeeded", result_json: { action: "list_workflows" } }).eq("id", taskId);
+      await sendMessage(chatId, `✅ Done: \`${taskId}\``, {}, `task:${taskId}:done`);
+      _currentTaskId = null;
+      return new Response("ok");
+    }
+
+    // ── /help — short help ──
+    if (text.toLowerCase() === "/help") {
+      await supabase.from("tasks").update({ status: "running" }).eq("id", taskId);
+      const helpText = [
+        `🎯 *${SYSTEM_IDENTITY} — Quick Help*`,
+        ``,
+        `• /status — System status`,
+        `• /ping — Connectivity test`,
+        `• /resend\\_failed — Retry failed outbox items`,
+        `• /workflows — See all available workflows`,
+        `• /model — Check or switch AI model`,
+        ``,
+        `💡 Tip: type \`workflows\` to see everything available.`,
+      ].join("\n");
+      await sendMessage(chatId, helpText, {}, `task:${taskId}:help`);
+      await supabase.from("tasks").update({ status: "succeeded", result_json: { action: "help" } }).eq("id", taskId);
+      await sendMessage(chatId, `✅ Done: \`${taskId}\``, {}, `task:${taskId}:done`);
+      _currentTaskId = null;
+      return new Response("ok");
+    }
+
+    // ── Deterministic workflow router (before agentic loop) ──
+    {
+      const workflows = await fetchWorkflowRegistry();
+      if (workflows.length > 0) {
+        const { matches, chosen } = _matchWorkflows(text, workflows);
+
+        if (matches.length > 1) {
+          // Multiple matches — ask user to be specific
+          const ambiguous = matches.map((m, i) => `${i + 1}. *${m.name}* (\`${m.key}\`) — try: \`${m.trigger_phrases[0] || m.key}\``).join("\n");
+          await sendMessage(chatId, `🔀 Multiple workflows match. Be more specific:\n\n${ambiguous}`, {}, `task:${taskId}:ambiguous`);
+          await supabase.from("tasks").update({ status: "succeeded", result_json: { action: "ambiguous_match", matches: matches.map(m => m.key) } }).eq("id", taskId);
+          await sendMessage(chatId, `✅ Done: \`${taskId}\``, {}, `task:${taskId}:done`);
+          _currentTaskId = null;
+          return new Response("ok");
+        }
+
+        if (chosen) {
+          if (!IMPLEMENTED_WORKFLOW_KEYS.has(chosen.key)) {
+            // Registered but not implemented
+            const notImpl = [
+              `✅ Registered in workflow registry, but not implemented in this bot yet.`,
+              ``,
+              `*Workflow:* \`${chosen.key}\``,
+              `*Tools:* ${(chosen.tools || []).join(", ") || "—"}`,
+              `*Try:* ${(chosen.trigger_phrases || []).slice(0, 2).map(t => `\`${t}\``).join(", ")}`,
+            ].join("\n");
+            await sendMessage(chatId, notImpl, {}, `task:${taskId}:not-impl`);
+            await supabase.from("tasks").update({ status: "succeeded", result_json: { action: "not_implemented", workflow: chosen.key } }).eq("id", taskId);
+            await sendMessage(chatId, `✅ Done: \`${taskId}\``, {}, `task:${taskId}:done`);
+            _currentTaskId = null;
+            return new Response("ok");
+          }
+          // Implemented workflows that weren't caught by earlier exact-command handlers
+          // (e.g. fuzzy matches like "system status", "workflows", "help", "ping", etc.)
+          // Route them to the correct handler by falling through to agentic loop
+          // (The exact /commands were already handled above)
+        }
+
+        // 0 matches from registry — check if it's something the AI can handle via tools
+        // Fall through to agentic loop but NOTE: if the agentic loop also fails,
+        // the user gets a useful response (not the old vague message)
+      }
     }
 
     // ── Set task to running BEFORE executing ──
