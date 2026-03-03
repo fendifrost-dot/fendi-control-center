@@ -775,3 +775,66 @@ Deno.test("R1: /metrics range footer exists in source", async () => {
   assertMatch(source, /Range:\*/, "Must render Range footer");
   assertMatch(source, /range:\s*\{\s*oldest:/, "Must store range in result_json");
 });
+
+// ─── FIX REGRESSION TESTS ───────────────────────────────────────
+
+Deno.test("R2: /do sets selected_workflow before executeAgenticLoop", async () => {
+  const source = await Deno.readTextFile("supabase/functions/telegram-webhook/index.ts");
+  // selected_workflow: chosen!.key must appear BEFORE executeAgenticLoop call in /do path
+  const workflowAttrIdx = source.indexOf("selected_workflow: chosen!.key");
+  const loopCallIdx = source.indexOf("executeAgenticLoop(chatId, doArg");
+  assertNotEquals(workflowAttrIdx, -1, "Must set selected_workflow: chosen!.key");
+  assertNotEquals(loopCallIdx, -1, "Must call executeAgenticLoop");
+  assertEquals(workflowAttrIdx < loopCallIdx, true, "selected_workflow must be set BEFORE executeAgenticLoop call");
+});
+
+Deno.test("R3: shortcuts set selected_workflow via setShortcutAttribution", async () => {
+  const source = await Deno.readTextFile("supabase/functions/telegram-webhook/index.ts");
+  assertMatch(source, /setShortcutAttribution\(taskId,\s*"status"\)/, "Must set shortcut_status");
+  assertMatch(source, /setShortcutAttribution\(taskId,\s*"metrics"\)/, "Must set shortcut_metrics");
+  assertMatch(source, /setShortcutAttribution\(taskId,\s*"ping"\)/, "Must set shortcut_ping");
+  assertMatch(source, /setShortcutAttribution\(taskId,\s*"help"\)/, "Must set shortcut_help");
+  assertMatch(source, /setShortcutAttribution\(taskId,\s*"workflows"\)/, "Must set shortcut_workflows");
+  assertMatch(source, /setShortcutAttribution\(taskId,\s*"resend_failed"\)/, "Must set shortcut_resend_failed");
+});
+
+Deno.test("R4: lock acquisition writes execution_lock field", async () => {
+  const source = await Deno.readTextFile("supabase/functions/telegram-webhook/index.ts");
+  assertMatch(source, /execution_lock:\s*lockId/, "Must write execution_lock: lockId on lock acquisition");
+  assertMatch(source, /execution_lock_ts:\s*Date\.now\(\)/, "Must write execution_lock_ts");
+});
+
+Deno.test("R5: lock release on terminal states sets execution_lock null", async () => {
+  const source = await Deno.readTextFile("supabase/functions/telegram-webhook/index.ts");
+  assertMatch(source, /execution_lock:\s*null/, "Must set execution_lock: null on completion");
+  assertMatch(source, /execution_lock_released_ts:\s*Date\.now\(\)/, "Must set execution_lock_released_ts on completion");
+  // Count occurrences — should be in all terminal paths (at least 4: 3 in executeAgenticLoop + 1 in /do catch)
+  const lockNullCount = (source.match(/execution_lock:\s*null/g) || []).length;
+  assertEquals(lockNullCount >= 4, true, `Expected at least 4 lock release points, got ${lockNullCount}`);
+});
+
+Deno.test("R6: Lane 2 has finally{} block with terminal status", async () => {
+  const source = await Deno.readTextFile("supabase/functions/telegram-webhook/index.ts");
+  // Lane 2 section should have a finally block
+  const lane2Marker = source.indexOf("LANE 2 — ASSISTANT MODE");
+  assertNotEquals(lane2Marker, -1, "Must have LANE 2 section");
+  const lane2Section = source.slice(lane2Marker, lane2Marker + 8000);
+  assertMatch(lane2Section, /finally\s*\{/, "Lane 2 must have finally{} block");
+  assertMatch(lane2Section, /progress_step:\s*"lane2_done"/, "Lane 2 must set progress_step lane2_done");
+  assertMatch(lane2Section, /progress_step:\s*"lane2_failed"/, "Lane 2 must set progress_step lane2_failed");
+  assertMatch(lane2Section, /execution_lane:\s*"lane2_assistant"/, "Lane 2 must set execution_lane");
+  assertMatch(lane2Section, /execution_duration_ms/, "Lane 2 must track execution_duration_ms");
+});
+
+Deno.test("R7: Lane 2 does NOT call executeAgenticLoop", async () => {
+  const source = await Deno.readTextFile("supabase/functions/telegram-webhook/index.ts");
+  const lane2Marker = source.indexOf("LANE 2 — ASSISTANT MODE");
+  assertNotEquals(lane2Marker, -1, "Must have LANE 2 section");
+  const lane2Section = source.slice(lane2Marker);
+  assertEquals(lane2Section.includes("executeAgenticLoop("), false, "Lane 2 must NOT call executeAgenticLoop");
+});
+
+Deno.test("R8: createTaskRow sets selected_workflow null and result_json.action created", async () => {
+  const source = await Deno.readTextFile("supabase/functions/telegram-webhook/index.ts");
+  assertMatch(source, /selected_workflow:\s*null,\s*\n\s*result_json:\s*\{\s*action:\s*"created"\s*\}/, "createTaskRow must set selected_workflow: null and result_json.action: created");
+});
