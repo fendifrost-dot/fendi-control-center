@@ -1474,23 +1474,26 @@ serve(async (req) => {
     // /start still shows the help menu
     if (text === "/start") {
       await sendMessage(chatId, [
-        `🎯 *${SYSTEM_IDENTITY} — Online (Agentic Mode)*`,
+        `🎯 *${SYSTEM_IDENTITY} — Online (Two-Lane Mode)*`,
         ``,
-        `🤖 Just tell me what you need — I'll figure out the best way to handle it.`,
+        `💬 *Lane 2 (Default):* Just talk to me — I'll answer, explain, draft, plan.`,
+        `⚡ *Lane 1 (Execute):* Prefix with \`/do\` to run a workflow.`,
         ``,
         `*Examples:*`,
-        `• "What's broken today?"`,
-        `• "Retry all failed jobs"`,
-        `• "How are my projects doing?"`,
-        `• "Approve all pending documents"`,
-        `• "Show my recent Instagram comments"`,
-        `• "DM @user thanks for the shoutout"`,
-        `• "Reply to that Instagram comment saying thank you"`,
+        `• "What's broken today?" → I'll explain (Lane 2)`,
+        `• \`/do status\` → Executes system status check (Lane 1)`,
+        `• \`/do retry failed jobs\` → Executes retry workflow (Lane 1)`,
+        `• "How are my projects doing?" → I'll discuss (Lane 2)`,
         ``,
-        `🔒 Model is locked until you switch it explicitly with /model grok or /model gemini.`,
-        `💡 I'll ask for confirmation before doing anything destructive (including Instagram messages).`,
+        `*Commands:*`,
+        `• /status — System status`,
+        `• /ping — Connectivity test`,
+        `• /workflows — See all registered workflows`,
+        `• /help — Quick help`,
+        `• /do <workflow> — Execute a workflow`,
+        `• /model — Check or switch AI model`,
         ``,
-        `_Legacy commands still work: /status, /pending, /failed, /model, /projects, /stats_`,
+        `🔒 I will NEVER execute tools unless you use \`/do\` or a direct command.`,
       ].join("\n"));
       await supabase.from("tasks").update({ status: "succeeded", result_json: { action: "start_help" } }).eq("id", taskId);
       await sendMessage(chatId, `✅ Done: \`${taskId}\``);
@@ -1585,13 +1588,19 @@ serve(async (req) => {
       const helpText = [
         `🎯 *${SYSTEM_IDENTITY} — Quick Help*`,
         ``,
+        `*Two-Lane System:*`,
+        `💬 Just type normally → Assistant mode (Lane 2)`,
+        `⚡ \`/do <workflow>\` → Execution mode (Lane 1)`,
+        ``,
+        `*Commands:*`,
         `• /status — System status`,
         `• /ping — Connectivity test`,
         `• /resend\\_failed — Retry failed outbox items`,
         `• /workflows — See all available workflows`,
+        `• /do <workflow> — Execute a specific workflow`,
         `• /model — Check or switch AI model`,
         ``,
-        `💡 Tip: type \`workflows\` to see everything available.`,
+        `💡 Tip: run \`/workflows\` to see all available workflows, then \`/do <key>\` to execute.`,
       ].join("\n");
       await sendMessage(chatId, helpText, {}, `task:${taskId}:help`);
       await supabase.from("tasks").update({ status: "succeeded", result_json: { action: "help" } }).eq("id", taskId);
@@ -1600,75 +1609,193 @@ serve(async (req) => {
       return new Response("ok");
     }
 
-    // ── Deterministic workflow router (before agentic loop) ──
-    {
-      const workflows = await fetchWorkflowRegistry();
-      if (workflows.length > 0) {
-        const { matches, chosen } = _matchWorkflows(text, workflows);
-
-        if (matches.length > 1) {
-          // Multiple matches — ask user to be specific
-          const ambiguous = matches.map((m, i) => `${i + 1}. *${m.name}* (\`${m.key}\`) — try: \`${m.trigger_phrases[0] || m.key}\``).join("\n");
-          await sendMessage(chatId, `🔀 Multiple workflows match. Be more specific:\n\n${ambiguous}`, {}, `task:${taskId}:ambiguous`);
-          await supabase.from("tasks").update({ status: "succeeded", result_json: { action: "ambiguous_match", matches: matches.map(m => m.key) } }).eq("id", taskId);
-          await sendMessage(chatId, `✅ Done: \`${taskId}\``, {}, `task:${taskId}:done`);
-          _currentTaskId = null;
-          return new Response("ok");
-        }
-
-        if (chosen) {
-          if (!IMPLEMENTED_WORKFLOW_KEYS.has(chosen.key)) {
-            // Registered but not implemented
-            const notImpl = [
-              `✅ Registered in workflow registry, but not implemented in this bot yet.`,
-              ``,
-              `*Workflow:* \`${chosen.key}\``,
-              `*Tools:* ${(chosen.tools || []).join(", ") || "—"}`,
-              `*Try:* ${(chosen.trigger_phrases || []).slice(0, 2).map(t => `\`${t}\``).join(", ")}`,
-            ].join("\n");
-            await sendMessage(chatId, notImpl, {}, `task:${taskId}:not-impl`);
-            await supabase.from("tasks").update({ status: "succeeded", result_json: { action: "not_implemented", workflow: chosen.key } }).eq("id", taskId);
-            await sendMessage(chatId, `✅ Done: \`${taskId}\``, {}, `task:${taskId}:done`);
-            _currentTaskId = null;
-            return new Response("ok");
-          }
-          // Implemented workflows that weren't caught by earlier exact-command handlers
-          // (e.g. fuzzy matches like "system status", "workflows", "help", "ping", etc.)
-          // Route them to the correct handler by falling through to agentic loop
-          // (The exact /commands were already handled above)
-        }
-
-        // 0 matches from registry — check if it's something the AI can handle via tools
-        // Fall through to agentic loop but NOTE: if the agentic loop also fails,
-        // the user gets a useful response (not the old vague message)
+    // ══════════════════════════════════════════════════════════
+    // LANE 1 — EXECUTION MODE (triggered by /do <workflow>)
+    // ══════════════════════════════════════════════════════════
+    if (text.toLowerCase().startsWith("/do")) {
+      const doArg = text.slice(3).trim(); // everything after "/do"
+      if (!doArg) {
+        await sendMessage(chatId, `⚠️ Usage: \`/do <workflow>\`\nRun /workflows to see available commands.`, {}, `task:${taskId}:do-usage`);
+        await supabase.from("tasks").update({ status: "succeeded", result_json: { action: "do_usage" } }).eq("id", taskId);
+        await sendMessage(chatId, `✅ Done: \`${taskId}\``, {}, `task:${taskId}:done`);
+        _currentTaskId = null;
+        return new Response("ok");
       }
+
+      await supabase.from("tasks").update({ status: "running" }).eq("id", taskId);
+      const workflows = await fetchWorkflowRegistry();
+
+      if (workflows.length === 0) {
+        await sendMessage(chatId, `⚠️ Workflow registry unavailable right now. Try /status or try again.`, {}, `task:${taskId}:registry-down`);
+        await supabase.from("tasks").update({ status: "failed", error: "registry_unavailable" }).eq("id", taskId);
+        _currentTaskId = null;
+        return new Response("ok");
+      }
+
+      const { matches, chosen } = _matchWorkflows(doArg, workflows);
+
+      if (matches.length === 0) {
+        const noMatch = _formatNoMatch(workflows);
+        await sendMessage(chatId, `🚫 No executable workflow found for: \`${doArg}\`\n\n${noMatch}`, {}, `task:${taskId}:no-match`);
+        await supabase.from("tasks").update({ status: "succeeded", result_json: { action: "do_no_match", input: doArg } }).eq("id", taskId);
+        await sendMessage(chatId, `✅ Done: \`${taskId}\``, {}, `task:${taskId}:done`);
+        _currentTaskId = null;
+        return new Response("ok");
+      }
+
+      if (matches.length > 1) {
+        const ambiguous = matches.map((m, i) => `${i + 1}. *${m.name}* (\`${m.key}\`) — try: \`/do ${m.trigger_phrases[0] || m.key}\``).join("\n");
+        await sendMessage(chatId, `🔀 Multiple workflows match. Be more specific:\n\n${ambiguous}`, {}, `task:${taskId}:ambiguous`);
+        await supabase.from("tasks").update({ status: "succeeded", result_json: { action: "do_ambiguous", matches: matches.map(m => m.key) } }).eq("id", taskId);
+        await sendMessage(chatId, `✅ Done: \`${taskId}\``, {}, `task:${taskId}:done`);
+        _currentTaskId = null;
+        return new Response("ok");
+      }
+
+      // Exactly 1 match
+      if (!IMPLEMENTED_WORKFLOW_KEYS.has(chosen!.key)) {
+        const notImpl = [
+          `✅ Registered in workflow registry, but not implemented in this bot yet.`,
+          ``,
+          `*Workflow:* \`${chosen!.key}\``,
+          `*Tools:* ${(chosen!.tools || []).join(", ") || "—"}`,
+          `*Try:* ${(chosen!.trigger_phrases || []).slice(0, 2).map(t => `\`/do ${t}\``).join(", ")}`,
+        ].join("\n");
+        await sendMessage(chatId, notImpl, {}, `task:${taskId}:not-impl`);
+        await supabase.from("tasks").update({ status: "succeeded", result_json: { action: "not_implemented", workflow: chosen!.key } }).eq("id", taskId);
+        await sendMessage(chatId, `✅ Done: \`${taskId}\``, {}, `task:${taskId}:done`);
+        _currentTaskId = null;
+        return new Response("ok");
+      }
+
+      // Implemented — execute via agentic loop with tools
+      console.log(`[LANE1] Executing workflow '${chosen!.key}' via agentic loop taskId=${taskId}`);
+      const LOOP_TIMEOUT_MS = 35_000;
+      const timeoutPromise = new Promise<never>((_, reject) =>
+        setTimeout(() => reject(new Error("TIMEOUT")), LOOP_TIMEOUT_MS)
+      );
+      try {
+        await Promise.race([
+          executeAgenticLoop(chatId, doArg, { taskId, sessionModel: session.active_model as "grok" | "gemini" | "chatgpt" }),
+          timeoutPromise,
+        ]);
+      } catch (loopErr) {
+        const errMsg = loopErr instanceof Error ? loopErr.message : String(loopErr);
+        console.error(`[LANE1] Execution error taskId=${taskId}: ${errMsg}`);
+        await supabase.from("tasks").update({ status: "failed", error: errMsg, result_json: { progress_step: "lane1_failed", model_used: session.active_model } }).eq("id", taskId);
+        await sendMessage(chatId, `❌ Failed: \`${taskId}\` — ${errMsg.slice(0, 200)}`, {}, `task:${taskId}:failed`);
+      }
+      _currentTaskId = null;
+      return new Response("ok");
     }
 
-    // ── Set task to running BEFORE executing ──
-    console.log(`[CHECKPOINT-B] Setting task running taskId=${taskId} ts=${Date.now()}`);
-    await supabase.from("tasks").update({ status: "running", result_json: { progress_step: "B_running" } }).eq("id", taskId);
+    // ══════════════════════════════════════════════════════════
+    // LANE 2 — ASSISTANT MODE (default, no tool execution)
+    // ══════════════════════════════════════════════════════════
+    console.log(`[LANE2] Assistant mode taskId=${taskId} ts=${Date.now()}`);
+    await supabase.from("tasks").update({ status: "running", result_json: { progress_step: "lane2_assistant" } }).eq("id", taskId);
 
-    // Everything else goes through the agentic loop (model pinned from session)
-    console.log(`[CHECKPOINT-C] Calling executeAgenticLoop taskId=${taskId} model=${session.active_model} ts=${Date.now()}`);
+    const model: "grok" | "gemini" = (session.active_model === "chatgpt" ? "grok" : session.active_model) as "grok" | "gemini";
+    const conversationContext = await buildConversationContext(chatId);
 
-    // Timeout guard: 35s max for the agentic loop
-    const LOOP_TIMEOUT_MS = 35_000;
-    const timeoutPromise = new Promise<never>((_, reject) =>
-      setTimeout(() => reject(new Error("TIMEOUT")), LOOP_TIMEOUT_MS)
-    );
+    await appendConversationTurn(chatId, {
+      role: "user",
+      content: text,
+      model,
+      at: new Date().toISOString(),
+    });
+
+    // Fetch workflow registry for context (so assistant can suggest /do commands)
+    const workflows = await fetchWorkflowRegistry();
+    const workflowContext = workflows.length > 0
+      ? `\n\nAvailable workflows (user must run \`/do <workflow>\` to execute):\n${workflows.map(w => `- ${w.name} (\`${w.key}\`): ${w.trigger_phrases.slice(0, 2).join(", ")}`).join("\n")}`
+      : "";
+
+    const assistantSystemPrompt = `You are the ${SYSTEM_IDENTITY}. You serve Fendi Frost as a personal command center assistant.
+
+TWO-LANE RULE — You are in ASSISTANT MODE (Lane 2).
+- Answer questions, explain, draft, brainstorm, plan.
+- Suggest workflows when useful.
+- DO NOT output tool calls. DO NOT claim a tool was used. DO NOT simulate execution.
+- When the user asks to DO something (execute, run, trigger), respond:
+  "This can be executed. Reply with \`/do <workflow>\` to run it."
+  and suggest the matching workflow key.
+
+Available commands:
+- /do <workflow> — Execute a workflow (Lane 1)
+- /status — System status
+- /ping — Connectivity test
+- /workflows — See all registered workflows
+- /help — Quick help
+${workflowContext}
+
+Conversation Context:
+${conversationContext}
+
+Be concise, professional, and use emoji sparingly.`;
+
+    let assistantReply: string;
+    const ASSISTANT_TIMEOUT_MS = 20_000;
 
     try {
-      await Promise.race([
-        executeAgenticLoop(chatId, text, { taskId, sessionModel: session.active_model as "grok" | "gemini" | "chatgpt" }),
-        timeoutPromise,
-      ]);
-    } catch (loopErr) {
-      const errMsg = loopErr instanceof Error ? loopErr.message : String(loopErr);
-      console.error(`[CHECKPOINT-G] Agentic loop error taskId=${taskId}: ${errMsg}`);
-      await supabase.from("tasks").update({ status: "failed", error: errMsg, result_json: { progress_step: "G_failed", model_used: session.active_model } }).eq("id", taskId);
-      await sendMessage(chatId, `❌ Failed: \`${taskId}\` — ${errMsg.slice(0, 200)}`, {}, `task:${taskId}:failed`);
+      const assistantTimeout = new Promise<never>((_, reject) =>
+        setTimeout(() => reject(new Error("TIMEOUT")), ASSISTANT_TIMEOUT_MS)
+      );
+
+      let aiResponse: string;
+      if (model === "grok") {
+        const resp = await Promise.race([fetch("https://api.x.ai/v1/chat/completions", {
+          method: "POST",
+          headers: { Authorization: `Bearer ${GROK_KEY}`, "Content-Type": "application/json" },
+          body: JSON.stringify({
+            model: "grok-3-mini-fast",
+            messages: [
+              { role: "system", content: assistantSystemPrompt },
+              { role: "user", content: text },
+            ],
+            max_tokens: 1024,
+          }),
+        }), assistantTimeout]);
+        const data = await resp.json();
+        aiResponse = data.choices?.[0]?.message?.content || "I'm not sure how to help with that. Try /workflows.";
+      } else {
+        const resp = await Promise.race([fetch(
+          `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${GEMINI_KEY}`,
+          {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              contents: [{ role: "user", parts: [{ text }] }],
+              systemInstruction: { parts: [{ text: assistantSystemPrompt }] },
+              generationConfig: { maxOutputTokens: 1024 },
+            }),
+          }
+        ), assistantTimeout]);
+        const data = await resp.json();
+        aiResponse = data.candidates?.[0]?.content?.parts?.[0]?.text || "I'm not sure how to help with that. Try /workflows.";
+      }
+
+      assistantReply = formatAssistantMessage(model, aiResponse);
+    } catch (aiErr) {
+      const errMsg = aiErr instanceof Error ? aiErr.message : String(aiErr);
+      console.error(`[LANE2] AI error taskId=${taskId}: ${errMsg}`);
+      assistantReply = formatAssistantMessage(model, "⚠️ AI unavailable right now. Try /status or /workflows.");
     }
 
+    await sendMessage(chatId, assistantReply, {}, `task:${taskId}:assistant`);
+    await appendConversationTurn(chatId, {
+      role: "assistant",
+      content: assistantReply,
+      model,
+      at: new Date().toISOString(),
+    });
+
+    await supabase.from("tasks").update({
+      status: "succeeded",
+      result_json: { action: "assistant_mode", model_used: model },
+    }).eq("id", taskId);
+    await sendMessage(chatId, `✅ Done: \`${taskId}\``, {}, `task:${taskId}:done`);
+    _currentTaskId = null;
     return new Response("ok");
   } catch (err) {
     console.error("Webhook error:", err);
