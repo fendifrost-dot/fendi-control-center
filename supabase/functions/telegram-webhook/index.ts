@@ -1067,9 +1067,12 @@ async function logToolFailure(logId: string, error: string, startedAt: number) {
 
 // ─── Execute agentic loop ──────────────────────────────────────
 
-async function executeAgenticLoop(chatId: string, userMessage: string, opts: { taskId: string; sessionModel: "grok" | "gemini" | "chatgpt" }): Promise<void> {
-  console.log(`[CHECKPOINT-D] executeAgenticLoop START taskId=${opts.taskId} model=${opts.sessionModel} ts=${Date.now()}`);
-  await supabase.from("tasks").update({ result_json: { progress_step: "D_loop_start" } }).eq("id", opts.taskId);
+async function executeAgenticLoop(chatId: string, userMessage: string, opts: { taskId: string; sessionModel: "grok" | "gemini" | "chatgpt"; lane?: string; allowTools?: boolean; workflowKey?: string }): Promise<void> {
+  console.log(`[CHECKPOINT-D] executeAgenticLoop START taskId=${opts.taskId} model=${opts.sessionModel} lane=${opts.lane || "default"} workflow=${opts.workflowKey || "none"} ts=${Date.now()}`);
+  await supabase.from("tasks").update({ result_json: { progress_step: "D_loop_start", lane: opts.lane || "default", workflow_key: opts.workflowKey || null } }).eq("id", opts.taskId);
+  if (opts.workflowKey) {
+    await supabase.from("tasks").update({ selected_workflow: opts.workflowKey }).eq("id", opts.taskId);
+  }
 
   const model: "grok" | "gemini" = opts.sessionModel === "chatgpt" ? "grok" : opts.sessionModel as "grok" | "gemini"; // chatgpt maps to grok for now
   const docContext = await getRecentDocContext();
@@ -1676,7 +1679,7 @@ serve(async (req) => {
       );
       try {
         await Promise.race([
-          executeAgenticLoop(chatId, doArg, { taskId, sessionModel: session.active_model as "grok" | "gemini" | "chatgpt" }),
+          executeAgenticLoop(chatId, doArg, { taskId, lane: "lane1_do", allowTools: true, workflowKey: chosen!.key, sessionModel: session.active_model as "grok" | "gemini" | "chatgpt" }),
           timeoutPromise,
         ]);
       } catch (loopErr) {
