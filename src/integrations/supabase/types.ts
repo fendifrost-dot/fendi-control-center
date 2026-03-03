@@ -590,6 +590,86 @@ export type Database = {
           },
         ]
       }
+      sessions: {
+        Row: {
+          active_model: string
+          channel: string
+          channel_user_id: string
+          context: Json
+          created_at: string
+          id: string
+          updated_at: string
+        }
+        Insert: {
+          active_model?: string
+          channel?: string
+          channel_user_id: string
+          context?: Json
+          created_at?: string
+          id?: string
+          updated_at?: string
+        }
+        Update: {
+          active_model?: string
+          channel?: string
+          channel_user_id?: string
+          context?: Json
+          created_at?: string
+          id?: string
+          updated_at?: string
+        }
+        Relationships: []
+      }
+      tasks: {
+        Row: {
+          created_at: string
+          error: string | null
+          id: string
+          request_text: string
+          requested_model: string | null
+          result_json: Json | null
+          selected_tools: Json | null
+          selected_workflow: string | null
+          session_id: string
+          status: string
+          updated_at: string
+        }
+        Insert: {
+          created_at?: string
+          error?: string | null
+          id?: string
+          request_text: string
+          requested_model?: string | null
+          result_json?: Json | null
+          selected_tools?: Json | null
+          selected_workflow?: string | null
+          session_id: string
+          status?: string
+          updated_at?: string
+        }
+        Update: {
+          created_at?: string
+          error?: string | null
+          id?: string
+          request_text?: string
+          requested_model?: string | null
+          result_json?: Json | null
+          selected_tools?: Json | null
+          selected_workflow?: string | null
+          session_id?: string
+          status?: string
+          updated_at?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "tasks_session_id_fkey"
+            columns: ["session_id"]
+            isOneToOne: false
+            referencedRelation: "sessions"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
       telegram_approval_queue: {
         Row: {
           client_id: string
