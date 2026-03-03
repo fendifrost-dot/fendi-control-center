@@ -12,30 +12,101 @@ const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
 const TELEGRAM_API = `https://api.telegram.org/bot${BOT_TOKEN}`;
 const SYSTEM_IDENTITY = "Fendi Control Center AI";
 
-// ─── Telegram helpers ───────────────────────────────────────────
-async function sendMessage(chatId: string, text: string, options: any = {}) {
-  const resp = await fetch(`${TELEGRAM_API}/sendMessage`, {
+// ─── Outbox-aware Telegram delivery ─────────────────────────────
+let _currentTaskId: string | null = null;
+
+async function _rawTelegramSend(method: string, payload: Record<string, any>) {
+  const resp = await fetch(`${TELEGRAM_API}/${method}`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ chat_id: chatId, text, parse_mode: "Markdown", ...options }),
+    body: JSON.stringify(payload),
   });
   return resp.json();
 }
 
+async function enqueueTelegram(taskId: string, chatId: string, kind: string, payload: Record<string, any>, dedupeKey?: string) {
+  try {
+    const row: Record<string, any> = {
+      task_id: taskId, chat_id: chatId, kind, payload,
+      status: "queued", attempt_count: 0,
+      next_attempt_at: new Date().toISOString(),
+    };
+    if (dedupeKey) row.dedupe_key = dedupeKey;
+    const { error } = await supabase.from("telegram_outbox").insert(row);
+    if (error) {
+      if (error.code === "23505") { console.log(`[OUTBOX] Dedupe hit: ${dedupeKey}`); return; }
+      console.error("[OUTBOX] Enqueue error:", error.message);
+    }
+  } catch (e) { console.error("[OUTBOX] Enqueue fatal:", e); }
+}
+
+async function flushTelegramOutbox(chatId: string, max = 5): Promise<{ sent: number; failed: number }> {
+  let sent = 0, failed = 0;
+  try {
+    const { data: due } = await supabase
+      .from("telegram_outbox")
+      .select("id, kind, payload, attempt_count")
+      .in("status", ["queued", "failed"])
+      .eq("chat_id", chatId)
+      .lte("next_attempt_at", new Date().toISOString())
+      .order("created_at", { ascending: true })
+      .limit(max);
+    if (!due || due.length === 0) return { sent: 0, failed: 0 };
+    for (const row of due) {
+      await supabase.from("telegram_outbox").update({
+        status: "sending", last_attempt_at: new Date().toISOString(),
+        attempt_count: row.attempt_count + 1,
+      }).eq("id", row.id);
+      try {
+        const result = await _rawTelegramSend(row.kind || "sendMessage", row.payload as Record<string, any>);
+        if (result.ok) {
+          await supabase.from("telegram_outbox").update({ status: "sent", sent_at: new Date().toISOString(), last_error: null }).eq("id", row.id);
+          sent++;
+        } else {
+          const backoff = Math.min(Math.pow(row.attempt_count + 1, 2) * 5, 120);
+          await supabase.from("telegram_outbox").update({
+            status: "failed", last_error: result.description || JSON.stringify(result).slice(0, 500),
+            next_attempt_at: new Date(Date.now() + backoff * 1000).toISOString(),
+          }).eq("id", row.id);
+          failed++;
+        }
+      } catch (e) {
+        const backoff = Math.min(Math.pow(row.attempt_count + 1, 2) * 5, 120);
+        await supabase.from("telegram_outbox").update({
+          status: "failed", last_error: e instanceof Error ? e.message : String(e),
+          next_attempt_at: new Date(Date.now() + backoff * 1000).toISOString(),
+        }).eq("id", row.id);
+        failed++;
+      }
+    }
+    console.log(`[OUTBOX-FLUSH] chatId=${chatId} picked=${due.length} sent=${sent} failed=${failed}`);
+  } catch (e) { console.error("[OUTBOX-FLUSH] Fatal:", e); }
+  return { sent, failed };
+}
+
+async function sendMessage(chatId: string, text: string, options: any = {}, dedupeKey?: string) {
+  const payload = { chat_id: chatId, text, parse_mode: "Markdown", ...options };
+  if (_currentTaskId) {
+    await enqueueTelegram(_currentTaskId, chatId, "sendMessage", payload, dedupeKey);
+    await flushTelegramOutbox(chatId, 3);
+  } else {
+    console.warn("[OUTBOX] No _currentTaskId, direct send fallback");
+    await _rawTelegramSend("sendMessage", payload);
+  }
+}
+
 async function answerCallbackQuery(callbackQueryId: string, text?: string) {
-  await fetch(`${TELEGRAM_API}/answerCallbackQuery`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ callback_query_id: callbackQueryId, text }),
-  });
+  await _rawTelegramSend("answerCallbackQuery", { callback_query_id: callbackQueryId, text });
 }
 
 async function editMessageReplyMarkup(chatId: string, messageId: number) {
-  await fetch(`${TELEGRAM_API}/editMessageReplyMarkup`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ chat_id: chatId, message_id: messageId, reply_markup: { inline_keyboard: [] } }),
-  });
+  const payload = { chat_id: chatId, message_id: messageId, reply_markup: { inline_keyboard: [] } };
+  if (_currentTaskId) {
+    await enqueueTelegram(_currentTaskId, chatId, "editMessageReplyMarkup", payload);
+    await flushTelegramOutbox(chatId, 1);
+  } else {
+    await _rawTelegramSend("editMessageReplyMarkup", payload);
+  }
 }
 
 // ─── Model & conversation state helpers ─────────────────────────
@@ -968,14 +1039,14 @@ async function executeAgenticLoop(chatId: string, userMessage: string, opts: { t
         selected_tools: [],
         result_json: { text_response: responseText.slice(0, 2000), model_used: opts.sessionModel },
       }).eq("id", opts.taskId);
-      await sendMessage(chatId, `❌ Failed: \`${opts.taskId}\` — NO_WORKFLOW`);
+      await sendMessage(chatId, `❌ Failed: \`${opts.taskId}\` — NO_WORKFLOW`, {}, `task:${opts.taskId}:failed`);
     } else {
       await supabase.from("tasks").update({
         status: "succeeded",
         selected_tools: [],
         result_json: { text_response: responseText.slice(0, 2000), model_used: opts.sessionModel },
       }).eq("id", opts.taskId);
-      await sendMessage(chatId, `✅ Done: \`${opts.taskId}\``);
+      await sendMessage(chatId, `✅ Done: \`${opts.taskId}\``, {}, `task:${opts.taskId}:done`);
     }
     return;
   }
@@ -1088,7 +1159,7 @@ Now provide a clear, concise summary for the user based on the results. Use mark
 
     const finalSummary = formatAssistantMessage(model, summary);
     console.log(`[CHECKPOINT-F] Sending final summary taskId=${opts.taskId} ts=${Date.now()}`);
-    await sendMessage(chatId, finalSummary);
+    await sendMessage(chatId, finalSummary, {}, `task:${opts.taskId}:summary`);
     await appendConversationTurn(chatId, {
       role: "assistant",
       content: finalSummary,
@@ -1103,7 +1174,7 @@ Now provide a clear, concise summary for the user based on the results. Use mark
       result_json: { progress_step: "F_succeeded", summary: summary.slice(0, 2000), toolResults: toolResults.map(r => r.slice(0, 500)), model_used: opts.sessionModel },
     }).eq("id", opts.taskId);
     console.log(`[CHECKPOINT-F2] Task marked succeeded, sending Done msg taskId=${opts.taskId} ts=${Date.now()}`);
-    await sendMessage(chatId, `✅ Done: \`${opts.taskId}\``);
+    await sendMessage(chatId, `✅ Done: \`${opts.taskId}\``, {}, `task:${opts.taskId}:done`);
 
   } else if (confirmationButtons.length > 0) {
     // Has destructive actions needing confirmation
@@ -1123,7 +1194,7 @@ Now provide a clear, concise summary for the user based on the results. Use mark
     const confirmationMessage = formatAssistantMessage(model, message.trim());
     await sendMessage(chatId, confirmationMessage, {
       reply_markup: { inline_keyboard: keyboard },
-    });
+    }, `task:${opts.taskId}:confirm`);
     await appendConversationTurn(chatId, {
       role: "assistant",
       content: confirmationMessage,
@@ -1137,7 +1208,7 @@ Now provide a clear, concise summary for the user based on the results. Use mark
       selected_tools: executedToolNames,
       result_json: { awaiting_confirmation: true, toolResults: toolResults.map(r => r.slice(0, 500)), model_used: opts.sessionModel },
     }).eq("id", opts.taskId);
-    await sendMessage(chatId, `✅ Done: \`${opts.taskId}\``);
+    await sendMessage(chatId, `✅ Done: \`${opts.taskId}\``, {}, `task:${opts.taskId}:done`);
 
   } else {
     // No tool calls at all — mark succeeded with text-only result
@@ -1146,7 +1217,7 @@ Now provide a clear, concise summary for the user based on the results. Use mark
       selected_tools: [],
       result_json: { text_response: (result.text || "").slice(0, 2000), model_used: opts.sessionModel },
     }).eq("id", opts.taskId);
-    await sendMessage(chatId, `✅ Done: \`${opts.taskId}\``);
+    await sendMessage(chatId, `✅ Done: \`${opts.taskId}\``, {}, `task:${opts.taskId}:done`);
   }
 }
 
@@ -1255,12 +1326,22 @@ serve(async (req) => {
   try {
     const update = await req.json();
     console.log("📨 Update:", JSON.stringify(update).slice(0, 500));
+    _currentTaskId = null;
 
     // ── Callback queries (inline button presses) ──
     if (update.callback_query) {
       const cb = update.callback_query;
       const cbChatId = String(cb.message.chat.id);
       if (cbChatId !== CHAT_ID) return new Response("ok");
+
+      // Create task for callback observability + outbox routing
+      try {
+        const cbSession = await resolveSession(cbChatId);
+        const cbTaskId = await createTaskRow(cbSession.id, `callback:${cb.data}`, null);
+        _currentTaskId = cbTaskId;
+      } catch (e) {
+        console.error("Callback task creation failed:", e);
+      }
 
       const [action, ...idParts] = cb.data.split(":");
       const targetId = idParts.join(":");
@@ -1269,33 +1350,22 @@ serve(async (req) => {
       let result: string;
 
       switch (action) {
-        case "approve":
-          result = await handleApproval(targetId, true);
-          break;
-        case "reject":
-          result = await handleApproval(targetId, false);
-          break;
-        case "retry":
-          result = await handleRetry(targetId);
-          break;
-        case "archive":
-          result = await handleArchive(targetId);
-          break;
-        case "explain":
-          result = await handleExplainMore(targetId);
-          break;
-        case "agent_confirm":
-          result = await handleAgentConfirm(targetId);
-          break;
-        case "agent_cancel":
-          result = await handleAgentCancel(targetId);
-          break;
-        default:
-          result = "❓ Unknown action.";
+        case "approve": result = await handleApproval(targetId, true); break;
+        case "reject": result = await handleApproval(targetId, false); break;
+        case "retry": result = await handleRetry(targetId); break;
+        case "archive": result = await handleArchive(targetId); break;
+        case "explain": result = await handleExplainMore(targetId); break;
+        case "agent_confirm": result = await handleAgentConfirm(targetId); break;
+        case "agent_cancel": result = await handleAgentCancel(targetId); break;
+        default: result = "❓ Unknown action.";
       }
 
       await editMessageReplyMarkup(cbChatId, cb.message.message_id);
       await sendMessage(cbChatId, result);
+      if (_currentTaskId) {
+        await supabase.from("tasks").update({ status: "succeeded", result_json: { action: `callback:${action}` } }).eq("id", _currentTaskId);
+      }
+      _currentTaskId = null;
       return new Response("ok");
     }
 
@@ -1329,6 +1399,7 @@ serve(async (req) => {
 
     try {
       taskId = await createTaskRow(session.id, text, requestedModel);
+      _currentTaskId = taskId;
     } catch (taskErr) {
       console.error("FATAL: task creation failed:", taskErr);
       await sendMessage(chatId, `🚨 *${SYSTEM_IDENTITY}* — Task creation failed: ${String(taskErr)}`);
@@ -1336,7 +1407,7 @@ serve(async (req) => {
     }
 
     // Send queued confirmation with task_id
-    await sendMessage(chatId, `📋 Queued: \`${taskId}\``);
+    await sendMessage(chatId, `📋 Queued: \`${taskId}\``, {}, `task:${taskId}:queued`);
 
     // /start still shows the help menu
     if (text === "/start") {
@@ -1383,6 +1454,27 @@ serve(async (req) => {
       await sendMessage(chatId, `✅ *${SYSTEM_IDENTITY}* switched to *${getModelLabel(reqModel as any)}*.\n\nI'll stay on this model until you switch again.`);
       await supabase.from("tasks").update({ status: "succeeded", result_json: { action: "model_switch", new_model: reqModel } }).eq("id", taskId);
       await sendMessage(chatId, `✅ Done: \`${taskId}\``);
+      return new Response("ok");
+    }
+
+    // ── /ping — outbox dogfood test ──
+    if (text.toLowerCase() === "/ping") {
+      await supabase.from("tasks").update({ status: "running" }).eq("id", taskId);
+      await sendMessage(chatId, `🏓 pong`, {}, `task:${taskId}:pong`);
+      await supabase.from("tasks").update({ status: "succeeded", result_json: { action: "ping" } }).eq("id", taskId);
+      await sendMessage(chatId, `✅ Done: \`${taskId}\``, {}, `task:${taskId}:done`);
+      _currentTaskId = null;
+      return new Response("ok");
+    }
+
+    // ── /resend_failed — flush failed outbox items ──
+    if (text.toLowerCase() === "/resend_failed") {
+      await supabase.from("tasks").update({ status: "running" }).eq("id", taskId);
+      const { sent, failed } = await flushTelegramOutbox(chatId, 10);
+      await sendMessage(chatId, `📤 *Outbox flush:* ${sent} sent, ${failed} failed`, {}, `task:${taskId}:resend`);
+      await supabase.from("tasks").update({ status: "succeeded", result_json: { action: "resend_failed", sent, failed } }).eq("id", taskId);
+      await sendMessage(chatId, `✅ Done: \`${taskId}\``, {}, `task:${taskId}:done`);
+      _currentTaskId = null;
       return new Response("ok");
     }
 
@@ -1433,7 +1525,7 @@ serve(async (req) => {
       const errMsg = loopErr instanceof Error ? loopErr.message : String(loopErr);
       console.error(`[CHECKPOINT-G] Agentic loop error taskId=${taskId}: ${errMsg}`);
       await supabase.from("tasks").update({ status: "failed", error: errMsg, result_json: { progress_step: "G_failed", model_used: session.active_model } }).eq("id", taskId);
-      await sendMessage(chatId, `❌ Failed: \`${taskId}\` — ${errMsg.slice(0, 200)}`);
+      await sendMessage(chatId, `❌ Failed: \`${taskId}\` — ${errMsg.slice(0, 200)}`, {}, `task:${taskId}:failed`);
     }
 
     return new Response("ok");

@@ -703,6 +703,65 @@ export type Database = {
         }
         Relationships: []
       }
+      telegram_outbox: {
+        Row: {
+          attempt_count: number
+          chat_id: string
+          created_at: string
+          dedupe_key: string | null
+          id: string
+          kind: string
+          last_attempt_at: string | null
+          last_error: string | null
+          next_attempt_at: string
+          payload: Json
+          sent_at: string | null
+          status: string
+          task_id: string
+          updated_at: string
+        }
+        Insert: {
+          attempt_count?: number
+          chat_id: string
+          created_at?: string
+          dedupe_key?: string | null
+          id?: string
+          kind: string
+          last_attempt_at?: string | null
+          last_error?: string | null
+          next_attempt_at?: string
+          payload: Json
+          sent_at?: string | null
+          status?: string
+          task_id: string
+          updated_at?: string
+        }
+        Update: {
+          attempt_count?: number
+          chat_id?: string
+          created_at?: string
+          dedupe_key?: string | null
+          id?: string
+          kind?: string
+          last_attempt_at?: string | null
+          last_error?: string | null
+          next_attempt_at?: string
+          payload?: Json
+          sent_at?: string | null
+          status?: string
+          task_id?: string
+          updated_at?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "telegram_outbox_task_id_fkey"
+            columns: ["task_id"]
+            isOneToOne: false
+            referencedRelation: "tasks"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
       tool_execution_logs: {
         Row: {
           args: Json | null
