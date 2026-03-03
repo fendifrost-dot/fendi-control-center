@@ -330,10 +330,21 @@ async function createTaskRow(sessionId: string, requestText: string, requestedMo
     status: "queued",
     request_text: requestText,
     requested_model: requestedModel || null,
+    selected_workflow: null,
+    result_json: { action: "created" },
   }).select("id").single();
 
   if (error || !data) throw new Error(`Failed to create task: ${error?.message}`);
   return data.id;
+}
+
+// Helper: set shortcut workflow attribution BEFORE running shortcut logic
+async function setShortcutAttribution(taskId: string, command: string) {
+  await supabase.from("tasks").update({
+    status: "running",
+    selected_workflow: `shortcut_${command}`,
+    result_json: { execution_lane: "shortcut", progress_step: `shortcut_${command}_start` },
+  }).eq("id", taskId);
 }
 
 // ─── Cross-project helpers ──────────────────────────────────────
@@ -1199,7 +1210,7 @@ async function executeAgenticLoop(chatId: string, userMessage: string, opts: { t
     await supabase.from("tasks").update({
       status: "succeeded",
       selected_tools: [],
-      result_json: { execution_complete: true, workflow: opts.workflowKey, text_response: responseText.slice(0, 2000), model_used: opts.sessionModel, execution_duration_ms: executionDuration },
+      result_json: { execution_complete: true, workflow: opts.workflowKey, text_response: responseText.slice(0, 2000), model_used: opts.sessionModel, execution_duration_ms: executionDuration, execution_lock: null, execution_lock_released_ts: Date.now() },
     }).eq("id", opts.taskId);
     await sendMessage(chatId, `✅ Done: \`${opts.taskId}\``, {}, `task:${opts.taskId}:done`);
     return;
@@ -1337,7 +1348,7 @@ Now provide a clear, concise summary for the user based on the results. Use mark
     await supabase.from("tasks").update({
       status: "succeeded",
       selected_tools: executedToolNames,
-      result_json: { execution_complete: true, workflow: opts.workflowKey, progress_step: "F_succeeded", summary: summary.slice(0, 2000), toolResults: toolResults.map(r => r.slice(0, 500)), model_used: opts.sessionModel, execution_duration_ms: executionDuration },
+      result_json: { execution_complete: true, workflow: opts.workflowKey, progress_step: "F_succeeded", summary: summary.slice(0, 2000), toolResults: toolResults.map(r => r.slice(0, 500)), model_used: opts.sessionModel, execution_duration_ms: executionDuration, execution_lock: null, execution_lock_released_ts: Date.now() },
     }).eq("id", opts.taskId);
     logEvent({ event: "task_succeeded", taskId: opts.taskId, workflow: opts.workflowKey, execution_duration_ms: executionDuration });
     await sendMessage(chatId, `✅ Done: \`${opts.taskId}\``, {}, `task:${opts.taskId}:done`);
@@ -1373,7 +1384,7 @@ Now provide a clear, concise summary for the user based on the results. Use mark
     await supabase.from("tasks").update({
       status: "succeeded",
       selected_tools: executedToolNames,
-      result_json: { execution_complete: true, workflow: opts.workflowKey, awaiting_confirmation: true, toolResults: toolResults.map(r => r.slice(0, 500)), model_used: opts.sessionModel, execution_duration_ms: executionDuration },
+      result_json: { execution_complete: true, workflow: opts.workflowKey, awaiting_confirmation: true, toolResults: toolResults.map(r => r.slice(0, 500)), model_used: opts.sessionModel, execution_duration_ms: executionDuration, execution_lock: null, execution_lock_released_ts: Date.now() },
     }).eq("id", opts.taskId);
     await sendMessage(chatId, `✅ Done: \`${opts.taskId}\``, {}, `task:${opts.taskId}:done`);
 
@@ -1383,7 +1394,7 @@ Now provide a clear, concise summary for the user based on the results. Use mark
     await supabase.from("tasks").update({
       status: "succeeded",
       selected_tools: [],
-      result_json: { execution_complete: true, workflow: opts.workflowKey, text_response: (result.text || "").slice(0, 2000), model_used: opts.sessionModel, execution_duration_ms: executionDuration },
+      result_json: { execution_complete: true, workflow: opts.workflowKey, text_response: (result.text || "").slice(0, 2000), model_used: opts.sessionModel, execution_duration_ms: executionDuration, execution_lock: null, execution_lock_released_ts: Date.now() },
     }).eq("id", opts.taskId);
     await sendMessage(chatId, `✅ Done: \`${opts.taskId}\``, {}, `task:${opts.taskId}:done`);
   }
@@ -1579,6 +1590,7 @@ serve(async (req) => {
 
     // /start still shows the help menu
     if (text === "/start") {
+      await setShortcutAttribution(taskId, "start");
       await sendMessage(chatId, [
         `🎯 *${SYSTEM_IDENTITY} — Online (Two-Lane Mode)*`,
         ``,
@@ -1606,38 +1618,38 @@ serve(async (req) => {
         ``,
         `🔒 I will NEVER execute tools unless you use \`/do\` or a direct command.`,
       ].join("\n"));
-      await supabase.from("tasks").update({ status: "succeeded", result_json: { action: "start_help" } }).eq("id", taskId);
+      await supabase.from("tasks").update({ status: "succeeded", result_json: { execution_lane: "shortcut", progress_step: "shortcut_start", action: "start_help" } }).eq("id", taskId);
       await sendMessage(chatId, `✅ Done: \`${taskId}\``);
       return new Response("ok");
     }
 
     if (text.toLowerCase() === "/model") {
+      await setShortcutAttribution(taskId, "model");
       await sendMessage(chatId, `🤖 *${SYSTEM_IDENTITY}*\n\nActive model: *${getModelLabel(session.active_model as any)}*\n🔒 Model switching is locked until you explicitly run /model grok or /model gemini.`);
-      await supabase.from("tasks").update({ status: "succeeded", result_json: { action: "model_check", active_model: session.active_model } }).eq("id", taskId);
+      await supabase.from("tasks").update({ status: "succeeded", result_json: { execution_lane: "shortcut", progress_step: "shortcut_model", action: "model_check", active_model: session.active_model } }).eq("id", taskId);
       await sendMessage(chatId, `✅ Done: \`${taskId}\``);
       return new Response("ok");
     }
 
     if (modelRequestMatch) {
+      await setShortcutAttribution(taskId, "model_switch");
       const reqModel = modelRequestMatch[1].toLowerCase();
-      // Update session active_model (source of truth for Telegram)
       await supabase.from("sessions").update({ active_model: reqModel }).eq("id", session.id);
-      // Also update bot_settings for backward compat
       await supabase.from("bot_settings").upsert(
         { setting_key: "ai_model", setting_value: reqModel, updated_at: new Date().toISOString() },
         { onConflict: "setting_key" }
       );
       await sendMessage(chatId, `✅ *${SYSTEM_IDENTITY}* switched to *${getModelLabel(reqModel as any)}*.\n\nI'll stay on this model until you switch again.`);
-      await supabase.from("tasks").update({ status: "succeeded", result_json: { action: "model_switch", new_model: reqModel } }).eq("id", taskId);
+      await supabase.from("tasks").update({ status: "succeeded", result_json: { execution_lane: "shortcut", progress_step: "shortcut_model_switch", action: "model_switch", new_model: reqModel } }).eq("id", taskId);
       await sendMessage(chatId, `✅ Done: \`${taskId}\``);
       return new Response("ok");
     }
 
     // ── /ping — outbox dogfood test ──
     if (text.toLowerCase() === "/ping") {
-      await supabase.from("tasks").update({ status: "running" }).eq("id", taskId);
+      await setShortcutAttribution(taskId, "ping");
       await sendMessage(chatId, `🏓 pong`, {}, `task:${taskId}:pong`);
-      await supabase.from("tasks").update({ status: "succeeded", result_json: { action: "ping" } }).eq("id", taskId);
+      await supabase.from("tasks").update({ status: "succeeded", result_json: { execution_lane: "shortcut", progress_step: "shortcut_ping", action: "ping" } }).eq("id", taskId);
       await sendMessage(chatId, `✅ Done: \`${taskId}\``, {}, `task:${taskId}:done`);
       _currentTaskId = null;
       return new Response("ok");
@@ -1645,10 +1657,10 @@ serve(async (req) => {
 
     // ── /resend_failed — flush failed outbox items ──
     if (text.toLowerCase() === "/resend_failed") {
-      await supabase.from("tasks").update({ status: "running" }).eq("id", taskId);
+      await setShortcutAttribution(taskId, "resend_failed");
       const { sent, failed } = await flushTelegramOutbox(chatId, 10);
       await sendMessage(chatId, `📤 *Outbox flush:* ${sent} sent, ${failed} failed`, {}, `task:${taskId}:resend`);
-      await supabase.from("tasks").update({ status: "succeeded", result_json: { action: "resend_failed", sent, failed } }).eq("id", taskId);
+      await supabase.from("tasks").update({ status: "succeeded", result_json: { execution_lane: "shortcut", progress_step: "shortcut_resend_failed", action: "resend_failed", sent, failed } }).eq("id", taskId);
       await sendMessage(chatId, `✅ Done: \`${taskId}\``, {}, `task:${taskId}:done`);
       _currentTaskId = null;
       return new Response("ok");
@@ -1657,7 +1669,7 @@ serve(async (req) => {
     // ── Direct "status" shortcut — bypasses AI entirely ──
     if (text.toLowerCase() === "status" || text.toLowerCase() === "/status") {
       console.log(`[SHORTCUT] Direct status bypass taskId=${taskId}`);
-      await supabase.from("tasks").update({ status: "running" }).eq("id", taskId);
+      await setShortcutAttribution(taskId, "status");
       try {
         const statusTool = AGENT_TOOLS.find(t => t.name === "get_system_status");
         const statusResult = statusTool ? await statusTool.execute({}) : "Tool get_system_status not found";
@@ -1668,13 +1680,13 @@ serve(async (req) => {
         await supabase.from("tasks").update({
           status: "succeeded",
           selected_tools: ["get_system_status"],
-          result_json: { progress_step: "shortcut_status", result: statusResult, health, model_used: session.active_model },
+          result_json: { execution_lane: "shortcut", progress_step: "shortcut_status", result: statusResult, health, model_used: session.active_model },
         }).eq("id", taskId);
         await sendMessage(chatId, `✅ Done: \`${taskId}\``);
       } catch (statusErr) {
         const errMsg = statusErr instanceof Error ? statusErr.message : String(statusErr);
         console.error("Status shortcut error:", statusErr);
-        await supabase.from("tasks").update({ status: "failed", error: errMsg, result_json: { progress_step: "shortcut_status_failed", model_used: session.active_model } }).eq("id", taskId);
+        await supabase.from("tasks").update({ status: "failed", error: errMsg, result_json: { execution_lane: "shortcut", progress_step: "shortcut_status_failed", model_used: session.active_model } }).eq("id", taskId);
         await sendMessage(chatId, `❌ Failed: \`${taskId}\` — ${errMsg.slice(0, 200)}`);
       }
       return new Response("ok");
@@ -1682,13 +1694,13 @@ serve(async (req) => {
 
     // ── /workflows — list from DB registry ──
     if (text.toLowerCase() === "/workflows") {
-      await supabase.from("tasks").update({ status: "running" }).eq("id", taskId);
+      await setShortcutAttribution(taskId, "workflows");
       const workflows = await fetchWorkflowRegistry();
       const listText = workflows.length > 0
         ? _formatWorkflowList(workflows)
         : "⚠️ Workflow registry unavailable right now. Try /status or try again.";
       await sendMessage(chatId, listText, {}, `task:${taskId}:workflows`);
-      await supabase.from("tasks").update({ status: "succeeded", result_json: { action: "list_workflows" } }).eq("id", taskId);
+      await supabase.from("tasks").update({ status: "succeeded", result_json: { execution_lane: "shortcut", progress_step: "shortcut_workflows", action: "list_workflows" } }).eq("id", taskId);
       await sendMessage(chatId, `✅ Done: \`${taskId}\``, {}, `task:${taskId}:done`);
       _currentTaskId = null;
       return new Response("ok");
@@ -1696,7 +1708,7 @@ serve(async (req) => {
 
     // ── /help — short help ──
     if (text.toLowerCase() === "/help") {
-      await supabase.from("tasks").update({ status: "running" }).eq("id", taskId);
+      await setShortcutAttribution(taskId, "help");
       const helpText = [
         `🎯 *${SYSTEM_IDENTITY} — Quick Help*`,
         ``,
@@ -1716,7 +1728,7 @@ serve(async (req) => {
         `💡 Tip: run \`/metrics\` to inspect recent task runs and durations.`,
       ].join("\n");
       await sendMessage(chatId, helpText, {}, `task:${taskId}:help`);
-      await supabase.from("tasks").update({ status: "succeeded", result_json: { action: "help" } }).eq("id", taskId);
+      await supabase.from("tasks").update({ status: "succeeded", result_json: { execution_lane: "shortcut", progress_step: "shortcut_help", action: "help" } }).eq("id", taskId);
       await sendMessage(chatId, `✅ Done: \`${taskId}\``, {}, `task:${taskId}:done`);
       _currentTaskId = null;
       return new Response("ok");
@@ -1724,7 +1736,7 @@ serve(async (req) => {
 
     // ── /metrics — execution metrics ──
     if (text.toLowerCase().startsWith("/metrics")) {
-      await supabase.from("tasks").update({ status: "running" }).eq("id", taskId);
+      await setShortcutAttribution(taskId, "metrics");
       try {
         // Parse optional limit arg: /metrics 50 (default 20, max 100)
         const metricsParts = text.trim().split(/\s+/);
@@ -1734,7 +1746,7 @@ serve(async (req) => {
 
         const { data: rawTasks, error: tasksErr } = await supabase
           .from("tasks")
-          .select("id, status, selected_workflow, result_json, created_at")
+          .select("id, status, selected_workflow, result_json, created_at, error")
           .order("created_at", { ascending: false })
           .limit(metricsLimit);
 
@@ -1837,7 +1849,7 @@ serve(async (req) => {
         return new Response("ok");
       }
 
-      await supabase.from("tasks").update({ status: "running" }).eq("id", taskId);
+      await supabase.from("tasks").update({ status: "running", selected_workflow: null, result_json: { execution_lane: "lane1_do", progress_step: "lane1_routing" } }).eq("id", taskId);
       const workflows = await fetchWorkflowRegistry();
 
       if (workflows.length === 0) {
@@ -1884,6 +1896,12 @@ serve(async (req) => {
       }
 
       // Implemented — execute via agentic loop with tools
+      // Set workflow attribution BEFORE the loop (so it's always stored even if loop fails)
+      await supabase.from("tasks").update({
+        selected_workflow: chosen!.key,
+        result_json: { execution_lane: "lane1_do", progress_step: "lane1_selected_workflow", selected_workflow: chosen!.key },
+      }).eq("id", taskId);
+
       console.log(`[LANE1] Executing workflow '${chosen!.key}' via agentic loop taskId=${taskId}`);
       const LOOP_TIMEOUT_MS = 35_000;
       const timeoutPromise = new Promise<never>((_, reject) =>
@@ -1897,7 +1915,7 @@ serve(async (req) => {
       } catch (loopErr) {
         const errMsg = loopErr instanceof Error ? loopErr.message : String(loopErr);
         console.error(`[LANE1] Execution error taskId=${taskId}: ${errMsg}`);
-        await supabase.from("tasks").update({ status: "failed", error: errMsg, result_json: { progress_step: "lane1_failed", model_used: session.active_model } }).eq("id", taskId);
+        await supabase.from("tasks").update({ status: "failed", error: errMsg, result_json: { execution_lane: "lane1_do", progress_step: "lane1_failed", model_used: session.active_model, execution_lock: null, execution_lock_released_ts: Date.now() } }).eq("id", taskId);
         await sendMessage(chatId, `❌ Failed: \`${taskId}\` — ${errMsg.slice(0, 200)}`, {}, `task:${taskId}:failed`);
       }
       _currentTaskId = null;
@@ -1908,25 +1926,31 @@ serve(async (req) => {
     // LANE 2 — ASSISTANT MODE (default, no tool execution)
     // ══════════════════════════════════════════════════════════
     console.log(`[LANE2] Assistant mode taskId=${taskId} ts=${Date.now()}`);
-    await supabase.from("tasks").update({ status: "running", result_json: { progress_step: "lane2_assistant" } }).eq("id", taskId);
+    const lane2Start = Date.now();
+    await supabase.from("tasks").update({ status: "running", selected_workflow: "lane2_assistant", result_json: { execution_lane: "lane2_assistant", progress_step: "lane2_start" } }).eq("id", taskId);
 
     const model: "grok" | "gemini" = (session.active_model === "chatgpt" ? "grok" : session.active_model) as "grok" | "gemini";
-    const conversationContext = await buildConversationContext(chatId);
+    let lane2Status: "succeeded" | "failed" = "succeeded";
+    let lane2Error: string | null = null;
+    let assistantReply: string = "";
 
-    await appendConversationTurn(chatId, {
-      role: "user",
-      content: text,
-      model,
-      at: new Date().toISOString(),
-    });
+    try {
+      const conversationContext = await buildConversationContext(chatId);
 
-    // Fetch workflow registry for context (so assistant can suggest /do commands)
-    const workflows = await fetchWorkflowRegistry();
-    const workflowContext = workflows.length > 0
-      ? `\n\nAvailable workflows (user must run \`/do <workflow>\` to execute):\n${workflows.map(w => `- ${w.name} (\`${w.key}\`): ${w.trigger_phrases.slice(0, 2).join(", ")}`).join("\n")}`
-      : "";
+      await appendConversationTurn(chatId, {
+        role: "user",
+        content: text,
+        model,
+        at: new Date().toISOString(),
+      });
 
-    const assistantSystemPrompt = `You are the ${SYSTEM_IDENTITY}. You serve Fendi Frost as a personal command center assistant.
+      // Fetch workflow registry for context (so assistant can suggest /do commands)
+      const workflows = await fetchWorkflowRegistry();
+      const workflowContext = workflows.length > 0
+        ? `\n\nAvailable workflows (user must run \`/do <workflow>\` to execute):\n${workflows.map(w => `- ${w.name} (\`${w.key}\`): ${w.trigger_phrases.slice(0, 2).join(", ")}`).join("\n")}`
+        : "";
+
+      const assistantSystemPrompt = `You are the ${SYSTEM_IDENTITY}. You serve Fendi Frost as a personal command center assistant.
 
 TWO-LANE RULE — You are in ASSISTANT MODE (Lane 2).
 - Answer questions, explain, draft, brainstorm, plan.
@@ -1949,10 +1973,7 @@ ${conversationContext}
 
 Be concise, professional, and use emoji sparingly.`;
 
-    let assistantReply: string;
-    const ASSISTANT_TIMEOUT_MS = 20_000;
-
-    try {
+      const ASSISTANT_TIMEOUT_MS = 20_000;
       const assistantTimeout = new Promise<never>((_, reject) =>
         setTimeout(() => reject(new Error("TIMEOUT")), ASSISTANT_TIMEOUT_MS)
       );
@@ -1991,26 +2012,40 @@ Be concise, professional, and use emoji sparingly.`;
       }
 
       assistantReply = formatAssistantMessage(model, aiResponse);
+
+      await sendMessage(chatId, assistantReply, {}, `task:${taskId}:assistant`);
+      await appendConversationTurn(chatId, {
+        role: "assistant",
+        content: assistantReply,
+        model,
+        at: new Date().toISOString(),
+      });
     } catch (aiErr) {
       const errMsg = aiErr instanceof Error ? aiErr.message : String(aiErr);
       console.error(`[LANE2] AI error taskId=${taskId}: ${errMsg}`);
+      lane2Status = "failed";
+      lane2Error = errMsg;
       assistantReply = formatAssistantMessage(model, "⚠️ AI unavailable right now. Try /status or /workflows.");
+      await sendMessage(chatId, assistantReply, {}, `task:${taskId}:assistant`);
+    } finally {
+      // HARD GUARANTEE: Lane 2 task always reaches terminal state
+      const lane2Duration = Date.now() - lane2Start;
+      if (lane2Status === "succeeded") {
+        await supabase.from("tasks").update({
+          status: "succeeded",
+          result_json: { execution_lane: "lane2_assistant", progress_step: "lane2_done", model_used: model, text_response: assistantReply.slice(0, 2000), execution_duration_ms: lane2Duration },
+        }).eq("id", taskId);
+        await sendMessage(chatId, `✅ Done: \`${taskId}\``, {}, `task:${taskId}:done`);
+      } else {
+        await supabase.from("tasks").update({
+          status: "failed",
+          error: lane2Error,
+          result_json: { execution_lane: "lane2_assistant", progress_step: "lane2_failed", model_used: model, execution_duration_ms: lane2Duration },
+        }).eq("id", taskId);
+        await sendMessage(chatId, `❌ Failed: \`${taskId}\` — ${(lane2Error || "unknown").slice(0, 200)}`, {}, `task:${taskId}:failed`);
+      }
+      _currentTaskId = null;
     }
-
-    await sendMessage(chatId, assistantReply, {}, `task:${taskId}:assistant`);
-    await appendConversationTurn(chatId, {
-      role: "assistant",
-      content: assistantReply,
-      model,
-      at: new Date().toISOString(),
-    });
-
-    await supabase.from("tasks").update({
-      status: "succeeded",
-      result_json: { action: "assistant_mode", model_used: model },
-    }).eq("id", taskId);
-    await sendMessage(chatId, `✅ Done: \`${taskId}\``, {}, `task:${taskId}:done`);
-    _currentTaskId = null;
     return new Response("ok");
   } catch (err) {
     console.error("Webhook error:", err);
