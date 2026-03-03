@@ -762,3 +762,10 @@ Deno.test("P1: /metrics formatting helpers exist in source", async () => {
   assertMatch(source, /case "succeeded": return "✅"/, "Must map succeeded to ✅");
   assertMatch(source, /replace\("T", " "\)\.slice\(0, 16\)/, "fmtTs must shorten ISO");
 });
+
+Deno.test("Q1: /metrics status summary exists in source", async () => {
+  const source = await Deno.readTextFile("supabase/functions/telegram-webhook/index.ts");
+  assertMatch(source, /Summary:\*.*✅/, "Must render Summary line with ✅");
+  assertMatch(source, /statusCounts/, "Must compute statusCounts");
+  assertMatch(source, /status_counts/, "Must store status_counts in result_json");
+});
