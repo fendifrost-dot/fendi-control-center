@@ -925,7 +925,15 @@ export type Database = {
       }
     }
     Functions: {
-      [_ in never]: never
+      claim_outbox_rows: {
+        Args: { p_chat_id: string; p_limit: number; p_now: string }
+        Returns: {
+          attempt_count: number
+          id: string
+          kind: string
+          payload: Json
+        }[]
+      }
     }
     Enums: {
       [_ in never]: never
