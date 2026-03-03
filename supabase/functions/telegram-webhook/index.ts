@@ -924,6 +924,9 @@ async function logToolFailure(logId: string, error: string, startedAt: number) {
 // ─── Execute agentic loop ──────────────────────────────────────
 
 async function executeAgenticLoop(chatId: string, userMessage: string, opts: { taskId: string; sessionModel: "grok" | "gemini" | "chatgpt" }): Promise<void> {
+  console.log(`[CHECKPOINT-D] executeAgenticLoop START taskId=${opts.taskId} model=${opts.sessionModel} ts=${Date.now()}`);
+  await supabase.from("tasks").update({ result_json: { progress_step: "D_loop_start" } }).eq("id", opts.taskId);
+
   const model: "grok" | "gemini" = opts.sessionModel === "chatgpt" ? "grok" : opts.sessionModel as "grok" | "gemini"; // chatgpt maps to grok for now
   const docContext = await getRecentDocContext();
   const requestId = crypto.randomUUID();
@@ -938,9 +941,12 @@ async function executeAgenticLoop(chatId: string, userMessage: string, opts: { t
   const conversationContext = await buildConversationContext(chatId);
 
   // Step 1: Get AI response with tool calls
+  console.log(`[CHECKPOINT-E1] AI call START taskId=${opts.taskId} model=${model} ts=${Date.now()}`);
   const result = model === "grok"
     ? await agenticGrokCall(userMessage, docContext, conversationContext)
     : await agenticGeminiCall(userMessage, docContext, conversationContext);
+  console.log(`[CHECKPOINT-E2] AI call DONE taskId=${opts.taskId} toolCalls=${result.toolCalls.length} hasText=${!!result.text} ts=${Date.now()}`);
+  await supabase.from("tasks").update({ result_json: { progress_step: "E_ai_done", tool_count: result.toolCalls.length } }).eq("id", opts.taskId);
 
   // Step 2: If no tool calls, just send the text response
   if (result.toolCalls.length === 0) {
@@ -1081,6 +1087,7 @@ Now provide a clear, concise summary for the user based on the results. Use mark
     }
 
     const finalSummary = formatAssistantMessage(model, summary);
+    console.log(`[CHECKPOINT-F] Sending final summary taskId=${opts.taskId} ts=${Date.now()}`);
     await sendMessage(chatId, finalSummary);
     await appendConversationTurn(chatId, {
       role: "assistant",
@@ -1093,8 +1100,9 @@ Now provide a clear, concise summary for the user based on the results. Use mark
     await supabase.from("tasks").update({
       status: "succeeded",
       selected_tools: executedToolNames,
-      result_json: { summary: summary.slice(0, 2000), toolResults: toolResults.map(r => r.slice(0, 500)), model_used: opts.sessionModel },
+      result_json: { progress_step: "F_succeeded", summary: summary.slice(0, 2000), toolResults: toolResults.map(r => r.slice(0, 500)), model_used: opts.sessionModel },
     }).eq("id", opts.taskId);
+    console.log(`[CHECKPOINT-F2] Task marked succeeded, sending Done msg taskId=${opts.taskId} ts=${Date.now()}`);
     await sendMessage(chatId, `✅ Done: \`${opts.taskId}\``);
 
   } else if (confirmationButtons.length > 0) {
@@ -1378,16 +1386,53 @@ serve(async (req) => {
       return new Response("ok");
     }
 
+    // ── Direct "status" shortcut — bypasses AI entirely ──
+    if (text.toLowerCase() === "status" || text.toLowerCase() === "/status") {
+      console.log(`[SHORTCUT] Direct status bypass taskId=${taskId}`);
+      await supabase.from("tasks").update({ status: "running" }).eq("id", taskId);
+      try {
+        const statusTool = AGENT_TOOLS.find(t => t.name === "get_system_status");
+        const statusResult = statusTool ? await statusTool.execute({}) : "Tool get_system_status not found";
+        const model = session.active_model as "grok" | "gemini";
+        const reply = formatAssistantMessage(model, `📊 *System Status*\n\n${statusResult}`);
+        await sendMessage(chatId, reply);
+        await supabase.from("tasks").update({
+          status: "succeeded",
+          selected_tools: ["get_system_status"],
+          result_json: { progress_step: "shortcut_status", result: statusResult, model_used: session.active_model },
+        }).eq("id", taskId);
+        await sendMessage(chatId, `✅ Done: \`${taskId}\``);
+      } catch (statusErr) {
+        const errMsg = statusErr instanceof Error ? statusErr.message : String(statusErr);
+        console.error("Status shortcut error:", statusErr);
+        await supabase.from("tasks").update({ status: "failed", error: errMsg, result_json: { progress_step: "shortcut_status_failed", model_used: session.active_model } }).eq("id", taskId);
+        await sendMessage(chatId, `❌ Failed: \`${taskId}\` — ${errMsg.slice(0, 200)}`);
+      }
+      return new Response("ok");
+    }
+
     // ── Set task to running BEFORE executing ──
-    await supabase.from("tasks").update({ status: "running" }).eq("id", taskId);
+    console.log(`[CHECKPOINT-B] Setting task running taskId=${taskId} ts=${Date.now()}`);
+    await supabase.from("tasks").update({ status: "running", result_json: { progress_step: "B_running" } }).eq("id", taskId);
 
     // Everything else goes through the agentic loop (model pinned from session)
+    console.log(`[CHECKPOINT-C] Calling executeAgenticLoop taskId=${taskId} model=${session.active_model} ts=${Date.now()}`);
+
+    // Timeout guard: 35s max for the agentic loop
+    const LOOP_TIMEOUT_MS = 35_000;
+    const timeoutPromise = new Promise<never>((_, reject) =>
+      setTimeout(() => reject(new Error("TIMEOUT")), LOOP_TIMEOUT_MS)
+    );
+
     try {
-      await executeAgenticLoop(chatId, text, { taskId, sessionModel: session.active_model as "grok" | "gemini" | "chatgpt" });
+      await Promise.race([
+        executeAgenticLoop(chatId, text, { taskId, sessionModel: session.active_model as "grok" | "gemini" | "chatgpt" }),
+        timeoutPromise,
+      ]);
     } catch (loopErr) {
       const errMsg = loopErr instanceof Error ? loopErr.message : String(loopErr);
-      console.error("Agentic loop fatal error:", loopErr);
-      await supabase.from("tasks").update({ status: "failed", error: errMsg, result_json: { model_used: session.active_model } }).eq("id", taskId);
+      console.error(`[CHECKPOINT-G] Agentic loop error taskId=${taskId}: ${errMsg}`);
+      await supabase.from("tasks").update({ status: "failed", error: errMsg, result_json: { progress_step: "G_failed", model_used: session.active_model } }).eq("id", taskId);
       await sendMessage(chatId, `❌ Failed: \`${taskId}\` — ${errMsg.slice(0, 200)}`);
     }
 
