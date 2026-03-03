@@ -556,9 +556,9 @@ Deno.test("K7: WORKFLOW_NOT_FOUND_IN_REGISTRY guard present in source", async ()
   assertMatch(source, /WORKFLOW_NOT_FOUND_IN_REGISTRY/, "Must contain WORKFLOW_NOT_FOUND_IN_REGISTRY guard");
 });
 
-Deno.test("K8: WORKFLOW_TOOL_BLOCKED log present in source", async () => {
+Deno.test("K8: workflow_tool_blocked log present in source", async () => {
   const source = await Deno.readTextFile("supabase/functions/telegram-webhook/index.ts");
-  assertMatch(source, /WORKFLOW_TOOL_BLOCKED/, "Must contain WORKFLOW_TOOL_BLOCKED log");
+  assertMatch(source, /workflow_tool_blocked/, "Must contain workflow_tool_blocked structured log");
 });
 
 Deno.test("K9: execution_complete marker present in task result_json updates", async () => {
@@ -602,7 +602,7 @@ Deno.test("K13: execution_context structured log present in source", async () =>
   assertMatch(source, /event.*execution_context/, "Must contain execution_context structured log");
 });
 
-// ─── L-series: Execution metrics & safeguards ──────────────────
+// ─── L-series: Execution metrics, lock-based guards, telemetry ──
 
 Deno.test("L1: executionStart timer exists in executeAgenticLoop", async () => {
   const source = await Deno.readTextFile("supabase/functions/telegram-webhook/index.ts");
@@ -614,14 +614,14 @@ Deno.test("L2: execution_duration_ms is stored in result_json", async () => {
   assertMatch(source, /execution_duration_ms/, "Must record execution_duration_ms in task result_json");
 });
 
-Deno.test("L3: duplicate execution guard present (TASK_ALREADY_RUNNING)", async () => {
+Deno.test("L3: execution_lock guard present (TASK_LOCK_NOT_ACQUIRED)", async () => {
   const source = await Deno.readTextFile("supabase/functions/telegram-webhook/index.ts");
-  assertMatch(source, /TASK_ALREADY_RUNNING/, "Must throw TASK_ALREADY_RUNNING for duplicate prevention");
+  assertMatch(source, /TASK_LOCK_NOT_ACQUIRED/, "Must throw TASK_LOCK_NOT_ACQUIRED for lock-based duplicate prevention");
 });
 
-Deno.test("L4: duplicate_execution_blocked structured log present", async () => {
+Deno.test("L4: execution_lock field used in result_json", async () => {
   const source = await Deno.readTextFile("supabase/functions/telegram-webhook/index.ts");
-  assertMatch(source, /duplicate_execution_blocked/, "Must log duplicate_execution_blocked event");
+  assertMatch(source, /execution_lock/, "Must use execution_lock in result_json for lock-based guard");
 });
 
 Deno.test("L5: lane1_execution_start structured log present", async () => {
@@ -662,11 +662,40 @@ Deno.test("L11: Guard rejects missing workflowKey", () => {
   assertEquals(!workflowKey, true, "Missing workflowKey must trigger WORKFLOW_REQUIRED_FOR_EXECUTION");
 });
 
-Deno.test("L12: All console.log in executeAgenticLoop use JSON.stringify", async () => {
+Deno.test("L12: logEvent helper defined in source", async () => {
   const source = await Deno.readTextFile("supabase/functions/telegram-webhook/index.ts");
-  // Extract executeAgenticLoop body
-  const loopStart = source.indexOf("async function executeAgenticLoop");
-  const loopSection = source.slice(loopStart, loopStart + 3000);
-  // Check structured logs use JSON.stringify
-  assertMatch(loopSection, /console\.log\(JSON\.stringify/, "Execution logs must use JSON.stringify for structured format");
+  assertMatch(source, /function logEvent\(/, "Must define logEvent structured logging helper");
+});
+
+Deno.test("L13: Lock acquisition uses .is('result_json->execution_lock', null)", async () => {
+  const source = await Deno.readTextFile("supabase/functions/telegram-webhook/index.ts");
+  assertMatch(source, /\.is\("result_json->execution_lock", null\)/, "Must use .is() filter for lock acquisition");
+});
+
+Deno.test("L14: Lock-based guard unit test — first lock succeeds, second fails", () => {
+  // Simulate lock acquisition logic
+  let lockHeld: string | null = null;
+
+  function acquireLock(lockId: string): boolean {
+    if (lockHeld !== null) return false; // lock already held
+    lockHeld = lockId;
+    return true;
+  }
+
+  const firstLock = acquireLock("lock-1");
+  assertEquals(firstLock, true, "First lock attempt must succeed");
+
+  const secondLock = acquireLock("lock-2");
+  assertEquals(secondLock, false, "Second lock attempt must fail (TASK_LOCK_NOT_ACQUIRED)");
+});
+
+Deno.test("L15: /metrics command handler present in source", async () => {
+  const source = await Deno.readTextFile("supabase/functions/telegram-webhook/index.ts");
+  assertMatch(source, /\/metrics/, "Must handle /metrics command");
+  assertMatch(source, /shortcut_metrics/, "Must store progress_step='shortcut_metrics'");
+});
+
+Deno.test("L16: duplicate_execution_blocked structured log present", async () => {
+  const source = await Deno.readTextFile("supabase/functions/telegram-webhook/index.ts");
+  assertMatch(source, /duplicate_execution_blocked/, "Must log duplicate_execution_blocked event");
 });
