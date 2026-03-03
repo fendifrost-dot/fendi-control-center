@@ -1763,6 +1763,17 @@ serve(async (req) => {
           return ts.replace("T", " ").slice(0, 16);
         }
 
+        const statusCounts = safeTasks.reduce((acc: Record<string, number>, t: any) => {
+          const s = String(t.status || "unknown");
+          acc[s] = (acc[s] || 0) + 1;
+          return acc;
+        }, {});
+
+        function countLine(counts: Record<string, number>): string {
+          const s = (k: string) => counts[k] || 0;
+          return `📌 *Summary:* ✅ ${s("succeeded")}  ⏳ ${s("running")}  ❌ ${s("failed")}  🕒 ${s("queued")}`;
+        }
+
         const taskSummaries = safeTasks.map((t: any) => {
           const shortId = (t.id || "").slice(0, 8) || "unknown";
           const lockHeld = Boolean(t.result_json?.execution_lock) ? "on" : "off";
@@ -1782,6 +1793,8 @@ serve(async (req) => {
           ``,
           `🏥 *Health:* uptime=${Math.round(health.uptime_ms / 1000)}s tools=${health.tool_count} workflows=${health.implemented_workflow_count}`,
           ``,
+          countLine(statusCounts),
+          ``,
           limitLine,
           ...(taskSummaries.length > 0 ? taskSummaries : ["_No tasks found._"]),
         ];
@@ -1789,7 +1802,7 @@ serve(async (req) => {
         await sendMessage(chatId, lines.join("\n"), {}, `task:${taskId}:metrics`);
         await supabase.from("tasks").update({
           status: "succeeded",
-          result_json: { progress_step: "shortcut_metrics", health, task_count: safeTasks.length, requested_limit: requestedLimit, effective_limit: metricsLimit },
+          result_json: { progress_step: "shortcut_metrics", health, task_count: safeTasks.length, requested_limit: requestedLimit, effective_limit: metricsLimit, status_counts: statusCounts },
         }).eq("id", taskId);
         await sendMessage(chatId, `✅ Done: \`${taskId}\``, {}, `task:${taskId}:done`);
       } catch (metricsErr) {
