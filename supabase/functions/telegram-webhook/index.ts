@@ -1728,8 +1728,9 @@ serve(async (req) => {
       try {
         // Parse optional limit arg: /metrics 50 (default 20, max 100)
         const metricsParts = text.trim().split(/\s+/);
-        const metricsRequested = metricsParts[1] ? Number(metricsParts[1]) : 20;
-        const metricsLimit = Number.isFinite(metricsRequested) ? Math.min(Math.max(metricsRequested, 1), 100) : 20;
+        const requestedLimitRaw = metricsParts[1] ? Number(metricsParts[1]) : 20;
+        const requestedLimit = Number.isFinite(requestedLimitRaw) ? requestedLimitRaw : 20;
+        const metricsLimit = Number.isFinite(requestedLimitRaw) ? Math.min(Math.max(requestedLimitRaw, 1), 100) : 20;
 
         const { data: rawTasks, error: tasksErr } = await supabase
           .from("tasks")
@@ -1747,26 +1748,48 @@ serve(async (req) => {
           return ` | ${ms}ms`;
         }
 
+        function statusIcon(status: string): string {
+          switch (status) {
+            case "succeeded": return "✅";
+            case "running": return "⏳";
+            case "failed": return "❌";
+            case "queued": return "🕒";
+            default: return "•";
+          }
+        }
+
+        function fmtTs(ts?: string): string {
+          if (!ts) return "";
+          return ts.replace("T", " ").slice(0, 16);
+        }
+
         const taskSummaries = safeTasks.map((t: any) => {
           const shortId = (t.id || "").slice(0, 8) || "unknown";
           const lockHeld = Boolean(t.result_json?.execution_lock) ? "on" : "off";
           const dur = fmtDuration(t.result_json?.execution_duration_ms);
-          return `\`${shortId}\` ${t.status} | ${t.selected_workflow || "—"} | lock=${lockHeld}${dur}`;
+          const ts = fmtTs(t.created_at);
+          const icon = statusIcon(t.status);
+          const wf = t.selected_workflow || "—";
+          return `${icon} \`${shortId}\` ${t.status} | ${wf} | lock=${lockHeld}${dur} | ${ts}`;
         });
+
+        const limitLine = requestedLimit !== metricsLimit
+          ? `*Last ${metricsLimit} Tasks* (requested: ${requestedLimit})`
+          : `*Last ${metricsLimit} Tasks:*`;
 
         const lines = [
           `📊 *${SYSTEM_IDENTITY} — Metrics*`,
           ``,
           `🏥 *Health:* uptime=${Math.round(health.uptime_ms / 1000)}s tools=${health.tool_count} workflows=${health.implemented_workflow_count}`,
           ``,
-          `*Last ${metricsLimit} Tasks:*`,
+          limitLine,
           ...(taskSummaries.length > 0 ? taskSummaries : ["_No tasks found._"]),
         ];
 
         await sendMessage(chatId, lines.join("\n"), {}, `task:${taskId}:metrics`);
         await supabase.from("tasks").update({
           status: "succeeded",
-          result_json: { progress_step: "shortcut_metrics", health, task_count: safeTasks.length, requested_limit: metricsLimit },
+          result_json: { progress_step: "shortcut_metrics", health, task_count: safeTasks.length, requested_limit: requestedLimit, effective_limit: metricsLimit },
         }).eq("id", taskId);
         await sendMessage(chatId, `✅ Done: \`${taskId}\``, {}, `task:${taskId}:done`);
       } catch (metricsErr) {
