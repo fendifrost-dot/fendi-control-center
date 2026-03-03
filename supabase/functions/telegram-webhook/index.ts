@@ -1788,6 +1788,14 @@ serve(async (req) => {
           ? `*Last ${metricsLimit} Tasks* (requested: ${requestedLimit})`
           : `*Last ${metricsLimit} Tasks:*`;
 
+        const newestTs = safeTasks[0]?.created_at ? fmtTs(safeTasks[0].created_at) : "";
+        const oldestTs = safeTasks[safeTasks.length - 1]?.created_at
+          ? fmtTs(safeTasks[safeTasks.length - 1].created_at)
+          : "";
+        const rangeLine = newestTs && oldestTs
+          ? `🕰️ *Range:* ${oldestTs} → ${newestTs}`
+          : `🕰️ *Range:* —`;
+
         const lines = [
           `📊 *${SYSTEM_IDENTITY} — Metrics*`,
           ``,
@@ -1797,12 +1805,14 @@ serve(async (req) => {
           ``,
           limitLine,
           ...(taskSummaries.length > 0 ? taskSummaries : ["_No tasks found._"]),
+          ``,
+          rangeLine,
         ];
 
         await sendMessage(chatId, lines.join("\n"), {}, `task:${taskId}:metrics`);
         await supabase.from("tasks").update({
           status: "succeeded",
-          result_json: { progress_step: "shortcut_metrics", health, task_count: safeTasks.length, requested_limit: requestedLimit, effective_limit: metricsLimit, status_counts: statusCounts },
+          result_json: { progress_step: "shortcut_metrics", health, task_count: safeTasks.length, requested_limit: requestedLimit, effective_limit: metricsLimit, status_counts: statusCounts, range: { oldest: oldestTs || null, newest: newestTs || null } },
         }).eq("id", taskId);
         await sendMessage(chatId, `✅ Done: \`${taskId}\``, {}, `task:${taskId}:done`);
       } catch (metricsErr) {
