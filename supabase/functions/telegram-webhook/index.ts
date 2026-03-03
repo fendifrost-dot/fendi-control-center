@@ -849,16 +849,28 @@ const AGENT_TOOLS: ToolDef[] = [
 
 // ─── Build tool schemas for AI models ───────────────────────────
 
-function getGeminiToolDeclarations() {
-  return AGENT_TOOLS.map(t => ({
+function getToolsForWorkflow(workflowKey: string): ToolDef[] {
+  // Find the workflow's declared tools from the registry cache or AGENT_TOOLS
+  // This is called after fetchWorkflowRegistry, so we filter AGENT_TOOLS by the workflow's tool list
+  return AGENT_TOOLS; // Filtered at call site using workflowToolNames
+}
+
+function getGeminiToolDeclarations(allowedToolNames?: string[]) {
+  const tools = allowedToolNames
+    ? AGENT_TOOLS.filter(t => allowedToolNames.includes(t.name))
+    : AGENT_TOOLS;
+  return tools.map(t => ({
     name: t.name,
     description: t.description + (t.destructive ? " [DESTRUCTIVE - requires user confirmation]" : ""),
     parameters: t.parameters,
   }));
 }
 
-function getGrokToolSchemas() {
-  return AGENT_TOOLS.map(t => ({
+function getGrokToolSchemas(allowedToolNames?: string[]) {
+  const tools = allowedToolNames
+    ? AGENT_TOOLS.filter(t => allowedToolNames.includes(t.name))
+    : AGENT_TOOLS;
+  return tools.map(t => ({
     type: "function" as const,
     function: {
       name: t.name,
@@ -898,7 +910,8 @@ async function deletePendingAction(actionId: string) {
 async function agenticGeminiCall(
   userMessage: string,
   docContext: string,
-  conversationContext: string
+  conversationContext: string,
+  allowedToolNames?: string[]
 ): Promise<{ text: string; toolCalls: Array<{ name: string; args: any }> }> {
   const systemPrompt = `You are the ${SYSTEM_IDENTITY}. You serve Fendi Frost as a personal command center assistant.
 
@@ -930,7 +943,7 @@ ${conversationContext}`;
       body: JSON.stringify({
         contents: [{ role: "user", parts: [{ text: userMessage }] }],
         systemInstruction: { parts: [{ text: systemPrompt }] },
-        tools: [{ functionDeclarations: getGeminiToolDeclarations() }],
+        tools: [{ functionDeclarations: getGeminiToolDeclarations(allowedToolNames) }],
         toolConfig: { functionCallingConfig: { mode: "AUTO" } },
         generationConfig: { maxOutputTokens: 1024 },
       }),
@@ -963,7 +976,8 @@ ${conversationContext}`;
 async function agenticGrokCall(
   userMessage: string,
   docContext: string,
-  conversationContext: string
+  conversationContext: string,
+  allowedToolNames?: string[]
 ): Promise<{ text: string; toolCalls: Array<{ name: string; args: any }> }> {
   const systemPrompt = `You are the ${SYSTEM_IDENTITY}. You serve Fendi Frost as a personal command center assistant.
 
@@ -996,7 +1010,7 @@ ${conversationContext}`;
         { role: "system", content: systemPrompt },
         { role: "user", content: userMessage },
       ],
-      tools: getGrokToolSchemas(),
+      tools: getGrokToolSchemas(allowedToolNames),
       tool_choice: "auto",
       max_tokens: 1024,
     }),
@@ -1067,14 +1081,47 @@ async function logToolFailure(logId: string, error: string, startedAt: number) {
 
 // ─── Execute agentic loop ──────────────────────────────────────
 
-async function executeAgenticLoop(chatId: string, userMessage: string, opts: { taskId: string; sessionModel: "grok" | "gemini" | "chatgpt"; lane?: string; allowTools?: boolean; workflowKey?: string }): Promise<void> {
-  console.log(`[CHECKPOINT-D] executeAgenticLoop START taskId=${opts.taskId} model=${opts.sessionModel} lane=${opts.lane || "default"} workflow=${opts.workflowKey || "none"} ts=${Date.now()}`);
-  await supabase.from("tasks").update({ result_json: { progress_step: "D_loop_start", lane: opts.lane || "default", workflow_key: opts.workflowKey || null } }).eq("id", opts.taskId);
-  if (opts.workflowKey) {
-    await supabase.from("tasks").update({ selected_workflow: opts.workflowKey }).eq("id", opts.taskId);
+async function executeAgenticLoop(chatId: string, userMessage: string, opts: { taskId: string; sessionModel: "grok" | "gemini" | "chatgpt"; lane?: "lane1_do" | "lane2_assistant"; allowTools?: boolean; workflowKey?: string }): Promise<void> {
+  // ── STEP 2: HARD EXECUTION GUARD ──
+  if (opts.lane !== "lane1_do" || opts.allowTools !== true) {
+    console.error(`[TOOLS_BLOCKED] attempted tool execution outside execution lane task=${opts.taskId}`);
+    throw new Error("TOOLS_BLOCKED: agentic loop cannot run outside /do execution lane");
   }
 
-  const model: "grok" | "gemini" = opts.sessionModel === "chatgpt" ? "grok" : opts.sessionModel as "grok" | "gemini"; // chatgpt maps to grok for now
+  // ── STEP 3: REQUIRE WORKFLOW KEY ──
+  if (!opts.workflowKey) {
+    throw new Error("WORKFLOW_REQUIRED_FOR_EXECUTION");
+  }
+
+  // ── STEP 5: EXECUTION LOG ──
+  console.log(`[LANE1_EXECUTION] workflow=${opts.workflowKey} task=${opts.taskId} model=${opts.sessionModel}`);
+
+  // ── STEP 6: STORE EXECUTION CONTEXT ──
+  await supabase.from("tasks").update({
+    status: "running",
+    selected_workflow: opts.workflowKey,
+    result_json: {
+      execution_lane: "lane1_do",
+      selected_workflow: opts.workflowKey,
+      model_used: opts.sessionModel,
+    },
+  }).eq("id", opts.taskId);
+
+  // ── STEP 4: LOAD TOOLS FROM WORKFLOW ──
+  // Fetch workflow registry to get the tool list for this workflow
+  const workflows = await fetchWorkflowRegistry();
+  const matchedWorkflow = workflows.find(w => w.key === opts.workflowKey);
+  const workflowToolNames: string[] | undefined = matchedWorkflow?.tools?.length
+    ? matchedWorkflow.tools
+    : undefined; // undefined = allow all (fallback for workflows without explicit tool lists)
+
+  if (workflowToolNames) {
+    console.log(`[LANE1_EXECUTION] Scoped tools for workflow '${opts.workflowKey}': ${workflowToolNames.join(", ")}`);
+  } else {
+    console.log(`[LANE1_EXECUTION] Workflow '${opts.workflowKey}' has no explicit tool list — using all registered tools`);
+  }
+
+  const model: "grok" | "gemini" = opts.sessionModel === "chatgpt" ? "grok" : opts.sessionModel as "grok" | "gemini";
   const docContext = await getRecentDocContext();
   const requestId = crypto.randomUUID();
 
@@ -1087,11 +1134,11 @@ async function executeAgenticLoop(chatId: string, userMessage: string, opts: { t
 
   const conversationContext = await buildConversationContext(chatId);
 
-  // Step 1: Get AI response with tool calls
-  console.log(`[CHECKPOINT-E1] AI call START taskId=${opts.taskId} model=${model} ts=${Date.now()}`);
+  // Step 1: Get AI response with workflow-scoped tool calls
+  console.log(`[CHECKPOINT-E1] AI call START taskId=${opts.taskId} model=${model} workflow=${opts.workflowKey} ts=${Date.now()}`);
   const result = model === "grok"
-    ? await agenticGrokCall(userMessage, docContext, conversationContext)
-    : await agenticGeminiCall(userMessage, docContext, conversationContext);
+    ? await agenticGrokCall(userMessage, docContext, conversationContext, workflowToolNames)
+    : await agenticGeminiCall(userMessage, docContext, conversationContext, workflowToolNames);
   console.log(`[CHECKPOINT-E2] AI call DONE taskId=${opts.taskId} toolCalls=${result.toolCalls.length} hasText=${!!result.text} ts=${Date.now()}`);
   await supabase.from("tasks").update({ result_json: { progress_step: "E_ai_done", tool_count: result.toolCalls.length } }).eq("id", opts.taskId);
 
@@ -1121,6 +1168,13 @@ async function executeAgenticLoop(chatId: string, userMessage: string, opts: { t
   const confirmationButtons: Array<{ text: string; callback_data: string }> = [];
 
   for (const tc of result.toolCalls) {
+    // WORKFLOW-SCOPED GUARDRAIL: block tools not in this workflow's declared tool list
+    if (workflowToolNames && !workflowToolNames.includes(tc.name)) {
+      console.error(`[TOOLS_BLOCKED] AI called '${tc.name}' which is not in workflow '${opts.workflowKey}' tool list [${workflowToolNames.join(",")}] — blocked.`);
+      toolResults.push(`🚫 Tool '${tc.name}' is not allowed in workflow '${opts.workflowKey}'.`);
+      continue;
+    }
+
     const tool = AGENT_TOOLS.find(t => t.name === tc.name);
     if (!tool) {
       console.error(`GUARDRAIL: AI tried to call unregistered tool '${tc.name}' — blocked.`);
