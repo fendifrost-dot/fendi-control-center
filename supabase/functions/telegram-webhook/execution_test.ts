@@ -374,8 +374,8 @@ Deno.test("J1: unregistered tool call is blocked with exact message", () => {
   const registered = ALL_TOOL_NAMES.includes(fakeTool);
   assertEquals(registered, false, "Fake tool must NOT be in registry");
   // Agent guardrail must produce this exact substring:
-  const guardMsg = `Tool '${fakeTool}' is not in the tool registry. No internal workflow exists for that request yet.`;
-  assertMatch(guardMsg, /No internal workflow exists for that request yet/);
+  const guardMsg = `Tool '${fakeTool}' is not in the tool registry. Run /workflows to see available commands.`;
+  assertMatch(guardMsg, /Run \/workflows to see available commands/);
 });
 
 Deno.test("J2: tool_registry.json matches AGENT_TOOLS in index.ts (real files, exact set equality)", async () => {
@@ -438,11 +438,11 @@ Deno.test("J4: text-only response to a tool-mapped request is a violation", () =
     "Agent must NOT answer with text when a matching tool exists — must call the tool");
 });
 
-Deno.test("J5: no-workflow message is exact string", () => {
-  const expected = "No internal workflow exists for that request yet.";
-  const agentFallback = "No internal workflow exists for that request yet.";
+Deno.test("J5: no-workflow fallback uses /workflows suggestion", () => {
+  const expected = "Run /workflows to see available commands.";
+  const agentFallback = "Run /workflows to see available commands.";
   assertEquals(agentFallback, expected,
-    "Fallback message must be this exact string, not a paraphrase");
+    "Fallback message must suggest /workflows, not the old vague message");
 });
 
 Deno.test("J6: REAL index.ts source contains all enforcement strings", async () => {
@@ -451,7 +451,7 @@ Deno.test("J6: REAL index.ts source contains all enforcement strings", async () 
   const requiredStrings = [
     "NO TOOL, NO CLAIM",
     "NO WORKFLOW, NO ACTION",
-    'No internal workflow exists for that request yet.',
+    "Run /workflows to see available commands",
     "EVIDENCE OVER CLAIMS",
     "GUARDRAIL: AI tried to call unregistered tool",
     "FATAL: Tool execution logging failed",
@@ -468,9 +468,9 @@ Deno.test("J7: guardrail block message uses tc.name interpolation in real source
 
   // Must contain the user-facing message
   assertEquals(
-    source.includes("No internal workflow exists for that request yet."),
+    source.includes("Run /workflows to see available commands"),
     true,
-    "Missing user-facing no-workflow message"
+    "Missing user-facing /workflows suggestion message"
   );
 
   // Must reference tc.name in guardrail section
