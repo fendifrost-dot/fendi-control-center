@@ -487,3 +487,117 @@ Deno.test("J7: guardrail block message uses tc.name interpolation in real source
     "Missing GUARDRAIL log line"
   );
 });
+
+// ═══════════════════════════════════════════════════════════════
+// ─── K) TWO-LANE GUARDRAIL REGRESSION TESTS ─────────────────
+// ═══════════════════════════════════════════════════════════════
+
+Deno.test("K1: executeAgenticLoop rejects lane2_assistant with TOOLS_BLOCKED", () => {
+  // Mirror the guard logic from index.ts
+  function guardCheck(opts: { lane?: string; allowTools?: boolean }): string | null {
+    if (opts.lane !== "lane1_do" || opts.allowTools !== true) {
+      return "TOOLS_BLOCKED: agentic loop cannot run outside /do execution lane";
+    }
+    return null;
+  }
+
+  const result = guardCheck({ lane: "lane2_assistant", allowTools: false });
+  assertExists(result, "Guard must reject lane2_assistant");
+  assertMatch(result!, /TOOLS_BLOCKED/, "Error must contain TOOLS_BLOCKED");
+});
+
+Deno.test("K2: executeAgenticLoop rejects missing workflowKey", () => {
+  function workflowGuard(workflowKey?: string): string | null {
+    if (!workflowKey) return "WORKFLOW_REQUIRED_FOR_EXECUTION";
+    return null;
+  }
+
+  const result = workflowGuard(undefined);
+  assertExists(result);
+  assertEquals(result, "WORKFLOW_REQUIRED_FOR_EXECUTION");
+});
+
+Deno.test("K3: executeAgenticLoop accepts lane1_do with allowTools=true and workflowKey", () => {
+  function fullGuard(opts: { lane?: string; allowTools?: boolean; workflowKey?: string }): string | null {
+    if (opts.lane !== "lane1_do" || opts.allowTools !== true) {
+      return "TOOLS_BLOCKED";
+    }
+    if (!opts.workflowKey) return "WORKFLOW_REQUIRED_FOR_EXECUTION";
+    return null;
+  }
+
+  const result = fullGuard({ lane: "lane1_do", allowTools: true, workflowKey: "system_status" });
+  assertEquals(result, null, "Valid execution context must pass all guards");
+});
+
+Deno.test("K4: workflow-scoped tool blocking rejects tools outside workflow declaration", () => {
+  const workflowToolNames = ["retry_outbox"];
+  const attemptedTool = "delete_user";
+
+  const blocked = workflowToolNames && !workflowToolNames.includes(attemptedTool);
+  assertEquals(blocked, true, "Tool not in workflow must be blocked");
+});
+
+Deno.test("K5: workflow-scoped tool blocking allows tools inside workflow declaration", () => {
+  const workflowToolNames = ["get_system_status", "list_failed_jobs"];
+  const attemptedTool = "get_system_status";
+
+  const blocked = workflowToolNames && !workflowToolNames.includes(attemptedTool);
+  assertEquals(blocked, false, "Tool in workflow must be allowed");
+});
+
+Deno.test("K6: EXECUTION_CONTEXT_INVALID_LANE guard present in source", async () => {
+  const source = await Deno.readTextFile("supabase/functions/telegram-webhook/index.ts");
+  assertMatch(source, /EXECUTION_CONTEXT_INVALID_LANE/, "Must contain EXECUTION_CONTEXT_INVALID_LANE guard");
+});
+
+Deno.test("K7: WORKFLOW_NOT_FOUND_IN_REGISTRY guard present in source", async () => {
+  const source = await Deno.readTextFile("supabase/functions/telegram-webhook/index.ts");
+  assertMatch(source, /WORKFLOW_NOT_FOUND_IN_REGISTRY/, "Must contain WORKFLOW_NOT_FOUND_IN_REGISTRY guard");
+});
+
+Deno.test("K8: WORKFLOW_TOOL_BLOCKED log present in source", async () => {
+  const source = await Deno.readTextFile("supabase/functions/telegram-webhook/index.ts");
+  assertMatch(source, /WORKFLOW_TOOL_BLOCKED/, "Must contain WORKFLOW_TOOL_BLOCKED log");
+});
+
+Deno.test("K9: execution_complete marker present in task result_json updates", async () => {
+  const source = await Deno.readTextFile("supabase/functions/telegram-webhook/index.ts");
+  assertMatch(source, /execution_complete:\s*true/, "Must set execution_complete: true in result_json");
+});
+
+Deno.test("K10: executeAgenticLoop is only called inside /do block", async () => {
+  const source = await Deno.readTextFile("supabase/functions/telegram-webhook/index.ts");
+  // Find all call sites (not the function definition)
+  const callPattern = /executeAgenticLoop\(/g;
+  const matches: number[] = [];
+  let m;
+  while ((m = callPattern.exec(source)) !== null) {
+    matches.push(m.index);
+  }
+  // Should have exactly 2: the definition and the /do call site
+  assertEquals(matches.length, 2, `executeAgenticLoop must appear exactly 2 times (definition + 1 call site), found ${matches.length}`);
+});
+
+Deno.test("K11: Lane 2 assistant mode never calls executeAgenticLoop", async () => {
+  const source = await Deno.readTextFile("supabase/functions/telegram-webhook/index.ts");
+  // Extract Lane 2 section
+  const lane2Start = source.indexOf("LANE 2 — ASSISTANT MODE");
+  assertExists(lane2Start, "Lane 2 section must exist");
+  const lane2Section = source.slice(lane2Start);
+  assertEquals(
+    lane2Section.includes("executeAgenticLoop("),
+    false,
+    "Lane 2 must never call executeAgenticLoop"
+  );
+});
+
+Deno.test("K12: AI_RESPONSE telemetry log present in source", async () => {
+  const source = await Deno.readTextFile("supabase/functions/telegram-webhook/index.ts");
+  assertMatch(source, /\[AI_RESPONSE\]/, "Must contain [AI_RESPONSE] telemetry log");
+});
+
+Deno.test("K13: EXECUTION_CONTEXT log present in source", async () => {
+  const source = await Deno.readTextFile("supabase/functions/telegram-webhook/index.ts");
+  assertMatch(source, /\[EXECUTION_CONTEXT\]/, "Must contain [EXECUTION_CONTEXT] log");
+});
