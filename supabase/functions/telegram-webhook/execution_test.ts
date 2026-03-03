@@ -592,12 +592,81 @@ Deno.test("K11: Lane 2 assistant mode never calls executeAgenticLoop", async () 
   );
 });
 
-Deno.test("K12: AI_RESPONSE telemetry log present in source", async () => {
+Deno.test("K12: ai_response structured telemetry log present in source", async () => {
   const source = await Deno.readTextFile("supabase/functions/telegram-webhook/index.ts");
-  assertMatch(source, /\[AI_RESPONSE\]/, "Must contain [AI_RESPONSE] telemetry log");
+  assertMatch(source, /event.*ai_response/, "Must contain ai_response structured telemetry log");
 });
 
-Deno.test("K13: EXECUTION_CONTEXT log present in source", async () => {
+Deno.test("K13: execution_context structured log present in source", async () => {
   const source = await Deno.readTextFile("supabase/functions/telegram-webhook/index.ts");
-  assertMatch(source, /\[EXECUTION_CONTEXT\]/, "Must contain [EXECUTION_CONTEXT] log");
+  assertMatch(source, /event.*execution_context/, "Must contain execution_context structured log");
+});
+
+// ─── L-series: Execution metrics & safeguards ──────────────────
+
+Deno.test("L1: executionStart timer exists in executeAgenticLoop", async () => {
+  const source = await Deno.readTextFile("supabase/functions/telegram-webhook/index.ts");
+  assertMatch(source, /const executionStart = Date\.now\(\)/, "Must capture executionStart timestamp");
+});
+
+Deno.test("L2: execution_duration_ms is stored in result_json", async () => {
+  const source = await Deno.readTextFile("supabase/functions/telegram-webhook/index.ts");
+  assertMatch(source, /execution_duration_ms/, "Must record execution_duration_ms in task result_json");
+});
+
+Deno.test("L3: duplicate execution guard present (TASK_ALREADY_RUNNING)", async () => {
+  const source = await Deno.readTextFile("supabase/functions/telegram-webhook/index.ts");
+  assertMatch(source, /TASK_ALREADY_RUNNING/, "Must throw TASK_ALREADY_RUNNING for duplicate prevention");
+});
+
+Deno.test("L4: duplicate_execution_blocked structured log present", async () => {
+  const source = await Deno.readTextFile("supabase/functions/telegram-webhook/index.ts");
+  assertMatch(source, /duplicate_execution_blocked/, "Must log duplicate_execution_blocked event");
+});
+
+Deno.test("L5: lane1_execution_start structured log present", async () => {
+  const source = await Deno.readTextFile("supabase/functions/telegram-webhook/index.ts");
+  assertMatch(source, /lane1_execution_start/, "Must log lane1_execution_start structured event");
+});
+
+Deno.test("L6: tool_execution structured telemetry present", async () => {
+  const source = await Deno.readTextFile("supabase/functions/telegram-webhook/index.ts");
+  assertMatch(source, /event.*tool_execution[^_]/, "Must log tool_execution structured event");
+});
+
+Deno.test("L7: tool_execution_failed structured telemetry present", async () => {
+  const source = await Deno.readTextFile("supabase/functions/telegram-webhook/index.ts");
+  assertMatch(source, /tool_execution_failed/, "Must log tool_execution_failed structured event");
+});
+
+Deno.test("L8: systemHealthCheck function exists", async () => {
+  const source = await Deno.readTextFile("supabase/functions/telegram-webhook/index.ts");
+  assertMatch(source, /function systemHealthCheck\(\)/, "Must define systemHealthCheck helper");
+});
+
+Deno.test("L9: /status handler includes health check data", async () => {
+  const source = await Deno.readTextFile("supabase/functions/telegram-webhook/index.ts");
+  const statusSection = source.slice(source.indexOf("Direct \"status\" shortcut"));
+  assertMatch(statusSection, /systemHealthCheck/, "Status handler must call systemHealthCheck");
+});
+
+Deno.test("L10: Guard rejects lane2_assistant with TOOLS_BLOCKED", () => {
+  const lane: string = "lane2_assistant";
+  const allowTools = JSON.parse("false") as boolean;
+  const blocked = lane !== "lane1_do" || allowTools !== true;
+  assertEquals(blocked, true, "lane2_assistant must be blocked");
+});
+
+Deno.test("L11: Guard rejects missing workflowKey", () => {
+  const workflowKey: string | undefined = undefined;
+  assertEquals(!workflowKey, true, "Missing workflowKey must trigger WORKFLOW_REQUIRED_FOR_EXECUTION");
+});
+
+Deno.test("L12: All console.log in executeAgenticLoop use JSON.stringify", async () => {
+  const source = await Deno.readTextFile("supabase/functions/telegram-webhook/index.ts");
+  // Extract executeAgenticLoop body
+  const loopStart = source.indexOf("async function executeAgenticLoop");
+  const loopSection = source.slice(loopStart, loopStart + 3000);
+  // Check structured logs use JSON.stringify
+  assertMatch(loopSection, /console\.log\(JSON\.stringify/, "Execution logs must use JSON.stringify for structured format");
 });

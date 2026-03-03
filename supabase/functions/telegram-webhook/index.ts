@@ -359,6 +359,16 @@ async function fetchProjectStats(project: any): Promise<{ name: string; tables: 
   }
 }
 
+// ─── System health check ────────────────────────────────────────
+function systemHealthCheck() {
+  return {
+    timestamp: Date.now(),
+    uptime_ms: Math.round(performance.now()),
+    tool_count: AGENT_TOOLS.length,
+    implemented_workflows: Array.from(IMPLEMENTED_WORKFLOW_KEYS),
+  };
+}
+
 // ═══════════════════════════════════════════════════════════════
 // ─── AGENTIC TOOL DEFINITIONS ─────────────────────────────────
 // ═══════════════════════════════════════════════════════════════
@@ -1082,9 +1092,12 @@ async function logToolFailure(logId: string, error: string, startedAt: number) {
 // ─── Execute agentic loop ──────────────────────────────────────
 
 async function executeAgenticLoop(chatId: string, userMessage: string, opts: { taskId: string; sessionModel: "grok" | "gemini" | "chatgpt"; lane?: "lane1_do" | "lane2_assistant"; allowTools?: boolean; workflowKey?: string }): Promise<void> {
+  // ── STEP 1: EXECUTION METRICS ──
+  const executionStart = Date.now();
+
   // ── HARD EXECUTION GUARD ──
   if (opts.lane !== "lane1_do" || opts.allowTools !== true) {
-    console.error(`[TOOLS_BLOCKED] attempted tool execution outside execution lane task=${opts.taskId}`);
+    console.error(JSON.stringify({ event: "tools_blocked", taskId: opts.taskId, lane: opts.lane, allowTools: opts.allowTools, ts: Date.now() }));
     throw new Error("TOOLS_BLOCKED: agentic loop cannot run outside /do execution lane");
   }
 
@@ -1095,7 +1108,7 @@ async function executeAgenticLoop(chatId: string, userMessage: string, opts: { t
     workflowKey: opts.workflowKey,
     taskId: opts.taskId,
   };
-  console.log("[EXECUTION_CONTEXT]", JSON.stringify(executionContext));
+  console.log(JSON.stringify({ event: "execution_context", ...executionContext, ts: Date.now() }));
 
   if (executionContext.lane !== "lane1_do") {
     throw new Error("EXECUTION_CONTEXT_INVALID_LANE");
@@ -1106,8 +1119,20 @@ async function executeAgenticLoop(chatId: string, userMessage: string, opts: { t
     throw new Error("WORKFLOW_REQUIRED_FOR_EXECUTION");
   }
 
-  // ── EXECUTION LOG ──
-  console.log(`[LANE1_EXECUTION] workflow=${opts.workflowKey} task=${opts.taskId} model=${opts.sessionModel}`);
+  // ── STEP 3: PREVENT DUPLICATE EXECUTION ──
+  const { data: existingTask } = await supabase
+    .from("tasks")
+    .select("status")
+    .eq("id", opts.taskId)
+    .single();
+
+  if (existingTask?.status === "running") {
+    console.warn(JSON.stringify({ event: "duplicate_execution_blocked", taskId: opts.taskId, ts: Date.now() }));
+    throw new Error("TASK_ALREADY_RUNNING");
+  }
+
+  // ── STEP 4: STRUCTURED EXECUTION START LOG ──
+  console.log(JSON.stringify({ event: "lane1_execution_start", workflow: opts.workflowKey, taskId: opts.taskId, model: opts.sessionModel, ts: Date.now() }));
 
   // ── STORE EXECUTION CONTEXT ──
   await supabase.from("tasks").update({
@@ -1158,8 +1183,7 @@ async function executeAgenticLoop(chatId: string, userMessage: string, opts: { t
   const result = model === "grok"
     ? await agenticGrokCall(userMessage, docContext, conversationContext, workflowToolNames)
     : await agenticGeminiCall(userMessage, docContext, conversationContext, workflowToolNames);
-  console.log(`[CHECKPOINT-E2] AI call DONE taskId=${opts.taskId} toolCalls=${result.toolCalls.length} hasText=${!!result.text} ts=${Date.now()}`);
-  console.log(`[AI_RESPONSE] workflow=${opts.workflowKey} toolCalls=${result.toolCalls.length}`);
+  console.log(JSON.stringify({ event: "ai_response", workflow: opts.workflowKey, toolCalls: result.toolCalls.length, hasText: !!result.text, model, taskId: opts.taskId, ts: Date.now() }));
   await supabase.from("tasks").update({ result_json: { progress_step: "E_ai_done", tool_count: result.toolCalls.length } }).eq("id", opts.taskId);
 
   // Step 2: If no tool calls, just send the text response
@@ -1174,10 +1198,11 @@ async function executeAgenticLoop(chatId: string, userMessage: string, opts: { t
       at: new Date().toISOString(),
     });
 
+    const executionDuration = Date.now() - executionStart;
     await supabase.from("tasks").update({
       status: "succeeded",
       selected_tools: [],
-      result_json: { execution_complete: true, workflow: opts.workflowKey, text_response: responseText.slice(0, 2000), model_used: opts.sessionModel },
+      result_json: { execution_complete: true, workflow: opts.workflowKey, text_response: responseText.slice(0, 2000), model_used: opts.sessionModel, execution_duration_ms: executionDuration },
     }).eq("id", opts.taskId);
     await sendMessage(chatId, `✅ Done: \`${opts.taskId}\``, {}, `task:${opts.taskId}:done`);
     return;
@@ -1237,15 +1262,19 @@ async function executeAgenticLoop(chatId: string, userMessage: string, opts: { t
       // Update log to succeeded (destructive actions are deferred, logging the intent)
       await logToolSuccess(logId, "Awaiting confirmation", startedAt);
     } else {
-      // Execute immediately
+      // Execute immediately with telemetry
+      const toolStart = Date.now();
       try {
         const output = await tool.execute(tc.args);
+        const toolDuration = Date.now() - toolStart;
         await logToolSuccess(logId, output, startedAt);
+        console.log(JSON.stringify({ event: "tool_execution", tool: tc.name, workflow: opts.workflowKey, duration_ms: toolDuration, taskId: opts.taskId, ts: Date.now() }));
         toolResults.push(output);
       } catch (e) {
+        const toolDuration = Date.now() - toolStart;
         const errStr = e instanceof Error ? e.message : String(e);
         await logToolFailure(logId, errStr, startedAt);
-        console.error(`Tool ${tc.name} error:`, e);
+        console.error(JSON.stringify({ event: "tool_execution_failed", tool: tc.name, workflow: opts.workflowKey, taskId: opts.taskId, duration_ms: toolDuration, error: errStr, ts: Date.now() }));
         toolResults.push(`❌ Error executing ${tc.name}: ${errStr}`);
       }
     }
@@ -1306,11 +1335,12 @@ Now provide a clear, concise summary for the user based on the results. Use mark
       at: new Date().toISOString(),
     });
 
-    // ── TASK LIFECYCLE: mark succeeded ──
+    // ── TASK LIFECYCLE: mark succeeded with duration ──
+    const executionDuration = Date.now() - executionStart;
     await supabase.from("tasks").update({
       status: "succeeded",
       selected_tools: executedToolNames,
-      result_json: { execution_complete: true, workflow: opts.workflowKey, progress_step: "F_succeeded", summary: summary.slice(0, 2000), toolResults: toolResults.map(r => r.slice(0, 500)), model_used: opts.sessionModel },
+      result_json: { execution_complete: true, workflow: opts.workflowKey, progress_step: "F_succeeded", summary: summary.slice(0, 2000), toolResults: toolResults.map(r => r.slice(0, 500)), model_used: opts.sessionModel, execution_duration_ms: executionDuration },
     }).eq("id", opts.taskId);
     console.log(`[CHECKPOINT-F2] Task marked succeeded, sending Done msg taskId=${opts.taskId} ts=${Date.now()}`);
     await sendMessage(chatId, `✅ Done: \`${opts.taskId}\``, {}, `task:${opts.taskId}:done`);
@@ -1627,13 +1657,14 @@ serve(async (req) => {
       try {
         const statusTool = AGENT_TOOLS.find(t => t.name === "get_system_status");
         const statusResult = statusTool ? await statusTool.execute({}) : "Tool get_system_status not found";
+        const health = systemHealthCheck();
         const model = session.active_model as "grok" | "gemini";
-        const reply = formatAssistantMessage(model, `📊 *System Status*\n\n${statusResult}`);
+        const reply = formatAssistantMessage(model, `📊 *System Status*\n\n${statusResult}\n\n🏥 *Health:* uptime=${Math.round(health.uptime_ms / 1000)}s tools=${health.tool_count} workflows=${health.implemented_workflows.length}`);
         await sendMessage(chatId, reply);
         await supabase.from("tasks").update({
           status: "succeeded",
           selected_tools: ["get_system_status"],
-          result_json: { progress_step: "shortcut_status", result: statusResult, model_used: session.active_model },
+          result_json: { progress_step: "shortcut_status", result: statusResult, health, model_used: session.active_model },
         }).eq("id", taskId);
         await sendMessage(chatId, `✅ Done: \`${taskId}\``);
       } catch (statusErr) {
