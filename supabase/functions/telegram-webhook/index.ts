@@ -330,12 +330,36 @@ async function createTaskRow(sessionId: string, requestText: string, requestedMo
     status: "queued",
     request_text: requestText,
     requested_model: requestedModel || null,
-    selected_workflow: null,
+    selected_workflow: "unknown",
     result_json: { action: "created" },
   }).select("id").single();
 
   if (error || !data) throw new Error(`Failed to create task: ${error?.message}`);
   return data.id;
+}
+
+// ─── Error code classifier ─────────────────────────────────────
+function classifyErrorCode(errMsg: string): { error_code: string; error_hint: string } {
+  const msg = (errMsg || "").toLowerCase();
+  if (msg.includes("timeout")) return { error_code: "TIMEOUT", error_hint: "Execution exceeded time limit" };
+  if (msg.includes("ai unavailable") || msg.includes("gemini agentic error") || msg.includes("grok agentic error") || /\b(4\d{2}|5\d{2})\b/.test(msg) && (msg.includes("api") || msg.includes("fetch"))) return { error_code: "AI_HTTP", error_hint: "AI API returned an error" };
+  if (msg.includes("parse") || msg.includes("json") || msg.includes("unexpected token")) return { error_code: "AI_PARSE", error_hint: "Failed to parse AI response" };
+  if (msg.includes("tools_blocked")) return { error_code: "TOOL_BLOCKED", error_hint: "Tool execution blocked outside Lane 1" };
+  if (msg.includes("workflow_not_found") || msg.includes("registry")) return { error_code: "WORKFLOW_NOT_FOUND", error_hint: "Workflow not found in registry" };
+  if (msg.includes("lock_not_acquired") || msg.includes("task_lock")) return { error_code: "LOCK_NOT_ACQUIRED", error_hint: "Another execution already running" };
+  return { error_code: "UNKNOWN", error_hint: "Unclassified failure" };
+}
+
+function buildFailureResultJson(base: Record<string, any>, errMsg: string, executionStart?: number): Record<string, any> {
+  const { error_code, error_hint } = classifyErrorCode(errMsg);
+  return {
+    ...base,
+    error_code,
+    error_hint,
+    execution_duration_ms: executionStart ? Date.now() - executionStart : undefined,
+    execution_lock: null,
+    execution_lock_released_ts: Date.now(),
+  };
 }
 
 // Helper: set shortcut workflow attribution BEFORE running shortcut logic
@@ -1686,7 +1710,8 @@ serve(async (req) => {
       } catch (statusErr) {
         const errMsg = statusErr instanceof Error ? statusErr.message : String(statusErr);
         console.error("Status shortcut error:", statusErr);
-        await supabase.from("tasks").update({ status: "failed", error: errMsg, result_json: { execution_lane: "shortcut", progress_step: "shortcut_status_failed", model_used: session.active_model } }).eq("id", taskId);
+        const failResult = buildFailureResultJson({ execution_lane: "shortcut", progress_step: "shortcut_status_failed", model_used: session.active_model }, errMsg);
+        await supabase.from("tasks").update({ status: "failed", error: errMsg.slice(0, 300), result_json: failResult }).eq("id", taskId);
         await sendMessage(chatId, `❌ Failed: \`${taskId}\` — ${errMsg.slice(0, 200)}`);
       }
       return new Response("ok");
@@ -1788,12 +1813,13 @@ serve(async (req) => {
 
         const taskSummaries = safeTasks.map((t: any) => {
           const shortId = (t.id || "").slice(0, 8) || "unknown";
-          const lockHeld = Boolean(t.result_json?.execution_lock) ? "on" : "off";
+          const lockHeld = t.status === "running" && Boolean(t.result_json?.execution_lock) ? "on" : "off";
           const dur = fmtDuration(t.result_json?.execution_duration_ms);
           const ts = fmtTs(t.created_at);
           const icon = statusIcon(t.status);
           const wf = t.selected_workflow || "—";
-          return `${icon} \`${shortId}\` ${t.status} | ${wf} | lock=${lockHeld}${dur} | ${ts}`;
+          const errCode = t.status === "failed" ? ` | code=${t.result_json?.error_code || "UNKNOWN"}` : "";
+          return `${icon} \`${shortId}\` ${t.status} | ${wf} | lock=${lockHeld}${dur} | ${ts}${errCode}`;
         });
 
         const limitLine = requestedLimit !== metricsLimit
@@ -1829,7 +1855,87 @@ serve(async (req) => {
         await sendMessage(chatId, `✅ Done: \`${taskId}\``, {}, `task:${taskId}:done`);
       } catch (metricsErr) {
         const errMsg = metricsErr instanceof Error ? metricsErr.message : String(metricsErr);
-        await supabase.from("tasks").update({ status: "failed", error: errMsg }).eq("id", taskId);
+        const failResult = buildFailureResultJson({ execution_lane: "shortcut", progress_step: "shortcut_metrics_failed" }, errMsg);
+        await supabase.from("tasks").update({ status: "failed", error: errMsg.slice(0, 300), result_json: failResult }).eq("id", taskId);
+        await sendMessage(chatId, `❌ Failed: \`${taskId}\` — ${errMsg.slice(0, 200)}`);
+      }
+      _currentTaskId = null;
+      return new Response("ok");
+    }
+
+    // ── /triage — failure root-cause summary ──
+    if (text.toLowerCase() === "/triage") {
+      await setShortcutAttribution(taskId, "triage");
+      try {
+        const { data: triageTasks, error: triageErr } = await supabase
+          .from("tasks")
+          .select("id, status, selected_workflow, result_json, created_at, error")
+          .order("created_at", { ascending: false })
+          .limit(100);
+
+        const safe = (triageErr || !triageTasks) ? [] : triageTasks;
+        const failedTasks = safe.filter((t: any) => t.status === "failed");
+
+        // Group by error_code
+        const countsByCode: Record<string, number> = {};
+        const workflowsByCode: Record<string, Record<string, number>> = {};
+        for (const t of failedTasks) {
+          const code = (t as any).result_json?.error_code || "UNKNOWN";
+          countsByCode[code] = (countsByCode[code] || 0) + 1;
+          const wf = (t as any).selected_workflow || "unknown";
+          if (!workflowsByCode[code]) workflowsByCode[code] = {};
+          workflowsByCode[code][wf] = (workflowsByCode[code][wf] || 0) + 1;
+        }
+
+        // Top 3 workflows per code
+        const topWorkflowsByCode: Record<string, Array<{ workflow: string; count: number }>> = {};
+        for (const [code, wfs] of Object.entries(workflowsByCode)) {
+          topWorkflowsByCode[code] = Object.entries(wfs)
+            .map(([workflow, count]) => ({ workflow, count }))
+            .sort((a, b) => b.count - a.count)
+            .slice(0, 3);
+        }
+
+        function fmtTs(ts?: string): string {
+          if (!ts) return "";
+          return ts.replace("T", " ").slice(0, 16);
+        }
+
+        const newestTs = safe[0]?.created_at ? fmtTs(safe[0].created_at) : "";
+        const oldestTs = safe[safe.length - 1]?.created_at ? fmtTs(safe[safe.length - 1].created_at) : "";
+        const rangeLine = newestTs && oldestTs
+          ? `🕰️ *Range:* ${oldestTs} → ${newestTs}`
+          : `🕰️ *Range:* —`;
+
+        const codeLines = Object.entries(countsByCode)
+          .sort(([, a], [, b]) => b - a)
+          .map(([code, count]) => {
+            const topWfs = (topWorkflowsByCode[code] || [])
+              .map(w => `\`${w.workflow}\` (${w.count})`)
+              .join(", ");
+            return `*${code}*: ${count} failures\n  Top: ${topWfs || "—"}`;
+          });
+
+        const lines = [
+          `🔍 *${SYSTEM_IDENTITY} — Triage*`,
+          ``,
+          `📊 *${failedTasks.length} failures* in last ${safe.length} tasks`,
+          ``,
+          ...(codeLines.length > 0 ? codeLines : ["_No failures found._"]),
+          ``,
+          rangeLine,
+        ];
+
+        await sendMessage(chatId, lines.join("\n"), {}, `task:${taskId}:triage`);
+        await supabase.from("tasks").update({
+          status: "succeeded",
+          result_json: { execution_lane: "shortcut", progress_step: "shortcut_triage", summary: { countsByCode, topWorkflowsByCode, range: { oldest: oldestTs || null, newest: newestTs || null } } },
+        }).eq("id", taskId);
+        await sendMessage(chatId, `✅ Done: \`${taskId}\``, {}, `task:${taskId}:done`);
+      } catch (triageErr) {
+        const errMsg = triageErr instanceof Error ? triageErr.message : String(triageErr);
+        const failResult = buildFailureResultJson({ execution_lane: "shortcut", progress_step: "shortcut_triage_failed" }, errMsg);
+        await supabase.from("tasks").update({ status: "failed", error: errMsg.slice(0, 300), result_json: failResult }).eq("id", taskId);
         await sendMessage(chatId, `❌ Failed: \`${taskId}\` — ${errMsg.slice(0, 200)}`);
       }
       _currentTaskId = null;
@@ -1854,7 +1960,8 @@ serve(async (req) => {
 
       if (workflows.length === 0) {
         await sendMessage(chatId, `⚠️ Workflow registry unavailable right now. Try /status or try again.`, {}, `task:${taskId}:registry-down`);
-        await supabase.from("tasks").update({ status: "failed", error: "registry_unavailable" }).eq("id", taskId);
+        const failResult = buildFailureResultJson({ execution_lane: "lane1_do", progress_step: "lane1_registry_unavailable" }, "registry_unavailable");
+        await supabase.from("tasks").update({ status: "failed", error: "registry_unavailable", result_json: failResult }).eq("id", taskId);
         _currentTaskId = null;
         return new Response("ok");
       }
@@ -1915,7 +2022,8 @@ serve(async (req) => {
       } catch (loopErr) {
         const errMsg = loopErr instanceof Error ? loopErr.message : String(loopErr);
         console.error(`[LANE1] Execution error taskId=${taskId}: ${errMsg}`);
-        await supabase.from("tasks").update({ status: "failed", error: errMsg, result_json: { execution_lane: "lane1_do", progress_step: "lane1_failed", model_used: session.active_model, execution_lock: null, execution_lock_released_ts: Date.now() } }).eq("id", taskId);
+        const failResult = buildFailureResultJson({ execution_lane: "lane1_do", progress_step: "lane1_failed", model_used: session.active_model, selected_workflow: chosen!.key }, errMsg);
+        await supabase.from("tasks").update({ status: "failed", error: errMsg.slice(0, 300), result_json: failResult }).eq("id", taskId);
         await sendMessage(chatId, `❌ Failed: \`${taskId}\` — ${errMsg.slice(0, 200)}`, {}, `task:${taskId}:failed`);
       }
       _currentTaskId = null;
@@ -2037,10 +2145,11 @@ Be concise, professional, and use emoji sparingly.`;
         }).eq("id", taskId);
         await sendMessage(chatId, `✅ Done: \`${taskId}\``, {}, `task:${taskId}:done`);
       } else {
+        const failResult = buildFailureResultJson({ execution_lane: "lane2_assistant", progress_step: "lane2_failed", model_used: model }, lane2Error || "unknown", lane2Start);
         await supabase.from("tasks").update({
           status: "failed",
-          error: lane2Error,
-          result_json: { execution_lane: "lane2_assistant", progress_step: "lane2_failed", model_used: model, execution_duration_ms: lane2Duration },
+          error: (lane2Error || "unknown").slice(0, 300),
+          result_json: failResult,
         }).eq("id", taskId);
         await sendMessage(chatId, `❌ Failed: \`${taskId}\` — ${(lane2Error || "unknown").slice(0, 200)}`, {}, `task:${taskId}:failed`);
       }

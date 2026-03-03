@@ -834,7 +834,26 @@ Deno.test("R7: Lane 2 does NOT call executeAgenticLoop", async () => {
   assertEquals(lane2Section.includes("executeAgenticLoop("), false, "Lane 2 must NOT call executeAgenticLoop");
 });
 
-Deno.test("R8: createTaskRow sets selected_workflow null and result_json.action created", async () => {
+Deno.test("R8: createTaskRow sets selected_workflow unknown and result_json.action created", async () => {
   const source = await Deno.readTextFile("supabase/functions/telegram-webhook/index.ts");
-  assertMatch(source, /selected_workflow:\s*null,\s*\n\s*result_json:\s*\{\s*action:\s*"created"\s*\}/, "createTaskRow must set selected_workflow: null and result_json.action: created");
+  assertMatch(source, /selected_workflow:\s*"unknown",\s*\n\s*result_json:\s*\{\s*action:\s*"created"\s*\}/, "createTaskRow must set selected_workflow: 'unknown' and result_json.action: created");
+});
+
+// ─── T-series: Error codes, lock conditional, /triage ───────────
+
+Deno.test("T1: /metrics shows code= for failed tasks in source", async () => {
+  const source = await Deno.readTextFile("supabase/functions/telegram-webhook/index.ts");
+  assertMatch(source, /code=\$\{t\.result_json\?\.error_code \|\| "UNKNOWN"\}/, "Must render code= with error_code or UNKNOWN fallback");
+});
+
+Deno.test("T2: lock=on conditional includes status === running", async () => {
+  const source = await Deno.readTextFile("supabase/functions/telegram-webhook/index.ts");
+  assertMatch(source, /t\.status === "running" && Boolean\(t\.result_json\?\.execution_lock\)/, "lock=on must require status=running AND execution_lock");
+});
+
+Deno.test("T3: /triage handler exists and sets shortcut_triage", async () => {
+  const source = await Deno.readTextFile("supabase/functions/telegram-webhook/index.ts");
+  assertMatch(source, /shortcut_triage/, "Must contain shortcut_triage workflow attribution");
+  assertMatch(source, /\/triage/, "Must handle /triage command");
+  assertMatch(source, /countsByCode/, "Must group failures by error_code");
 });
