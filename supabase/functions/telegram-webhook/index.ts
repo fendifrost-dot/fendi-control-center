@@ -923,8 +923,8 @@ async function logToolFailure(logId: string, error: string, startedAt: number) {
 
 // ─── Execute agentic loop ──────────────────────────────────────
 
-async function executeAgenticLoop(chatId: string, userMessage: string): Promise<void> {
-  const { model } = await getActiveModel(chatId);
+async function executeAgenticLoop(chatId: string, userMessage: string, opts: { taskId: string; sessionModel: "grok" | "gemini" | "chatgpt" }): Promise<void> {
+  const model: "grok" | "gemini" = opts.sessionModel === "chatgpt" ? "grok" : opts.sessionModel as "grok" | "gemini"; // chatgpt maps to grok for now
   const docContext = await getRecentDocContext();
   const requestId = crypto.randomUUID();
 
@@ -944,7 +944,9 @@ async function executeAgenticLoop(chatId: string, userMessage: string): Promise<
 
   // Step 2: If no tool calls, just send the text response
   if (result.toolCalls.length === 0) {
-    const reply = formatAssistantMessage(model, result.text || "I'm not sure how to help with that. Try /start for available commands.");
+    const responseText = result.text || "I'm not sure how to help with that. Try /start for available commands.";
+    const isNoWorkflow = responseText.includes("No internal workflow exists for that request yet");
+    const reply = formatAssistantMessage(model, responseText);
     await sendMessage(chatId, reply);
     await appendConversationTurn(chatId, {
       role: "assistant",
@@ -952,6 +954,23 @@ async function executeAgenticLoop(chatId: string, userMessage: string): Promise<
       model,
       at: new Date().toISOString(),
     });
+
+    if (isNoWorkflow) {
+      await supabase.from("tasks").update({
+        status: "failed",
+        error: "NO_WORKFLOW",
+        selected_tools: [],
+        result_json: { text_response: responseText.slice(0, 2000), model_used: opts.sessionModel },
+      }).eq("id", opts.taskId);
+      await sendMessage(chatId, `❌ Failed: \`${opts.taskId}\` — NO_WORKFLOW`);
+    } else {
+      await supabase.from("tasks").update({
+        status: "succeeded",
+        selected_tools: [],
+        result_json: { text_response: responseText.slice(0, 2000), model_used: opts.sessionModel },
+      }).eq("id", opts.taskId);
+      await sendMessage(chatId, `✅ Done: \`${opts.taskId}\``);
+    }
     return;
   }
 
@@ -967,8 +986,10 @@ async function executeAgenticLoop(chatId: string, userMessage: string): Promise<
       continue;
     }
 
-    if (tc.name === "switch_ai_model" && !isExplicitModelSwitchRequest(userMessage, tc.args?.model)) {
-      toolResults.push("🔒 Model switching is locked. Use `/model grok` or `/model gemini` when you explicitly want to switch.");
+    // HARD BLOCK: switch_ai_model is NEVER allowed inside the agentic loop.
+    // Model switching is handled exclusively by /model command before the loop runs.
+    if (tc.name === "switch_ai_model") {
+      toolResults.push("🔒 Model switching is blocked inside the execution loop. Use `/model grok` or `/model gemini` explicitly.");
       continue;
     }
 
@@ -1015,6 +1036,8 @@ async function executeAgenticLoop(chatId: string, userMessage: string): Promise<
   }
 
   // Step 4: If we have tool results, feed them back to AI for a final summary
+  const executedToolNames = result.toolCalls.map(tc => tc.name);
+
   if (toolResults.length > 0 && confirmationButtons.length === 0) {
     // All tools were non-destructive, get a summary
     const summaryPrompt = `The user asked: "${userMessage}"
@@ -1065,6 +1088,15 @@ Now provide a clear, concise summary for the user based on the results. Use mark
       model,
       at: new Date().toISOString(),
     });
+
+    // ── TASK LIFECYCLE: mark succeeded ──
+    await supabase.from("tasks").update({
+      status: "succeeded",
+      selected_tools: executedToolNames,
+      result_json: { summary: summary.slice(0, 2000), toolResults: toolResults.map(r => r.slice(0, 500)), model_used: opts.sessionModel },
+    }).eq("id", opts.taskId);
+    await sendMessage(chatId, `✅ Done: \`${opts.taskId}\``);
+
   } else if (confirmationButtons.length > 0) {
     // Has destructive actions needing confirmation
     const nonDestructiveResults = toolResults.filter(r => !r.startsWith("⏳"));
@@ -1090,6 +1122,23 @@ Now provide a clear, concise summary for the user based on the results. Use mark
       model,
       at: new Date().toISOString(),
     });
+
+    // ── TASK LIFECYCLE: mark succeeded (awaiting user confirmation for destructive actions) ──
+    await supabase.from("tasks").update({
+      status: "succeeded",
+      selected_tools: executedToolNames,
+      result_json: { awaiting_confirmation: true, toolResults: toolResults.map(r => r.slice(0, 500)), model_used: opts.sessionModel },
+    }).eq("id", opts.taskId);
+    await sendMessage(chatId, `✅ Done: \`${opts.taskId}\``);
+
+  } else {
+    // No tool calls at all — mark succeeded with text-only result
+    await supabase.from("tasks").update({
+      status: "succeeded",
+      selected_tools: [],
+      result_json: { text_response: (result.text || "").slice(0, 2000), model_used: opts.sessionModel },
+    }).eq("id", opts.taskId);
+    await sendMessage(chatId, `✅ Done: \`${opts.taskId}\``);
   }
 }
 
@@ -1302,29 +1351,45 @@ serve(async (req) => {
         ``,
         `_Legacy commands still work: /status, /pending, /failed, /model, /projects, /stats_`,
       ].join("\n"));
+      await supabase.from("tasks").update({ status: "succeeded", result_json: { action: "start_help" } }).eq("id", taskId);
+      await sendMessage(chatId, `✅ Done: \`${taskId}\``);
       return new Response("ok");
     }
 
     if (text.toLowerCase() === "/model") {
-      const { model: activeModel } = await getActiveModel(chatId);
-      await sendMessage(chatId, `🤖 *${SYSTEM_IDENTITY}*\n\nActive model: *${getModelLabel(activeModel)}*\n🔒 Model switching is locked until you explicitly run /model grok or /model gemini.`);
+      await sendMessage(chatId, `🤖 *${SYSTEM_IDENTITY}*\n\nActive model: *${getModelLabel(session.active_model as any)}*\n🔒 Model switching is locked until you explicitly run /model grok or /model gemini.`);
+      await supabase.from("tasks").update({ status: "succeeded", result_json: { action: "model_check", active_model: session.active_model } }).eq("id", taskId);
+      await sendMessage(chatId, `✅ Done: \`${taskId}\``);
       return new Response("ok");
     }
 
     if (modelRequestMatch) {
-      const reqModel = modelRequestMatch[1].toLowerCase() as "grok" | "gemini";
+      const reqModel = modelRequestMatch[1].toLowerCase();
+      // Update session active_model (source of truth for Telegram)
+      await supabase.from("sessions").update({ active_model: reqModel }).eq("id", session.id);
+      // Also update bot_settings for backward compat
       await supabase.from("bot_settings").upsert(
         { setting_key: "ai_model", setting_value: reqModel, updated_at: new Date().toISOString() },
         { onConflict: "setting_key" }
       );
-      // Also update session active_model
-      await supabase.from("sessions").update({ active_model: reqModel }).eq("id", session.id);
-      await sendMessage(chatId, `✅ *${SYSTEM_IDENTITY}* switched to *${getModelLabel(reqModel)}*.\n\nI'll stay on this model until you switch again.`);
+      await sendMessage(chatId, `✅ *${SYSTEM_IDENTITY}* switched to *${getModelLabel(reqModel as any)}*.\n\nI'll stay on this model until you switch again.`);
+      await supabase.from("tasks").update({ status: "succeeded", result_json: { action: "model_switch", new_model: reqModel } }).eq("id", taskId);
+      await sendMessage(chatId, `✅ Done: \`${taskId}\``);
       return new Response("ok");
     }
 
-    // Everything else goes through the agentic loop
-    await executeAgenticLoop(chatId, text);
+    // ── Set task to running BEFORE executing ──
+    await supabase.from("tasks").update({ status: "running" }).eq("id", taskId);
+
+    // Everything else goes through the agentic loop (model pinned from session)
+    try {
+      await executeAgenticLoop(chatId, text, { taskId, sessionModel: session.active_model as "grok" | "gemini" | "chatgpt" });
+    } catch (loopErr) {
+      const errMsg = loopErr instanceof Error ? loopErr.message : String(loopErr);
+      console.error("Agentic loop fatal error:", loopErr);
+      await supabase.from("tasks").update({ status: "failed", error: errMsg, result_json: { model_used: session.active_model } }).eq("id", taskId);
+      await sendMessage(chatId, `❌ Failed: \`${taskId}\` — ${errMsg.slice(0, 200)}`);
+    }
 
     return new Response("ok");
   } catch (err) {
