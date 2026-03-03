@@ -1723,37 +1723,50 @@ serve(async (req) => {
     }
 
     // ── /metrics — execution metrics ──
-    if (text.toLowerCase() === "/metrics") {
+    if (text.toLowerCase().startsWith("/metrics")) {
       await supabase.from("tasks").update({ status: "running" }).eq("id", taskId);
       try {
-        const { data: recentTasks } = await supabase
+        // Parse optional limit arg: /metrics 50 (default 20, max 100)
+        const metricsParts = text.trim().split(/\s+/);
+        const metricsRequested = metricsParts[1] ? Number(metricsParts[1]) : 20;
+        const metricsLimit = Number.isFinite(metricsRequested) ? Math.min(Math.max(metricsRequested, 1), 100) : 20;
+
+        const { data: rawTasks, error: tasksErr } = await supabase
           .from("tasks")
           .select("id, status, selected_workflow, result_json, created_at")
           .order("created_at", { ascending: false })
-          .limit(20);
+          .limit(metricsLimit);
+
+        const safeTasks = (tasksErr || !rawTasks) ? [] : rawTasks;
 
         const health = systemHealthCheck();
-        const taskSummaries = (recentTasks || []).map((t: any) => ({
-          id: t.id?.slice(0, 8),
-          status: t.status,
-          workflow: t.selected_workflow || "—",
-          duration_ms: t.result_json?.execution_duration_ms ?? null,
-          created: t.created_at,
-        }));
+
+        function fmtDuration(ms: number | null | undefined): string {
+          if (ms == null) return "";
+          if (ms >= 1000) return ` | ${(ms / 1000).toFixed(2)}s`;
+          return ` | ${ms}ms`;
+        }
+
+        const taskSummaries = safeTasks.map((t: any) => {
+          const shortId = (t.id || "").slice(0, 8) || "unknown";
+          const lockHeld = Boolean(t.result_json?.execution_lock) ? "on" : "off";
+          const dur = fmtDuration(t.result_json?.execution_duration_ms);
+          return `\`${shortId}\` ${t.status} | ${t.selected_workflow || "—"} | lock=${lockHeld}${dur}`;
+        });
 
         const lines = [
           `📊 *${SYSTEM_IDENTITY} — Metrics*`,
           ``,
           `🏥 *Health:* uptime=${Math.round(health.uptime_ms / 1000)}s tools=${health.tool_count} workflows=${health.implemented_workflow_count}`,
           ``,
-          `*Last 20 Tasks:*`,
-          ...taskSummaries.map((t: any) => `\`${t.id}\` ${t.status} | ${t.workflow}${t.duration_ms != null ? ` | ${t.duration_ms}ms` : ""}`),
+          `*Last ${metricsLimit} Tasks:*`,
+          ...(taskSummaries.length > 0 ? taskSummaries : ["_No tasks found._"]),
         ];
 
         await sendMessage(chatId, lines.join("\n"), {}, `task:${taskId}:metrics`);
         await supabase.from("tasks").update({
           status: "succeeded",
-          result_json: { progress_step: "shortcut_metrics", health, task_count: taskSummaries.length },
+          result_json: { progress_step: "shortcut_metrics", health, task_count: safeTasks.length, requested_limit: metricsLimit },
         }).eq("id", taskId);
         await sendMessage(chatId, `✅ Done: \`${taskId}\``, {}, `task:${taskId}:done`);
       } catch (metricsErr) {

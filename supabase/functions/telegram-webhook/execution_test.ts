@@ -712,3 +712,40 @@ Deno.test("M2: /start text mentions Observability and /metrics", async () => {
   assertMatch(source, /Observability/, "/start must contain Observability section");
   assertMatch(source, /\/metrics/, "/start must mention /metrics");
 });
+
+// ── N-series: /metrics arg parsing ──
+
+Deno.test("N1: /metrics limit parsing — default, cap, fallback", () => {
+  function parseMetricsLimit(text: string): number {
+    const parts = text.trim().split(/\s+/);
+    const requested = parts[1] ? Number(parts[1]) : 20;
+    return Number.isFinite(requested) ? Math.min(Math.max(requested, 1), 100) : 20;
+  }
+
+  assertEquals(parseMetricsLimit("/metrics"), 20, "default is 20");
+  assertEquals(parseMetricsLimit("/metrics 50"), 50, "explicit 50");
+  assertEquals(parseMetricsLimit("/metrics 999"), 100, "capped to 100");
+  assertEquals(parseMetricsLimit("/metrics 0"), 1, "minimum is 1");
+  assertEquals(parseMetricsLimit("/metrics foo"), 20, "NaN falls back to 20");
+  assertEquals(parseMetricsLimit("/metrics -5"), 1, "negative capped to 1");
+});
+
+Deno.test("N2: fmtDuration helper", () => {
+  function fmtDuration(ms: number | null | undefined): string {
+    if (ms == null) return "";
+    if (ms >= 1000) return ` | ${(ms / 1000).toFixed(2)}s`;
+    return ` | ${ms}ms`;
+  }
+
+  assertEquals(fmtDuration(null), "");
+  assertEquals(fmtDuration(undefined), "");
+  assertEquals(fmtDuration(500), " | 500ms");
+  assertEquals(fmtDuration(1000), " | 1.00s");
+  assertEquals(fmtDuration(2345), " | 2.35s");
+});
+
+Deno.test("N3: task ID truncation and lock visibility in source", async () => {
+  const source = await Deno.readTextFile("supabase/functions/telegram-webhook/index.ts");
+  assertMatch(source, /slice\(0,\s*8\)/, "Task IDs must be truncated to 8 chars");
+  assertMatch(source, /lock=\$\{lockHeld\}/, "Lock status must render lock= with variable");
+});
