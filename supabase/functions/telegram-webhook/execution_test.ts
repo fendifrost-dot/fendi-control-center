@@ -754,3 +754,11 @@ Deno.test("N3: task ID truncation and lock visibility in source", async () => {
     "Lock status must be derived as on/off from result_json.execution_lock"
   );
 });
+
+Deno.test("P1: /metrics formatting helpers exist in source", async () => {
+  const source = await Deno.readTextFile("supabase/functions/telegram-webhook/index.ts");
+  assertMatch(source, /function statusIcon\(/, "Must define statusIcon");
+  assertMatch(source, /function fmtTs\(/, "Must define fmtTs");
+  assertMatch(source, /case "succeeded": return "✅"/, "Must map succeeded to ✅");
+  assertMatch(source, /replace\("T", " "\)\.slice\(0, 16\)/, "fmtTs must shorten ISO");
+});
