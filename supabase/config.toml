@@ -20,3 +20,6 @@ verify_jwt = false
 
 [functions.instagram-messaging]
 verify_jwt = false
+
+[functions.telegram-outbox-flush]
+verify_jwt = false
