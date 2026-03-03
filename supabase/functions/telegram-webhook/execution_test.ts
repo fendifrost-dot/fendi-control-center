@@ -747,5 +747,10 @@ Deno.test("N2: fmtDuration helper", () => {
 Deno.test("N3: task ID truncation and lock visibility in source", async () => {
   const source = await Deno.readTextFile("supabase/functions/telegram-webhook/index.ts");
   assertMatch(source, /slice\(0,\s*8\)/, "Task IDs must be truncated to 8 chars");
-  assertMatch(source, /lock=\$\{lockHeld\}/, "Lock status must render lock= with variable");
+  assertMatch(source, /lock=/, "Metrics output must include lock=");
+  assertMatch(
+    source,
+    /Boolean\(t\.result_json\?\.execution_lock\)\s*\?\s*"on"\s*:\s*"off"/,
+    "Lock status must be derived as on/off from result_json.execution_lock"
+  );
 });
