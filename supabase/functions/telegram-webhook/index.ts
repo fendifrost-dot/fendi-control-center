@@ -156,6 +156,42 @@ async function getRecentDocContext(): Promise<string> {
   }).join("\n");
 }
 
+// ─── Session & Task helpers (deterministic spine) ───────────────
+
+async function resolveSession(chatId: string): Promise<{ id: string; active_model: string }> {
+  // Try to find existing session
+  const { data: existing } = await supabase
+    .from("sessions")
+    .select("id, active_model")
+    .eq("channel", "telegram")
+    .eq("channel_user_id", chatId)
+    .maybeSingle();
+
+  if (existing) return existing;
+
+  // Create new session (default model: grok)
+  const { data: created, error } = await supabase
+    .from("sessions")
+    .insert({ channel: "telegram", channel_user_id: chatId, active_model: "grok", context: {} })
+    .select("id, active_model")
+    .single();
+
+  if (error || !created) throw new Error(`Failed to create session: ${error?.message}`);
+  return created;
+}
+
+async function createTaskRow(sessionId: string, requestText: string, requestedModel?: string | null): Promise<string> {
+  const { data, error } = await supabase.from("tasks").insert({
+    session_id: sessionId,
+    status: "queued",
+    request_text: requestText,
+    requested_model: requestedModel || null,
+  }).select("id").single();
+
+  if (error || !data) throw new Error(`Failed to create task: ${error?.message}`);
+  return data.id;
+}
+
 // ─── Cross-project helpers ──────────────────────────────────────
 async function getConnectedProjects() {
   const { data } = await supabase
@@ -1218,6 +1254,33 @@ serve(async (req) => {
       return new Response("ok");
     }
 
+    // ─── DETERMINISTIC SPINE: resolve session + create task ───
+    let session: { id: string; active_model: string };
+    let taskId: string;
+
+    try {
+      session = await resolveSession(chatId);
+    } catch (sessionErr) {
+      console.error("FATAL: session resolution failed:", sessionErr);
+      await sendMessage(chatId, `🚨 *${SYSTEM_IDENTITY}* — Session resolution failed: ${String(sessionErr)}`);
+      return new Response("ok");
+    }
+
+    // Determine if this is an explicit model request (for requested_model field only — no mutation)
+    const modelRequestMatch = text.match(/^\/model\s+(grok|gemini|chatgpt)$/i);
+    const requestedModel = modelRequestMatch ? modelRequestMatch[1].toLowerCase() : null;
+
+    try {
+      taskId = await createTaskRow(session.id, text, requestedModel);
+    } catch (taskErr) {
+      console.error("FATAL: task creation failed:", taskErr);
+      await sendMessage(chatId, `🚨 *${SYSTEM_IDENTITY}* — Task creation failed: ${String(taskErr)}`);
+      return new Response("ok");
+    }
+
+    // Send queued confirmation with task_id
+    await sendMessage(chatId, `📋 Queued: \`${taskId}\``);
+
     // /start still shows the help menu
     if (text === "/start") {
       await sendMessage(chatId, [
@@ -1248,14 +1311,15 @@ serve(async (req) => {
       return new Response("ok");
     }
 
-    const modelSwitchMatch = text.match(/^\/model\s+(grok|gemini)$/i);
-    if (modelSwitchMatch) {
-      const requestedModel = modelSwitchMatch[1].toLowerCase() as "grok" | "gemini";
+    if (modelRequestMatch) {
+      const reqModel = modelRequestMatch[1].toLowerCase() as "grok" | "gemini";
       await supabase.from("bot_settings").upsert(
-        { setting_key: "ai_model", setting_value: requestedModel, updated_at: new Date().toISOString() },
+        { setting_key: "ai_model", setting_value: reqModel, updated_at: new Date().toISOString() },
         { onConflict: "setting_key" }
       );
-      await sendMessage(chatId, `✅ *${SYSTEM_IDENTITY}* switched to *${getModelLabel(requestedModel)}*.\n\nI'll stay on this model until you switch again.`);
+      // Also update session active_model
+      await supabase.from("sessions").update({ active_model: reqModel }).eq("id", session.id);
+      await sendMessage(chatId, `✅ *${SYSTEM_IDENTITY}* switched to *${getModelLabel(reqModel)}*.\n\nI'll stay on this model until you switch again.`);
       return new Response("ok");
     }
 
