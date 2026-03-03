@@ -699,3 +699,16 @@ Deno.test("L16: duplicate_execution_blocked structured log present", async () =>
   const source = await Deno.readTextFile("supabase/functions/telegram-webhook/index.ts");
   assertMatch(source, /duplicate_execution_blocked/, "Must log duplicate_execution_blocked event");
 });
+
+// ── M-series: /help and /start mention /metrics ──
+
+Deno.test("M1: /help text mentions /metrics", async () => {
+  const source = await Deno.readTextFile("supabase/functions/telegram-webhook/index.ts");
+  assertMatch(source, /\/metrics\s*—/, "/help must list /metrics with a dash description");
+});
+
+Deno.test("M2: /start text mentions Observability and /metrics", async () => {
+  const source = await Deno.readTextFile("supabase/functions/telegram-webhook/index.ts");
+  assertMatch(source, /Observability/, "/start must contain Observability section");
+  assertMatch(source, /\/metrics/, "/start must mention /metrics");
+});
