@@ -616,3 +616,29 @@ serve(async (req) => {
     });
   }
 });
+
+// ─── Parse Payment Grid Results from Vision Text ────────────────
+function parsePaymentGridResults(visionText: string) {
+  const results = [];
+  const blocks = visionText.split("TRADELINE PAYMENT RESULT").slice(1);
+
+  for (const block of blocks) {
+    const accountName = block.match(/Account Name:\s*(.+)/)?.[1]?.trim() ?? "UNKNOWN";
+    const accountNumber = block.match(/Account Number:\s*(.+)/)?.[1]?.trim() ?? "UNKNOWN";
+    const paymentFlag = block.match(/Payment Flag:\s*(NEGATIVE|CLEAN|UNREADABLE)/)?.[1] ?? "UNREADABLE";
+    const negativeCellsRaw = block.match(/Negative Cells:\s*(.+)/)?.[1]?.trim() ?? "NONE";
+    const lateCountRaw = block.match(/Late Count:\s*(\d+)/)?.[1] ?? "0";
+    const worstStatus = block.match(/Worst Status:\s*(.+)/)?.[1]?.trim() ?? "NONE";
+
+    results.push({
+      accountName,
+      accountNumber,
+      paymentFlag,
+      negativeCells: negativeCellsRaw === "NONE" ? [] : negativeCellsRaw.split(",").map(s => s.trim()),
+      lateCount: parseInt(lateCountRaw, 10),
+      worstStatus,
+    });
+  }
+
+  return results;
+}
