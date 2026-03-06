@@ -202,7 +202,57 @@ Return a JSON object with these top-level keys:
   "collections": [...]
 }
 
-Extract EVERY tradeline, inquiry, and personal detail. Be thorough. Include evidence snippets.`;
+Extract EVERY tradeline, inquiry, and personal detail. Be thorough. Include evidence snippets.
+
+ACCOUNT NUMBER RULE:
+
+Preserve account_number exactly as printed in the report including *, X, XXXX, partial prefixes, spacing, and "Not Displayed". Never truncate. Never normalize. If no account number exists omit the field entirely.
+
+BUREAU DETECTION RULES:
+
+- Experian: treat each "Account Number" or "Account Name" occurrence as a new tradeline block. Handle non-ASCII glyphs near headings. Treat "POTENTIALLY NEGATIVE" banners as tradeline anchors.
+
+- Credit Karma / TransUnion: treat each creditor card as one tradeline. Account number may show as "Not Displayed" — output exactly that string.
+
+- Equifax / Annual Credit Report: use "Account Information" headers as block anchors.
+
+NEGATIVE INDICATOR SCAN ZONES (scan ONLY these — never scan legend or glossary sections):
+
+1. status / payment_status / current_status fields
+
+2. remarks / comments fields
+
+3. past due amount fields
+
+4. times 30/60/90+ late summaries
+
+5. actual month-by-month payment history marks
+
+NEGATIVE INDICATORS (match in scan zones only):
+
+late, late payment, 30 days late, 60 days late, 90 days late, 120 days late, 150 days late, 180 days late, past due, derogatory, charge off, charged off, C/O, written off, collection, placed for collection, payment after charge-off, worst payment status, needs attention, potentially negative
+
+PAYMENT GRID EXTRACTION:
+
+For each page containing a payment history grid, append this structure after the JSON:
+
+TRADELINE PAYMENT RESULT
+
+Account Name: [exact name]
+
+Account Number: [exactly as shown or UNKNOWN]
+
+Payment Flag: NEGATIVE or CLEAN or UNREADABLE
+
+Negative Cells: [YEAR-MONTH-VALUE comma separated or NONE]
+
+Late Count: [number]
+
+Worst Status: [30|60|90|120|150|180|CO|C|NONE]
+
+Cell values: 30=30 days late, 60=60 days late, 90=90 days late, 120=120 days late, 150=150 days late, 180=180 days late, CO=Charge Off, C=Collection, CLS=Closed (not negative), ND=No Data (not negative), blank or green=Current (not negative)
+
+If no payment grid on page return: GRID: NONE`;
 
 // ─── Business/Marketing Document Prompt ──────────────────────────
 const BUSINESS_DOC_PROMPT = `Analyze this business document and categorize it. Return JSON:
