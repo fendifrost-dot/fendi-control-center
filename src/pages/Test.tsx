@@ -227,6 +227,7 @@ export default function Test() {
             <Button
               onClick={handleAnalyze}
               disabled={!pdfFile || !clientProfile || analyzing}
+              className="w-full"
             >
               {analyzing ? "Analyzing..." : "Run Analysis + Assessment"}
             </Button>
