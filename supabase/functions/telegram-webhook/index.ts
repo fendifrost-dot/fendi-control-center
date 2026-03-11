@@ -381,6 +381,10 @@ async function getConnectedProjects() {
   return data || [];
 }
 
+// Each connected project may expose a different endpoint name.
+// We try them in order: cross-project-api, control-center-api, project-stats (GET).
+const CROSS_PROJECT_ENDPOINTS = ["cross-project-api", "control-center-api"];
+
 async function fetchProjectStats(project: any): Promise<{ name: string; tables: Record<string, number> } | null> {
   try {
     const apiKey = Deno.env.get(project.secret_key_name);
@@ -388,31 +392,33 @@ async function fetchProjectStats(project: any): Promise<{ name: string; tables: 
       console.error(`[fetchProjectStats] Missing secret: ${project.secret_key_name}`);
       return null;
     }
-    // Use cross-project-api endpoint with x-api-key header
-    const resp = await fetch(`${project.supabase_url}/functions/v1/cross-project-api`, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "x-api-key": apiKey,
-      },
-      body: JSON.stringify({ action: "get_stats" }),
-    });
-    if (!resp.ok) {
-      // Fallback: try legacy project-stats GET endpoint
+
+    // Try POST endpoints with x-api-key
+    for (const ep of CROSS_PROJECT_ENDPOINTS) {
+      try {
+        const resp = await fetch(`${project.supabase_url}/functions/v1/${ep}`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json", "x-api-key": apiKey },
+          body: JSON.stringify({ action: "get_stats" }),
+        });
+        if (resp.ok) return await resp.json();
+        // consume body to avoid leak
+        await resp.text();
+      } catch { /* try next */ }
+    }
+
+    // Fallback: legacy project-stats GET
+    try {
       const fallback = await fetch(`${project.supabase_url}/functions/v1/project-stats`, {
         method: "GET",
-        headers: {
-          "Content-Type": "application/json",
-          "Authorization": `Bearer ${apiKey}`,
-        },
+        headers: { "Content-Type": "application/json", "Authorization": `Bearer ${apiKey}` },
       });
-      if (!fallback.ok) {
-        console.error(`[fetchProjectStats] ${project.name} returned ${resp.status} (fallback ${fallback.status})`);
-        return null;
-      }
-      return await fallback.json();
-    }
-    return await resp.json();
+      if (fallback.ok) return await fallback.json();
+      await fallback.text();
+    } catch { /* ignore */ }
+
+    console.error(`[fetchProjectStats] ${project.name}: all endpoints failed`);
+    return null;
   } catch (err) {
     console.error(`[fetchProjectStats] ${project.name} error:`, err);
     return null;
