@@ -388,16 +388,29 @@ async function fetchProjectStats(project: any): Promise<{ name: string; tables: 
       console.error(`[fetchProjectStats] Missing secret: ${project.secret_key_name}`);
       return null;
     }
-    const resp = await fetch(`${project.supabase_url}/functions/v1/project-stats`, {
-      method: "GET",
+    // Use cross-project-api endpoint with x-api-key header
+    const resp = await fetch(`${project.supabase_url}/functions/v1/cross-project-api`, {
+      method: "POST",
       headers: {
         "Content-Type": "application/json",
-        "Authorization": `Bearer ${apiKey}`,
+        "x-api-key": apiKey,
       },
+      body: JSON.stringify({ action: "get_stats" }),
     });
     if (!resp.ok) {
-      console.error(`[fetchProjectStats] ${project.name} returned ${resp.status}`);
-      return null;
+      // Fallback: try legacy project-stats GET endpoint
+      const fallback = await fetch(`${project.supabase_url}/functions/v1/project-stats`, {
+        method: "GET",
+        headers: {
+          "Content-Type": "application/json",
+          "Authorization": `Bearer ${apiKey}`,
+        },
+      });
+      if (!fallback.ok) {
+        console.error(`[fetchProjectStats] ${project.name} returned ${resp.status} (fallback ${fallback.status})`);
+        return null;
+      }
+      return await fallback.json();
     }
     return await resp.json();
   } catch (err) {
