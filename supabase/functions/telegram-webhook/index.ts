@@ -383,13 +383,25 @@ async function getConnectedProjects() {
 
 async function fetchProjectStats(project: any): Promise<{ name: string; tables: Record<string, number> } | null> {
   try {
+    const apiKey = Deno.env.get(project.secret_key_name);
+    if (!apiKey) {
+      console.error(`[fetchProjectStats] Missing secret: ${project.secret_key_name}`);
+      return null;
+    }
     const resp = await fetch(`${project.supabase_url}/functions/v1/project-stats`, {
       method: "GET",
-      headers: { "Content-Type": "application/json" },
+      headers: {
+        "Content-Type": "application/json",
+        "Authorization": `Bearer ${apiKey}`,
+      },
     });
-    if (!resp.ok) return null;
+    if (!resp.ok) {
+      console.error(`[fetchProjectStats] ${project.name} returned ${resp.status}`);
+      return null;
+    }
     return await resp.json();
-  } catch {
+  } catch (err) {
+    console.error(`[fetchProjectStats] ${project.name} error:`, err);
     return null;
   }
 }
