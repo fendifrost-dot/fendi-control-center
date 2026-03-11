@@ -1943,8 +1943,100 @@ serve(async (req) => {
     }
 
     // ══════════════════════════════════════════════════════════
+    // INTENT-BASED LANE 1 AUTO-PROMOTION
+    // Natural language like "run system status" auto-routes to Lane 1
+    // ══════════════════════════════════════════════════════════
+    const EXECUTION_INTENT_PREFIXES = ["run ", "execute ", "trigger ", "start "];
+    const lowerText = text.toLowerCase().trim();
+    const hasExecutionIntent = EXECUTION_INTENT_PREFIXES.some(p => lowerText.startsWith(p));
+
+    let autoPromotedWorkflow: WorkflowEntry | undefined;
+    if (hasExecutionIntent) {
+      const intentArg = lowerText.replace(/^(run|execute|trigger|start)\s+/, "").trim();
+      const intentWorkflows = await fetchWorkflowRegistry();
+      const { chosen: intentChosen } = _matchWorkflows(intentArg, intentWorkflows);
+      if (intentChosen && IMPLEMENTED_WORKFLOW_KEYS.has(intentChosen.key)) {
+        autoPromotedWorkflow = intentChosen;
+      }
+    }
+
+    if (autoPromotedWorkflow) {
+      await supabase.from("tasks").update({
+        status: "running",
+        selected_workflow: autoPromotedWorkflow.key,
+        result_json: { execution_lane: "lane1_do", progress_step: "lane1_auto_promoted", auto_promoted: true }
+      }).eq("id", taskId);
+      try {
+        await Promise.race([
+          executeAgenticLoop(chatId, text, {
+            taskId,
+            lane: "lane1_do",
+            allowTools: true,
+            workflowKey: autoPromotedWorkflow.key,
+            sessionModel: session.active_model as "grok" | "gemini" | "chatgpt"
+          }),
+          new Promise<never>((_, reject) => setTimeout(() => reject(new Error("TIMEOUT")), 55000))
+        ]);
+      } catch (err) {
+        const errMsg = (err as Error).message || "unknown";
+        const failResult = buildFailureResultJson({ execution_lane: "lane1_do" }, errMsg);
+        await supabase.from("tasks").update({ status: "failed", error: errMsg.slice(0, 300), result_json: failResult }).eq("id", taskId);
+        await sendMessage(chatId, `❌ Failed: \`${taskId}\` — ${errMsg.slice(0, 200)}`, {}, `task:${taskId}:failed`);
+      }
+      return new Response("ok");
+    }
+
+    // ══════════════════════════════════════════════════════════
     // LANE 1 — EXECUTION MODE (triggered by /do <workflow>)
     // ══════════════════════════════════════════════════════════
+    // ── INTENT-BASED LANE 1 ROUTING ──────────────────────────────────────────
+    // Auto-promote to Lane 1 if the message contains a clear execution intent
+    // AND matches a known workflow key/trigger phrase.
+    const EXECUTION_INTENT_PREFIXES = [
+      "run ", "execute ", "trigger ", "start ", "do "
+    ];
+    const lowerText = text.toLowerCase().trim();
+    const hasExecutionIntent = EXECUTION_INTENT_PREFIXES.some(p => lowerText.startsWith(p));
+
+    let autoPromotedWorkflow: WorkflowEntry | undefined;
+    if (hasExecutionIntent) {
+      const intentArg = lowerText.replace(/^(run|execute|trigger|start|do)\s+/, "").trim();
+      const workflows = await fetchWorkflowRegistry();
+      const { chosen } = _matchWorkflows(intentArg, workflows);
+      if (chosen && IMPLEMENTED_WORKFLOW_KEYS.has(chosen.key)) {
+        autoPromotedWorkflow = chosen;
+      }
+    }
+
+    // If intent detected and workflow matched → promote to Lane 1
+    if (autoPromotedWorkflow) {
+      await supabase.from("tasks").update({
+        status: "running",
+        selected_workflow: autoPromotedWorkflow.key,
+        result_json: { execution_lane: "lane1_do", progress_step: "lane1_auto_promoted" }
+      }).eq("id", taskId);
+
+      try {
+        await Promise.race([
+          executeAgenticLoop(chatId, text, {
+            taskId,
+            lane: "lane1_do",
+            allowTools: true,
+            workflowKey: autoPromotedWorkflow.key,
+            sessionModel: session.active_model as "grok" | "gemini" | "chatgpt"
+          }),
+          new Promise<never>((_, reject) => setTimeout(() => reject(new Error("TIMEOUT")), 55000))
+        ]);
+      } catch (err) {
+        const errMsg = (err as Error).message || "unknown";
+        const failResult = buildFailureResultJson({ execution_lane: "lane1_do" }, errMsg);
+        await supabase.from("tasks").update({ status: "failed", error: errMsg.slice(0, 300), result_json: failResult }).eq("id", taskId);
+        await sendMessage(chatId, `❌ Failed: \`${taskId}\` — ${errMsg.slice(0, 200)}`, {}, `task:${taskId}:failed`);
+      }
+      return new Response("ok");
+    }
+    // ── END INTENT ROUTING ────────────────────────────────────────────────────
+
     if (text.toLowerCase().startsWith("/do")) {
       const doArg = text.slice(3).trim(); // everything after "/do"
       if (!doArg) {
