@@ -2364,6 +2364,74 @@ serve(async (req) => {
       return new Response("ok");
     }
 
+    // ════════════════════════════════════════════════════════════
+    // LANE 3 — AUTONOMOUS AGENT MODE
+    // Open-ended requests → bot reasons, plans, awaits approval, acts
+    // ════════════════════════════════════════════════════════════
+    const AUTONOMOUS_TRIGGERS = [
+      "figure out", "figure this out", "handle ",
+      "take care of", "what should i do",
+      "check everything", "review everything",
+      "what's going on with", "deal with", "sort out",
+      "agent mode", "autonomous", "free agent",
+      "look into", "investigate", "assess", "audit",
+      "think about this", "what do you recommend",
+      "what's the best way", "how should i handle",
+    ];
+    const isAutonomousRequest =
+      !hasExecutionIntent &&
+      !text.toLowerCase().startsWith("/do") &&
+      !text.toLowerCase().startsWith("/") &&
+      AUTONOMOUS_TRIGGERS.some(t => lowerText.includes(t));
+
+    if (isAutonomousRequest) {
+      const autonomousTaskId = taskId;
+      await supabase
+        .from("tasks")
+        .update({
+          status: "running",
+          selected_workflow: "free_agent",
+          result_json: {
+            execution_lane: "lane3_autonomous",
+            selected_workflow: "free_agent",
+            model_used: session.active_model,
+          },
+        })
+        .eq("id", autonomousTaskId);
+
+      try {
+        await Promise.race([
+          executeAgenticLoop(chatId, text, {
+            taskId: autonomousTaskId,
+            sessionModel: session.active_model as "grok" | "gemini" | "chatgpt",
+            lane: "lane3_autonomous",
+            allowTools: true,
+            workflowKey: "free_agent",
+          }),
+          new Promise<never>((_, reject) =>
+            setTimeout(() => reject(new Error("TIMEOUT")), 110000)
+          ),
+        ]);
+        await supabase
+          .from("tasks")
+          .update({ status: "succeeded", result_json: { execution_lane: "lane3_autonomous", progress_step: "complete" } })
+          .eq("id", autonomousTaskId);
+      } catch (autonomousErr) {
+        const errMsg = autonomousErr instanceof Error ? autonomousErr.message : String(autonomousErr);
+        const failResult = buildFailureResultJson(
+          { execution_lane: "lane3_autonomous", progress_step: "autonomous_failed" },
+          errMsg
+        );
+        await supabase
+          .from("tasks")
+          .update({ status: "failed", error: errMsg.slice(0, 300), result_json: failResult })
+          .eq("id", autonomousTaskId);
+        await sendMessage(chatId, `❌ Autonomous error: ${errMsg.slice(0, 200)}`);
+      }
+      _currentTaskId = null;
+      return new Response("ok");
+    }
+
     // ══════════════════════════════════════════════════════════
     // LANE 2 — ASSISTANT MODE (default, no tool execution)
     // ══════════════════════════════════════════════════════════
