@@ -17,7 +17,8 @@ const IMPLEMENTED_WORKFLOW_KEYS = new Set([
     "model_switch", "document_approval", "document_rejection",
     "failed_job_management", "drive_sync", "client_overview",
     "file_browsing", "connected_project_stats", "error_explanation",
-    "active_jobs_summary", "document_ingestion_processing"
+    "active_jobs_summary", "document_ingestion_processing",
+    "drive_ingest", "free_agent"
 ]);
 
 // ─── Workflow registry fetch ────────────────────────────────────
