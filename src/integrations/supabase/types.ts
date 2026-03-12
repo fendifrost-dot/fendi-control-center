@@ -967,6 +967,16 @@ export type Database = {
           payload: Json
         }[]
       }
+      list_workflows: {
+        Args: never
+        Returns: {
+          description: string
+          key: string
+          name: string
+          tools: Json
+          trigger_phrases: Json
+        }[]
+      }
     }
     Enums: {
       [_ in never]: never
