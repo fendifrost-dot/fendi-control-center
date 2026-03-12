@@ -1172,7 +1172,7 @@ function logEvent(e: Record<string, any>) {
 
 // ─── Execute agentic loop ──────────────────────────────────────
 
-async function executeAgenticLoop(chatId: string, userMessage: string, opts: { taskId: string; sessionModel: "grok" | "gemini" | "chatgpt"; lane?: "lane1_do" | "lane2_assistant"; allowTools?: boolean; workflowKey?: string }): Promise<void> {
+async function executeAgenticLoop(chatId: string, userMessage: string, opts: { taskId: string; sessionModel: "grok" | "gemini" | "chatgpt"; lane?: "lane1_do" | "lane2_assistant" | "lane3_autonomous"; allowTools?: boolean; workflowKey?: string }): Promise<void> {
   // ── STEP 1: EXECUTION METRICS ──
   const executionStart = Date.now();
 
