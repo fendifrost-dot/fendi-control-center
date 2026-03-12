@@ -1730,7 +1730,51 @@ serve(async (req) => {
         const statusResult = statusTool ? await statusTool.execute({}) : "Tool get_system_status not found";
         const health = systemHealthCheck();
         const model = session.active_model as "grok" | "gemini";
-        const reply = formatAssistantMessage(model, `📊 *System Status*\n\n${statusResult}\n\n🏥 *Health:* uptime=${Math.round(health.uptime_ms / 1000)}s tools=${health.tool_count} workflows=${health.implemented_workflow_count}`);
+
+        // Parse and format status into human-readable text
+        let formattedStatus: string;
+        try {
+          const parsed = JSON.parse(statusResult);
+          const lines = [
+            `📄 *Documents Processed:* ${parsed.documents_processed ?? 0}`,
+            `⏳ *Pending Approvals:* ${parsed.pending_approvals ?? 0}`,
+            `⚡ *Active Jobs:* ${parsed.active_jobs ?? 0}`,
+            `❌ *Failed Jobs:* ${parsed.failed_jobs ?? 0}`,
+            `🔧 *Tool Calls (1h):* ${parsed.recent_tool_calls_1h ?? 0}`,
+            `🤖 *Active Model:* ${parsed.active_model ?? "unknown"}`,
+          ];
+          if (parsed.errors?.length) {
+            lines.push(``, `⚠️ *Errors:* ${parsed.errors.length} query failures`);
+          }
+          formattedStatus = lines.join("\n");
+        } catch {
+          formattedStatus = statusResult;
+        }
+
+        // Fetch connected project stats
+        let projectSection = "";
+        try {
+          const projects = await getConnectedProjects();
+          if (projects.length > 0) {
+            const projectLines: string[] = [``, `🌐 *Connected Projects (${projects.length})*`];
+            for (const p of projects) {
+              const stats = await fetchProjectStats(p);
+              if (stats?.tables) {
+                const tableCount = Object.keys(stats.tables).length;
+                const totalRows = Object.values(stats.tables).reduce((a: number, b: any) => a + (Number(b) || 0), 0);
+                projectLines.push(`  ✅ *${p.name}* — ${tableCount} tables, ${totalRows} rows`);
+              } else {
+                projectLines.push(`  ❌ *${p.name}* — unreachable`);
+              }
+            }
+            projectSection = projectLines.join("\n");
+          }
+        } catch (projErr) {
+          console.error("Status: project stats error:", projErr);
+          projectSection = `\n\n⚠️ Could not fetch project stats`;
+        }
+
+        const reply = formatAssistantMessage(model, `📊 *System Status*\n\n${formattedStatus}${projectSection}\n\n🏥 *Health:* uptime=${Math.round(health.uptime_ms / 1000)}s tools=${health.tool_count} workflows=${health.implemented_workflow_count}`);
         await sendMessage(chatId, reply);
         await supabase.from("tasks").update({
           status: "succeeded",
