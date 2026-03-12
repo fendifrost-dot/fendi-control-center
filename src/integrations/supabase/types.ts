@@ -813,6 +813,39 @@ export type Database = {
         }
         Relationships: []
       }
+      workflows: {
+        Row: {
+          created_at: string
+          description: string
+          id: string
+          key: string
+          name: string
+          tools: Json
+          trigger_phrases: Json
+          updated_at: string
+        }
+        Insert: {
+          created_at?: string
+          description?: string
+          id?: string
+          key: string
+          name: string
+          tools?: Json
+          trigger_phrases?: Json
+          updated_at?: string
+        }
+        Update: {
+          created_at?: string
+          description?: string
+          id?: string
+          key?: string
+          name?: string
+          tools?: Json
+          trigger_phrases?: Json
+          updated_at?: string
+        }
+        Relationships: []
+      }
     }
     Views: {
       current_inquiries: {
