@@ -11,7 +11,6 @@ const GROK_KEY = Deno.env.get("Frost_Grok")!;
 const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
 const TELEGRAM_API = `https://api.telegram.org/bot${BOT_TOKEN}`;
 const SYSTEM_IDENTITY = "Fendi Control Center AI";
-
 // ─── Implemented workflow keys → handler names (deterministic routing) ───
 const IMPLEMENTED_WORKFLOW_KEYS = new Set([
   "ping", "system_status", "resend_failed", "list_workflows", "help",
@@ -74,7 +73,13 @@ async function fetchWorkflowRegistry(): Promise<WorkflowEntry[]> {
     }
     // Runtime shape guard
     if (!Array.isArray(data)) return [];
-    return data.filter((w: any) => w.key && w.name);
+    return (data as any[]).filter((w) => w.key && w.name).map((w) => ({
+              key: String(w.key),
+              name: String(w.name),
+              description: String(w.description || ""),
+              trigger_phrases: Array.isArray(w.trigger_phrases) ? w.trigger_phrases.map(String) : [],
+              tools: Array.isArray(w.tools) ? w.tools.map(String) : [],
+    }));
   } catch (e) {
     console.error("[WORKFLOW] fetchWorkflowRegistry exception:", e);
     return [];
