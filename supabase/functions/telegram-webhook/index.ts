@@ -1177,7 +1177,7 @@ async function executeAgenticLoop(chatId: string, userMessage: string, opts: { t
   const executionStart = Date.now();
 
   // ── HARD EXECUTION GUARD ──
-  if (opts.lane !== "lane1_do" || opts.allowTools !== true) {
+  if ((opts.lane !== "lane1_do" && opts.lane !== "lane3_autonomous") || opts.allowTools !== true) {
     console.error(JSON.stringify({ ts: Date.now(), event: "tools_blocked", taskId: opts.taskId, lane: opts.lane, allowTools: opts.allowTools }));
     throw new Error("TOOLS_BLOCKED: agentic loop cannot run outside /do execution lane");
   }
