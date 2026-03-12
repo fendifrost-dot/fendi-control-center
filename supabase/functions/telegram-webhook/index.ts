@@ -15,6 +15,10 @@ const SYSTEM_IDENTITY = "Fendi Control Center AI";
 // ─── Implemented workflow keys → handler names (deterministic routing) ───
 const IMPLEMENTED_WORKFLOW_KEYS = new Set([
   "ping", "system_status", "resend_failed", "list_workflows", "help",
+    "model_switch", "document_approval", "document_rejection",
+    "failed_job_management", "drive_sync", "client_overview",
+    "file_browsing", "connected_project_stats", "error_explanation",
+    "active_jobs_summary", "document_ingestion_processing"
 ]);
 
 // ─── Workflow registry fetch ────────────────────────────────────
