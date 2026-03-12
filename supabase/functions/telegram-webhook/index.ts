@@ -42,7 +42,7 @@ function _matchWorkflows(input: string, workflows: WorkflowEntry[]): { matches: 
       }
     }
   }
-  if (matched.length === 1) return { matches: matched, chosen: matched[0] };
+  if (matched.length >= 1) return { matches: matched, chosen: matched.sort((a, b) => Math.max(...b.trigger_phrases.map(p => p.length)) - Math.max(...a.trigger_phrases.map(p => p.length)))[0] };
   return { matches: matched };
 }
 
