@@ -931,6 +931,187 @@ const AGENT_TOOLS: ToolDef[] = [
       return JSON.stringify(data.data);
     },
   },
+  {
+    name: "ingest_drive_clients" as const,
+    description: "Scans Google Drive for all client folders, reads every document, extracts forensic credit timeline events using AI, and imports them into Credit Guardian. WRITE operation — always call propose_plan first in autonomous mode.",
+    destructive: false,
+    parameters: {
+      type: "object" as const,
+      properties: {
+        client_name: {
+          type: "string",
+          description: "Optional: only process one specific client folder by name. Omit to process all clients.",
+        },
+      },
+      required: [],
+    },
+    execute: async (args: { client_name?: string }) => {
+      const INGEST_URL = `${Deno.env.get("SUPABASE_URL")}/functions/v1/ingest-drive-clients`;
+      const resp = await fetch(INGEST_URL, {
+        method: "POST",
+        headers: {
+          "Authorization": `Bearer ${Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ client_name: args.client_name }),
+      });
+      if (!resp.ok) throw new Error(`Drive ingestion failed: ${resp.status} — ${await resp.text()}`);
+      return JSON.stringify(await resp.json());
+    },
+  },
+  {
+    name: "query_credit_guardian" as const,
+    description: "Read-only query of Credit Guardian. Returns assessments, timeline events, or reports. Safe to call without approval.",
+    destructive: false,
+    parameters: {
+      type: "object" as const,
+      properties: {
+        action: {
+          type: "string",
+          enum: ["get_assessments", "get_timeline_events", "get_assessment_detail", "get_report"],
+          description: "Which Credit Guardian API action to call.",
+        },
+        session_id: {
+          type: "string",
+          description: "Required for get_timeline_events, get_assessment_detail, get_report.",
+        },
+      },
+      required: ["action"],
+    },
+    execute: async (args: { action: string; session_id?: string }) => {
+      const CG_URL = Deno.env.get("CREDIT_GUARDIAN_URL") || "https://gflvvzkiuleeochqcdeb.supabase.co";
+      const CG_KEY = Deno.env.get("CREDIT_GUARDIAN_KEY")!;
+      const resp = await fetch(`${CG_URL}/functions/v1/control-center-api`, {
+        method: "POST",
+        headers: {
+          "Authorization": `Bearer ${CG_KEY}`,
+          "Content-Type": "application/json",
+          "x-api-key": CG_KEY,
+        },
+        body: JSON.stringify({ action: args.action, session_id: args.session_id }),
+      });
+      if (!resp.ok) throw new Error(`Credit Guardian query failed: ${resp.status}`);
+      return JSON.stringify(await resp.json());
+    },
+  },
+  {
+    name: "scan_drive_overview" as const,
+    description: "Read-only scan of Google Drive client folders. Returns client names, file counts, and file types — does NOT read file contents. Call this first in autonomous mode to understand what's in Drive. Safe to call without approval.",
+    destructive: false,
+    parameters: {
+      type: "object" as const,
+      properties: {},
+      required: [],
+    },
+    execute: async () => {
+      const GOOGLE_API_KEY = Deno.env.get("Google_Cloud_Key")!;
+      const rawFolder = Deno.env.get("DRIVE_FOLDER_ID")!;
+      const rootFolderId = rawFolder.includes("/folders/")
+        ? rawFolder.split("/folders/").pop()!.split("?")[0]
+        : rawFolder;
+      const q = `'${rootFolderId}' in parents and mimeType = 'application/vnd.google-apps.folder' and trashed = false`;
+      const foldersResp = await fetch(
+        `https://www.googleapis.com/drive/v3/files?q=${encodeURIComponent(q)}&fields=files(id,name)&key=${GOOGLE_API_KEY}`
+      );
+      if (!foldersResp.ok) throw new Error(`Drive API error: ${foldersResp.status}`);
+      const { files: clientFolders } = await foldersResp.json();
+      const overview: Array<{ client: string; folder_id: string; file_count: number; file_types: string[] }> = [];
+      for (const folder of (clientFolders || []).slice(0, 30)) {
+        const filesQ = `'${folder.id}' in parents and trashed = false`;
+        const filesResp = await fetch(
+          `https://www.googleapis.com/drive/v3/files?q=${encodeURIComponent(filesQ)}&fields=files(id,name,mimeType)&key=${GOOGLE_API_KEY}`
+        );
+        const { files } = await filesResp.json();
+        const fileList: any[] = files || [];
+        const mimeShort = (m: string) =>
+          m.includes("google-apps.document") ? "Google Doc"
+          : m.includes("google-apps.spreadsheet") ? "Sheet"
+          : m.includes("pdf") ? "PDF"
+          : m.includes("word") ? "Word"
+          : "Other";
+        overview.push({
+          client: folder.name,
+          folder_id: folder.id,
+          file_count: fileList.length,
+          file_types: [...new Set(fileList.map(f => mimeShort(f.mimeType)))] as string[],
+        });
+      }
+      return JSON.stringify({ total_clients: clientFolders?.length ?? 0, clients: overview });
+    },
+  },
+  {
+    name: "propose_plan" as const,
+    description: "MANDATORY before any write operation in autonomous mode. Presents a step-by-step plan to the user via Telegram and waits for approval. After calling this you MUST stop — do not call any write tools until the user sends an approval word in their next message.",
+    destructive: false,
+    parameters: {
+      type: "object" as const,
+      properties: {
+        goal: { type: "string", description: "One sentence: what you are trying to accomplish." },
+        steps: {
+          type: "array",
+          items: { type: "string" },
+          description: "Ordered list of actions you will take.",
+        },
+        reads: {
+          type: "array",
+          items: { type: "string" },
+          description: "Data sources you will read from.",
+        },
+        writes: {
+          type: "array",
+          items: { type: "string" },
+          description: "Systems you will write to. Empty if read-only.",
+        },
+        risk_level: {
+          type: "string",
+          enum: ["low", "medium", "high"],
+          description: "low=read-only. medium=writes new data. high=modifies existing data.",
+        },
+      },
+      required: ["goal", "steps", "risk_level"],
+    },
+    execute: async (args: {
+      goal: string;
+      steps: string[];
+      reads?: string[];
+      writes?: string[];
+      risk_level: "low" | "medium" | "high";
+    }) => {
+      const riskEmoji = { low: "🟢", medium: "🟡", high: "🔴" }[args.risk_level] ?? "⚪";
+      const stepsList = (args.steps || []).map((s, i) => `  ${i + 1}. ${s}`).join("\n");
+      const readsList = args.reads?.length ? `\n📖 *Reads:* ${args.reads.join(", ")}` : "";
+      const writesList = args.writes?.length ? `\n✏️ *Writes to:* ${args.writes.join(", ")}` : "";
+      const planMsg = [
+        `🤖 *Autonomous Plan* — ${riskEmoji} ${args.risk_level.toUpperCase()} risk`,
+        ``,
+        `*Goal:* ${args.goal}`,
+        ``,
+        `*Steps:*`,
+        stepsList,
+        readsList,
+        writesList,
+        ``,
+        `Reply *yes*, *go*, or *approved* to execute.`,
+        `Reply *no* or *cancel* to abort.`,
+      ].join("\n");
+      const planId = crypto.randomUUID();
+      await supabase.from("bot_settings").upsert(
+        {
+          setting_key: `pending_plan:${planId}`,
+          setting_value: JSON.stringify({ goal: args.goal, steps: args.steps, planId, created_at: new Date().toISOString() }),
+          updated_at: new Date().toISOString(),
+        },
+        { onConflict: "setting_key" }
+      );
+      return JSON.stringify({
+        plan_presented: true,
+        plan_id: planId,
+        telegram_message: planMsg,
+        awaiting_approval: true,
+        instruction: "Send telegram_message to the user via sendMessage and STOP. Do NOT call any write tools. Wait for user approval.",
+      });
+    },
+  },
 ];
 
 // ─── Build tool schemas for AI models ───────────────────────────
