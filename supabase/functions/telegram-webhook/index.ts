@@ -1185,7 +1185,7 @@ async function executeAgenticLoop(chatId: string, userMessage: string, opts: { t
   // ── EXECUTION CONTEXT ASSERTION ──
   logEvent({ event: "execution_context", lane: opts.lane, allowTools: opts.allowTools, workflowKey: opts.workflowKey, taskId: opts.taskId });
 
-  if (opts.lane !== "lane1_do") {
+  if (opts.lane !== "lane1_do" && opts.lane !== "lane3_autonomous") {
     throw new Error("EXECUTION_CONTEXT_INVALID_LANE");
   }
 
