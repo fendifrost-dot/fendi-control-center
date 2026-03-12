@@ -23,3 +23,6 @@ verify_jwt = false
 
 [functions.telegram-outbox-flush]
 verify_jwt = false
+
+[functions.ingest-drive-clients]
+verify_jwt = false
