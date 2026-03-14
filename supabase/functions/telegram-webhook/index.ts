@@ -2604,8 +2604,17 @@ async function callFanFuelHub(functionName: string, body: any) {
   if (!url || !key) throw new Error("FANFUEL_HUB_URL or FANFUEL_HUB_KEY not configured");
   const resp = await fetch(`${url}/functions/v1/${functionName}`, {
     method: "POST",
-    headers: { "Content-Type": "application/json", "x-api-key": key },
+    headers: {
+      "Content-Type": "application/json",
+      "Authorization": `Bearer ${key}`,
+      "apikey": key,
+    },
     body: JSON.stringify(body),
   });
+  if (!resp.ok) {
+    const err = await resp.text();
+    throw new Error(`FanFuel Hub error ${resp.status}: ${err.slice(0, 200)}`);
+  }
   return resp.json();
 }
+—
