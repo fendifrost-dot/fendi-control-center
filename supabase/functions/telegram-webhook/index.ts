@@ -1134,8 +1134,7 @@ const AGENT_TOOLS: ToolDef[] = [
   {
     name: "send_playlist_pitch" as const,
     description: "Send a pitch email to a playlist curator. WRITE operation - requires propose_plan approval first.",
-    properties: { playlist_id: { type: "string" }, curator_email: { type: "string" }, curator_name: { type: "string" }, playlist_name: { type: "string" }, track_name: { type: "string" }, subject: { type: "string" }, body: { type: "string" } },
-    required: ["playlist_id", "curator_email", "track_name", "subject", "body"],
+    parameters: { type: "object", properties: { playlist_id: { type: "string" }, curator_email: { type: "string" }, curator_name: { type: "string" }, playlist_name: { type: "string" }, track_name: { type: "string" }, subject: { type: "string" }, body: { type: "string" } }, required: ["playlist_id", "curator_email", "track_name", "subject", "body"] },
     execute: async (args: any) => {
       const res = await callFanFuelHub("control-center-api", { action: "send_pitch_email", ...args });
       return JSON.stringify(res);
