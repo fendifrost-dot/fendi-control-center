@@ -2291,6 +2291,22 @@ serve(async (req) => {
       }
     }
 
+    if (!autoPromotedWorkflow) {
+      const FANFUEL_TRIGGERS: Record<string, string> = {
+        "find playlist opportunities": "find_playlist_opportunities",
+        "playlist opportunities": "find_playlist_opportunities",
+        "research playlists": "find_playlist_opportunities",
+        "get pitch report": "get_pitch_report",
+        "show pitch report": "get_pitch_report",
+        "pitch report": "get_pitch_report",
+        "send pitch": "send_playlist_pitch",
+        "pitch playlist": "send_playlist_pitch",
+      };
+      const matched = Object.keys(FANFUEL_TRIGGERS).find(t => lowerText.includes(t));
+      if (matched) {
+        autoPromotedWorkflow = { key: FANFUEL_TRIGGERS[matched], name: FANFUEL_TRIGGERS[matched], description: "", trigger_phrases: [], tools: [] };
+      }
+    }
     if (autoPromotedWorkflow) {
       await supabase.from("tasks").update({
         status: "running",
@@ -2318,22 +2334,6 @@ serve(async (req) => {
     }
 
     // Auto-route FanFuel playlist phrases to Lane 1
-    if (!autoPromotedWorkflow) {
-      const FANFUEL_TRIGGERS: Record<string, string> = {
-        "find playlist opportunities": "find_playlist_opportunities",
-        "playlist opportunities": "find_playlist_opportunities",
-        "research playlists": "find_playlist_opportunities",
-        "get pitch report": "get_pitch_report",
-        "show pitch report": "get_pitch_report",
-        "pitch report": "get_pitch_report",
-        "send pitch": "send_playlist_pitch",
-        "pitch playlist": "send_playlist_pitch",
-      };
-      const matched = Object.keys(FANFUEL_TRIGGERS).find(t => lowerText.includes(t));
-      if (matched) {
-        autoPromotedWorkflow = { key: FANFUEL_TRIGGERS[matched], name: FANFUEL_TRIGGERS[matched], description: "", trigger_phrases: [], tools: [] };
-      }
-    }
 
 
     // ══════════════════════════════════════════════════════════
