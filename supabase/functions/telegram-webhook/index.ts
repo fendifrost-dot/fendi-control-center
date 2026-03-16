@@ -2317,21 +2317,22 @@ serve(async (req) => {
       return new Response("ok");
     }
 
-    // Auto-route FanFuel workflow phrases to Lane 1
-    const FANFUEL_WORKFLOW_TRIGGERS: Record<string, string> = {
-      "find playlist opportunities": "find_playlist_opportunities",
-      "playlist opportunities": "find_playlist_opportunities",
-      "research playlists": "find_playlist_opportunities",
-      "pitch playlists": "find_playlist_opportunities",
-      "get pitch report": "get_pitch_report",
-      "show pitch report": "get_pitch_report",
-      "pitch report": "get_pitch_report",
-    };
-    const fanFuelKey = /find\s+playlist\s+opportunities/i.test(lowerText)
-    ? "find_playlist_opportunities"
-    : Object.keys(FANFUEL_WORKFLOW_TRIGGERS).find(t => lowerText.includes(t));
-    if (fanFuelKey && !autoPromotedWorkflow) {
-      autoPromotedWorkflow = { key: FANFUEL_WORKFLOW_TRIGGERS[fanFuelKey], name: FANFUEL_WORKFLOW_TRIGGERS[fanFuelKey], description: "", trigger_phrases: [], tools: [] };
+    // Auto-route FanFuel playlist phrases to Lane 1
+    if (!autoPromotedWorkflow) {
+      const FANFUEL_TRIGGERS: Record<string, string> = {
+        "find playlist opportunities": "find_playlist_opportunities",
+        "playlist opportunities": "find_playlist_opportunities",
+        "research playlists": "find_playlist_opportunities",
+        "get pitch report": "get_pitch_report",
+        "show pitch report": "get_pitch_report",
+        "pitch report": "get_pitch_report",
+        "send pitch": "send_playlist_pitch",
+        "pitch playlist": "send_playlist_pitch",
+      };
+      const matched = Object.keys(FANFUEL_TRIGGERS).find(t => lowerText.includes(t));
+      if (matched) {
+        autoPromotedWorkflow = { key: FANFUEL_TRIGGERS[matched], name: FANFUEL_TRIGGERS[matched], description: "", trigger_phrases: [], tools: [] };
+      }
     }
 
 
