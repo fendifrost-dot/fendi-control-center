@@ -36,6 +36,8 @@ function _matchWorkflows(input: string, workflows: WorkflowEntry[]): { matches: 
   if (!norm) return { matches: [] };
   const matched: WorkflowEntry[] = [];
   for (const wf of workflows) {
+    const normKey = wf.key.replace(/_/g, ' ');
+    if (norm === wf.key || norm === normKey || norm.replace(/ /g, '_') === wf.key) { matched.push(wf); break; }
     for (const phrase of wf.trigger_phrases) {
       const np = _normalizeText(phrase);
       if (norm === np || norm.includes(np) || (norm.length >= 4 && np.includes(norm))) {
@@ -1116,6 +1118,7 @@ const AGENT_TOOLS: ToolDef[] = [
     name: "find_playlist_opportunities" as const,
     description: "Research playlist opportunities for a track on Spotify and SoundCloud using sonic neighborhood analysis. Use when asked to find playlists or pitch a track.",
     parameters: { type: "object", properties: { track_name: { type: "string", description: "Track name to research" } }, required: ["track_name"] },
+    destructive: false,
     execute: async (args: { track_name: string }) => {
       const res = await callFanFuelHub("playlist-research", { track_name: args.track_name });
       return JSON.stringify(res);
@@ -1125,6 +1128,7 @@ const AGENT_TOOLS: ToolDef[] = [
     name: "get_pitch_report" as const,
     description: "Get a report of all playlist pitches sent, replied, and placed.",
     parameters: { type: "object", properties: { track_name: { type: "string" } }, required: [] as string[] },
+    destructive: false,
     execute: async (args: { track_name?: string }) => {
       const res = await callFanFuelHub("control-center-api", { action: "get_pitch_log", track_name: args.track_name });
       return JSON.stringify(res);
@@ -1134,6 +1138,7 @@ const AGENT_TOOLS: ToolDef[] = [
     name: "send_playlist_pitch" as const,
     description: "Send a pitch email to a playlist curator. WRITE operation - requires propose_plan approval first.",
     parameters: { type: "object", properties: { playlist_id: { type: "string" }, curator_email: { type: "string" }, curator_name: { type: "string" }, playlist_name: { type: "string" }, track_name: { type: "string" }, subject: { type: "string" }, body: { type: "string" } }, required: ["playlist_id", "curator_email", "track_name", "subject", "body"] },
+    destructive: false,
     execute: async (args: any) => {
       const res = await callFanFuelHub("control-center-api", { action: "send_pitch_email", ...args });
       return JSON.stringify(res);
@@ -1143,6 +1148,7 @@ const AGENT_TOOLS: ToolDef[] = [
     name: "update_pitch_status" as const,
     description: "Update the status of a pitch (replied, placed, declined).",
     parameters: { type: "object", properties: { playlist_id: { type: "string" }, status: { type: "string", description: "replied | placed | declined | do_not_pitch" }, notes: { type: "string" } }, required: ["playlist_id", "status"] },
+    destructive: false,
     execute: async (args: any) => {
       const res = await callFanFuelHub("control-center-api", { action: "update_pitch_status", ...args });
       return JSON.stringify(res);
@@ -2321,7 +2327,9 @@ serve(async (req) => {
       "show pitch report": "get_pitch_report",
       "pitch report": "get_pitch_report",
     };
-    const fanFuelKey = Object.keys(FANFUEL_WORKFLOW_TRIGGERS).find(t => lowerText.includes(t));
+    const fanFuelKey = /find\s+playlist\s+opportunities/i.test(lowerText)
+    ? "find_playlist_opportunities"
+    : Object.keys(FANFUEL_WORKFLOW_TRIGGERS).find(t => lowerText.includes(t));
     if (fanFuelKey && !autoPromotedWorkflow) {
       autoPromotedWorkflow = { key: FANFUEL_WORKFLOW_TRIGGERS[fanFuelKey], name: FANFUEL_WORKFLOW_TRIGGERS[fanFuelKey], description: "", trigger_phrases: [], tools: [] };
     }
