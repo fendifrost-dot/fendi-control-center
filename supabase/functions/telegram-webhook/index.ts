@@ -2316,6 +2316,22 @@ serve(async (req) => {
       return new Response("ok");
     }
 
+    // Auto-route FanFuel workflow phrases to Lane 1
+    const FANFUEL_WORKFLOW_TRIGGERS: Record<string, string> = {
+      "find playlist opportunities": "find_playlist_opportunities",
+      "playlist opportunities": "find_playlist_opportunities",
+      "research playlists": "find_playlist_opportunities",
+      "pitch playlists": "find_playlist_opportunities",
+      "get pitch report": "get_pitch_report",
+      "show pitch report": "get_pitch_report",
+      "pitch report": "get_pitch_report",
+    };
+    const fanFuelKey = Object.keys(FANFUEL_WORKFLOW_TRIGGERS).find(t => lowerText.includes(t));
+    if (fanFuelKey && !autoPromotedWorkflow) {
+      autoPromotedWorkflow = { key: FANFUEL_WORKFLOW_TRIGGERS[fanFuelKey], name: FANFUEL_WORKFLOW_TRIGGERS[fanFuelKey] };
+    }
+
+
     // ══════════════════════════════════════════════════════════
     // LANE 1 — EXECUTION MODE (triggered by /do <workflow>)
     // ══════════════════════════════════════════════════════════
