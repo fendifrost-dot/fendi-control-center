@@ -1114,24 +1114,44 @@ const AGENT_TOOLS: ToolDef[] = [
     },
   },
   {
-    name: "find_playlist_opportunities",
+    name: "find_playlist_opportunities" as const,
     description: "Research playlist opportunities for a track on Spotify and SoundCloud using sonic neighborhood analysis. Use when asked to find playlists or pitch a track.",
-    input_schema: { type: "object", properties: { track_name: { type: "string", description: "Track name to research" } }, required: ["track_name"] }
+    properties: { track_name: { type: "string", description: "Track name to research" } },
+    required: ["track_name"],
+    execute: async (args: { track_name: string }) => {
+      const res = await callFanFuelHub("playlist-research", { track_name: args.track_name });
+      return JSON.stringify(res);
+    },
   },
   {
-    name: "get_pitch_report",
+    name: "get_pitch_report" as const,
     description: "Get a report of all playlist pitches sent, replied, and placed.",
-    input_schema: { type: "object", properties: { track_name: { type: "string" } }, required: [] }
+    properties: { track_name: { type: "string" } },
+    required: [] as string[],
+    execute: async (args: { track_name?: string }) => {
+      const res = await callFanFuelHub("control-center-api", { action: "get_pitch_log", track_name: args.track_name });
+      return JSON.stringify(res);
+    },
   },
   {
-    name: "send_playlist_pitch",
+    name: "send_playlist_pitch" as const,
     description: "Send a pitch email to a playlist curator. WRITE operation - requires propose_plan approval first.",
-    input_schema: { type: "object", properties: { playlist_id: { type: "string" }, curator_email: { type: "string" }, curator_name: { type: "string" }, playlist_name: { type: "string" }, track_name: { type: "string" }, subject: { type: "string" }, body: { type: "string" } }, required: ["playlist_id", "curator_email", "track_name", "subject", "body"] }
+    properties: { playlist_id: { type: "string" }, curator_email: { type: "string" }, curator_name: { type: "string" }, playlist_name: { type: "string" }, track_name: { type: "string" }, subject: { type: "string" }, body: { type: "string" } },
+    required: ["playlist_id", "curator_email", "track_name", "subject", "body"],
+    execute: async (args: any) => {
+      const res = await callFanFuelHub("control-center-api", { action: "send_pitch_email", ...args });
+      return JSON.stringify(res);
+    },
   },
   {
-    name: "update_pitch_status",
+    name: "update_pitch_status" as const,
     description: "Update the status of a pitch (replied, placed, declined).",
-    input_schema: { type: "object", properties: { playlist_id: { type: "string" }, status: { type: "string", description: "replied | placed | declined | do_not_pitch" }, notes: { type: "string" } }, required: ["playlist_id", "status"] }
+    properties: { playlist_id: { type: "string" }, status: { type: "string", description: "replied | placed | declined | do_not_pitch" }, notes: { type: "string" } },
+    required: ["playlist_id", "status"],
+    execute: async (args: any) => {
+      const res = await callFanFuelHub("control-center-api", { action: "update_pitch_status", ...args });
+      return JSON.stringify(res);
+    },
   }
 ];
 
@@ -2326,22 +2346,6 @@ serve(async (req) => {
       if (matches.length === 0) {
         const noMatch = _formatNoMatch(workflows);
         await sendMessage(chatId, `🚫 No executable workflow found for: \`${doArg}\`\n\n${noMatch}`, {}, `task:${taskId}:no-match`);
-    if (workflowKey === "get_pitch_report") {
-      try {
-        const result = await callFanFuelHub("control-center-api", { action: "get_pitch_log" });
-        const pitches = result?.pitches || result?.data || [];
-        if (pitches.length === 0) {
-          await sendMessage(chatId, "📋 No pitches sent yet.");
-        } else {
-          const lines = pitches.slice(0, 20).map((p: any) => `• ${p.playlist_name || p.playlist_id} — ${p.status}`).join('\n');
-          await sendMessage(chatId, `📋 Pitch Report (${pitches.length} total):\n\n${lines}`);
-        }
-        return { input: workflowKey, action: "completed" };
-      } catch (e: any) {
-        await sendMessage(chatId, `❌ Could not get pitch report: ${e.message}`);
-        return { input: workflowKey, action: "error" };
-      }
-    }
             await supabase.from("tasks").update({ status: "succeeded", result_json: { action: "do_no_match", input: doArg } }).eq("id", taskId);
         await sendMessage(chatId, `✅ Done: \`${taskId}\``, {}, `task:${taskId}:done`);
         _currentTaskId = null;
