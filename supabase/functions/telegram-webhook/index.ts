@@ -1112,7 +1112,7 @@ const AGENT_TOOLS: ToolDef[] = [
         instruction: "Send telegram_message to the user via sendMessage and STOP. Do NOT call any write tools. Wait for user approval.",
       });
     },
-  },,
+  },
   {
     name: "find_playlist_opportunities",
     description: "Research playlist opportunities for a track on Spotify and SoundCloud using sonic neighborhood analysis. Use when asked to find playlists or pitch a track.",
@@ -1267,7 +1267,7 @@ async function agenticGrokCall(
   conversationContext: string,
   allowedToolNames?: string[]
 ): Promise<{ text: string; toolCalls: Array<{ name: string; args: any }> }> {
-  const isAutonomousLane = (opts as any)?.lane === "lane3_autonomous";
+  const isAutonomousLane = false;
   const autonomousPrefix = isAutonomousLane
     ? `🤖 AUTONOMOUS AGENT MODE ACTIVE
 You have full tool access. Your rules:
@@ -1362,19 +1362,6 @@ async function logToolAttempt(requestId: string, toolName: string, args: any, mo
   }).select("id").single();
   if (error || !data) {
     console.error("FATAL: Failed to create tool_execution_logs row", error);
-    if (toolName === "find_playlist_opportunities") {
-      const res = await callFanFuelHub("playlist-research", { track_name: toolInput.track_name });
-      toolResult = JSON.stringify(res);
-    } else if (toolName === "get_pitch_report") {
-      const res = await callFanFuelHub("control-center-api", { action: "get_pitch_log", track_name: toolInput.track_name });
-      toolResult = JSON.stringify(res);
-    } else if (toolName === "send_playlist_pitch") {
-      const res = await callFanFuelHub("control-center-api", { action: "send_pitch_email", ...toolInput });
-      toolResult = JSON.stringify(res);
-    } else if (toolName === "update_pitch_status") {
-      const res = await callFanFuelHub("control-center-api", { action: "update_pitch_status", ...toolInput });
-      toolResult = JSON.stringify(res);
-    }
     throw new Error(`Execution logging failed for ${toolName}: no log row created`);
   }
   return data.id;
@@ -2339,23 +2326,6 @@ serve(async (req) => {
       if (matches.length === 0) {
         const noMatch = _formatNoMatch(workflows);
         await sendMessage(chatId, `🚫 No executable workflow found for: \`${doArg}\`\n\n${noMatch}`, {}, `task:${taskId}:no-match`);
-    if (workflowKey === "find_playlist_opportunities") {
-      const trackName = params?.track_name || params?.input || userMessage.replace(/find playlist opportunities for/i, '').trim() || "unknown track";
-      await sendMessage(chatId, `🔍 Researching playlist opportunities for "${trackName}"...`);
-      try {
-        const result = await callFanFuelHub("playlist-research", { track_name: trackName });
-        if (result?.playlists && Array.isArray(result.playlists) && result.playlists.length > 0) {
-          const lines = result.playlists.slice(0, 15).map((p: any, i: number) => `${i+1}. ${p.name} — ${p.followers?.toLocaleString() || '?'} followers`).join('\n');
-          await sendMessage(chatId, `🎵 Found ${result.playlists.length} playlist opportunities for "${trackName}":\n\n${lines}\n\nReply with /do send_playlist_pitch to start pitching.`);
-        } else {
-          await sendMessage(chatId, `✅ Playlist research complete for "${trackName}". Results stored. Check back with "show pitch report".`);
-        }
-        return { input: workflowKey, action: "completed" };
-      } catch (e: any) {
-        await sendMessage(chatId, `❌ Playlist research failed: ${e.message}`);
-        return { input: workflowKey, action: "error" };
-      }
-    }
     if (workflowKey === "get_pitch_report") {
       try {
         const result = await callFanFuelHub("control-center-api", { action: "get_pitch_log" });
