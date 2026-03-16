@@ -2324,7 +2324,7 @@ serve(async (req) => {
     };
     const fanFuelKey = Object.keys(FANFUEL_WORKFLOW_TRIGGERS).find(t => lowerText.includes(t));
     if (fanFuelKey && !autoPromotedWorkflow) {
-      autoPromotedWorkflow = { key: FANFUEL_WORKFLOW_TRIGGERS[fanFuelKey], name: FANFUEL_WORKFLOW_TRIGGERS[fanFuelKey] };
+      autoPromotedWorkflow = { key: FANFUEL_WORKFLOW_TRIGGERS[fanFuelKey], name: FANFUEL_WORKFLOW_TRIGGERS[fanFuelKey], description: "", trigger_phrases: [], tools: [] };
     }
 
 
