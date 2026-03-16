@@ -1125,8 +1125,7 @@ const AGENT_TOOLS: ToolDef[] = [
   {
     name: "get_pitch_report" as const,
     description: "Get a report of all playlist pitches sent, replied, and placed.",
-    properties: { track_name: { type: "string" } },
-    required: [] as string[],
+    parameters: { type: "object", properties: { track_name: { type: "string" } }, required: [] as string[] },
     execute: async (args: { track_name?: string }) => {
       const res = await callFanFuelHub("control-center-api", { action: "get_pitch_log", track_name: args.track_name });
       return JSON.stringify(res);
