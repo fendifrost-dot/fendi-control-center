@@ -2339,7 +2339,40 @@ serve(async (req) => {
       if (matches.length === 0) {
         const noMatch = _formatNoMatch(workflows);
         await sendMessage(chatId, `🚫 No executable workflow found for: \`${doArg}\`\n\n${noMatch}`, {}, `task:${taskId}:no-match`);
-        await supabase.from("tasks").update({ status: "succeeded", result_json: { action: "do_no_match", input: doArg } }).eq("id", taskId);
+    if (workflowKey === "find_playlist_opportunities") {
+      const trackName = params?.track_name || params?.input || userMessage.replace(/find playlist opportunities for/i, '').trim() || "unknown track";
+      await sendMessage(chatId, `🔍 Researching playlist opportunities for "${trackName}"...`);
+      try {
+        const result = await callFanFuelHub("playlist-research", { track_name: trackName });
+        if (result?.playlists && Array.isArray(result.playlists) && result.playlists.length > 0) {
+          const lines = result.playlists.slice(0, 15).map((p: any, i: number) => `${i+1}. ${p.name} — ${p.followers?.toLocaleString() || '?'} followers`).join('\n');
+          await sendMessage(chatId, `🎵 Found ${result.playlists.length} playlist opportunities for "${trackName}":\n\n${lines}\n\nReply with /do send_playlist_pitch to start pitching.`);
+        } else {
+          await sendMessage(chatId, `✅ Playlist research complete for "${trackName}". Results stored. Check back with "show pitch report".`);
+        }
+        return { input: workflowKey, action: "completed" };
+      } catch (e: any) {
+        await sendMessage(chatId, `❌ Playlist research failed: ${e.message}`);
+        return { input: workflowKey, action: "error" };
+      }
+    }
+    if (workflowKey === "get_pitch_report") {
+      try {
+        const result = await callFanFuelHub("control-center-api", { action: "get_pitch_log" });
+        const pitches = result?.pitches || result?.data || [];
+        if (pitches.length === 0) {
+          await sendMessage(chatId, "📋 No pitches sent yet.");
+        } else {
+          const lines = pitches.slice(0, 20).map((p: any) => `• ${p.playlist_name || p.playlist_id} — ${p.status}`).join('\n');
+          await sendMessage(chatId, `📋 Pitch Report (${pitches.length} total):\n\n${lines}`);
+        }
+        return { input: workflowKey, action: "completed" };
+      } catch (e: any) {
+        await sendMessage(chatId, `❌ Could not get pitch report: ${e.message}`);
+        return { input: workflowKey, action: "error" };
+      }
+    }
+            await supabase.from("tasks").update({ status: "succeeded", result_json: { action: "do_no_match", input: doArg } }).eq("id", taskId);
         await sendMessage(chatId, `✅ Done: \`${taskId}\``, {}, `task:${taskId}:done`);
         _currentTaskId = null;
         return new Response("ok");
