@@ -2346,22 +2346,6 @@ serve(async (req) => {
       if (matches.length === 0) {
         const noMatch = _formatNoMatch(workflows);
         await sendMessage(chatId, `🚫 No executable workflow found for: \`${doArg}\`\n\n${noMatch}`, {}, `task:${taskId}:no-match`);
-    if (workflowKey === "get_pitch_report") {
-      try {
-        const result = await callFanFuelHub("control-center-api", { action: "get_pitch_log" });
-        const pitches = result?.pitches || result?.data || [];
-        if (pitches.length === 0) {
-          await sendMessage(chatId, "📋 No pitches sent yet.");
-        } else {
-          const lines = pitches.slice(0, 20).map((p: any) => `• ${p.playlist_name || p.playlist_id} — ${p.status}`).join('\n');
-          await sendMessage(chatId, `📋 Pitch Report (${pitches.length} total):\n\n${lines}`);
-        }
-        return { input: workflowKey, action: "completed" };
-      } catch (e: any) {
-        await sendMessage(chatId, `❌ Could not get pitch report: ${e.message}`);
-        return { input: workflowKey, action: "error" };
-      }
-    }
             await supabase.from("tasks").update({ status: "succeeded", result_json: { action: "do_no_match", input: doArg } }).eq("id", taskId);
         await sendMessage(chatId, `✅ Done: \`${taskId}\``, {}, `task:${taskId}:done`);
         _currentTaskId = null;
