@@ -36,15 +36,22 @@ function _matchWorkflows(input: string, workflows: WorkflowEntry[]): { matches: 
   const norm = _normalizeText(input);
   if (!norm) return { matches: [] };
   const matched: WorkflowEntry[] = [];
+  const normKey = norm.replace(/\s+/g, "_");
   for (const wf of workflows) {
+    const wfKeyNorm = _normalizeText(wf.key).replace(/\s+/g, "_");
+    if (norm === wfKeyNorm || normKey === wfKeyNorm || norm.includes(wfKeyNorm) || wfKeyNorm.includes(norm)) {
+      matched.push(wf);
+      break;
+    }
     for (const phrase of wf.trigger_phrases) {
       const np = _normalizeText(phrase);
       if (norm === np || norm.includes(np) || (norm.length >= 4 && np.includes(norm))) {
-        matched.push(wf); break;
+        matched.push(wf);
+        break;
       }
     }
   }
-  if (matched.length >= 1) return { matches: matched, chosen: matched.sort((a, b) => Math.max(...b.trigger_phrases.map(p => p.length)) - Math.max(...a.trigger_phrases.map(p => p.length)))[0] };
+  if (matched.length >= 1) return { matches: matched, chosen: matched.sort((a, b) => Math.max(...(b.trigger_phrases || []).map(p => p.length), b.key.length) - Math.max(...(a.trigger_phrases || []).map(p => p.length), a.key.length))[0] };
   return { matches: matched };
 }
 
@@ -1112,27 +1119,55 @@ const AGENT_TOOLS: ToolDef[] = [
         instruction: "Send telegram_message to the user via sendMessage and STOP. Do NOT call any write tools. Wait for user approval.",
       });
     },
-  },,
+  },
   {
     name: "find_playlist_opportunities",
     description: "Research playlist opportunities for a track on Spotify and SoundCloud using sonic neighborhood analysis. Use when asked to find playlists or pitch a track.",
-    input_schema: { type: "object", properties: { track_name: { type: "string", description: "Track name to research" } }, required: ["track_name"] }
+    parameters: { type: "object", properties: { track_name: { type: "string", description: "Track name to research" } }, required: ["track_name"] },
+    destructive: false,
+    execute: async (args: { track_name?: string }) => {
+      const trackName = args?.track_name || "unknown track";
+      const result = await callFanFuelHub("playlist-research", { track_name: trackName });
+      if (result?.playlists && Array.isArray(result.playlists) && result.playlists.length > 0) {
+        const lines = result.playlists.slice(0, 15).map((p: any, i: number) => `${i + 1}. ${p.name} — ${typeof p.followers === "number" ? p.followers.toLocaleString() : (p.followers ?? "?")} followers`).join("\n");
+        return `Found ${result.playlists.length} playlist opportunities for "${trackName}":\n\n${lines}`;
+      }
+      return `Playlist research complete for "${trackName}". Results stored. Check back with "show pitch report".`;
+    },
   },
   {
     name: "get_pitch_report",
     description: "Get a report of all playlist pitches sent, replied, and placed.",
-    input_schema: { type: "object", properties: { track_name: { type: "string" } }, required: [] }
+    parameters: { type: "object", properties: { track_name: { type: "string" } }, required: [] },
+    destructive: false,
+    execute: async (args: { track_name?: string }) => {
+      const result = await callFanFuelHub("control-center-api", { action: "get_pitch_log", track_name: args?.track_name });
+      const pitches = result?.pitches ?? result?.data ?? [];
+      if (!Array.isArray(pitches) || pitches.length === 0) return "No pitches sent yet.";
+      const lines = pitches.slice(0, 20).map((p: any) => `• ${p.playlist_name ?? p.playlist_id} — ${p.status}`).join("\n");
+      return `Pitch Report (${pitches.length} total):\n\n${lines}`;
+    },
   },
   {
     name: "send_playlist_pitch",
     description: "Send a pitch email to a playlist curator. WRITE operation - requires propose_plan approval first.",
-    input_schema: { type: "object", properties: { playlist_id: { type: "string" }, curator_email: { type: "string" }, curator_name: { type: "string" }, playlist_name: { type: "string" }, track_name: { type: "string" }, subject: { type: "string" }, body: { type: "string" } }, required: ["playlist_id", "curator_email", "track_name", "subject", "body"] }
+    parameters: { type: "object", properties: { playlist_id: { type: "string" }, curator_email: { type: "string" }, curator_name: { type: "string" }, playlist_name: { type: "string" }, track_name: { type: "string" }, subject: { type: "string" }, body: { type: "string" } }, required: ["playlist_id", "curator_email", "track_name", "subject", "body"] },
+    destructive: true,
+    execute: async (args: any) => {
+      const res = await callFanFuelHub("control-center-api", { action: "send_pitch_email", ...args });
+      return typeof res === "string" ? res : JSON.stringify(res ?? { ok: true });
+    },
   },
   {
     name: "update_pitch_status",
     description: "Update the status of a pitch (replied, placed, declined).",
-    input_schema: { type: "object", properties: { playlist_id: { type: "string" }, status: { type: "string", description: "replied | placed | declined | do_not_pitch" }, notes: { type: "string" } }, required: ["playlist_id", "status"] }
-  }
+    parameters: { type: "object", properties: { playlist_id: { type: "string" }, status: { type: "string", description: "replied | placed | declined | do_not_pitch" }, notes: { type: "string" } }, required: ["playlist_id", "status"] },
+    destructive: false,
+    execute: async (args: any) => {
+      const res = await callFanFuelHub("control-center-api", { action: "update_pitch_status", ...args });
+      return typeof res === "string" ? res : JSON.stringify(res ?? { ok: true });
+    },
+  },
 ];
 
 // ─── Build tool schemas for AI models ───────────────────────────
@@ -2267,14 +2302,20 @@ serve(async (req) => {
 
     // ══════════════════════════════════════════════════════════
     // INTENT-BASED LANE 1 AUTO-PROMOTION
-    // Natural language like "run system status" auto-routes to Lane 1
+    // Natural language like "run system status" or "find playlist opportunities for X" auto-routes to Lane 1
     // ══════════════════════════════════════════════════════════
     const EXECUTION_INTENT_PREFIXES = ["run ", "execute ", "trigger ", "start "];
     const lowerText = text.toLowerCase().trim();
     const hasExecutionIntent = EXECUTION_INTENT_PREFIXES.some(p => lowerText.startsWith(p));
+    const findPlaylistMatch = /find\s+playlist\s+opportunities(\s+for\s+(.+))?/i.exec(lowerText);
 
     let autoPromotedWorkflow: WorkflowEntry | undefined;
-    if (hasExecutionIntent) {
+    if (findPlaylistMatch && IMPLEMENTED_WORKFLOW_KEYS.has("find_playlist_opportunities")) {
+      const intentWorkflows = await fetchWorkflowRegistry();
+      const wf = intentWorkflows.find(w => w.key === "find_playlist_opportunities");
+      if (wf) autoPromotedWorkflow = wf;
+    }
+    if (!autoPromotedWorkflow && hasExecutionIntent) {
       const intentArg = lowerText.replace(/^(run|execute|trigger|start)\s+/, "").trim();
       const intentWorkflows = await fetchWorkflowRegistry();
       const { chosen: intentChosen } = _matchWorkflows(intentArg, intentWorkflows);
@@ -2339,40 +2380,7 @@ serve(async (req) => {
       if (matches.length === 0) {
         const noMatch = _formatNoMatch(workflows);
         await sendMessage(chatId, `🚫 No executable workflow found for: \`${doArg}\`\n\n${noMatch}`, {}, `task:${taskId}:no-match`);
-    if (workflowKey === "find_playlist_opportunities") {
-      const trackName = params?.track_name || params?.input || userMessage.replace(/find playlist opportunities for/i, '').trim() || "unknown track";
-      await sendMessage(chatId, `🔍 Researching playlist opportunities for "${trackName}"...`);
-      try {
-        const result = await callFanFuelHub("playlist-research", { track_name: trackName });
-        if (result?.playlists && Array.isArray(result.playlists) && result.playlists.length > 0) {
-          const lines = result.playlists.slice(0, 15).map((p: any, i: number) => `${i+1}. ${p.name} — ${p.followers?.toLocaleString() || '?'} followers`).join('\n');
-          await sendMessage(chatId, `🎵 Found ${result.playlists.length} playlist opportunities for "${trackName}":\n\n${lines}\n\nReply with /do send_playlist_pitch to start pitching.`);
-        } else {
-          await sendMessage(chatId, `✅ Playlist research complete for "${trackName}". Results stored. Check back with "show pitch report".`);
-        }
-        return { input: workflowKey, action: "completed" };
-      } catch (e: any) {
-        await sendMessage(chatId, `❌ Playlist research failed: ${e.message}`);
-        return { input: workflowKey, action: "error" };
-      }
-    }
-    if (workflowKey === "get_pitch_report") {
-      try {
-        const result = await callFanFuelHub("control-center-api", { action: "get_pitch_log" });
-        const pitches = result?.pitches || result?.data || [];
-        if (pitches.length === 0) {
-          await sendMessage(chatId, "📋 No pitches sent yet.");
-        } else {
-          const lines = pitches.slice(0, 20).map((p: any) => `• ${p.playlist_name || p.playlist_id} — ${p.status}`).join('\n');
-          await sendMessage(chatId, `📋 Pitch Report (${pitches.length} total):\n\n${lines}`);
-        }
-        return { input: workflowKey, action: "completed" };
-      } catch (e: any) {
-        await sendMessage(chatId, `❌ Could not get pitch report: ${e.message}`);
-        return { input: workflowKey, action: "error" };
-      }
-    }
-            await supabase.from("tasks").update({ status: "succeeded", result_json: { action: "do_no_match", input: doArg } }).eq("id", taskId);
+        await supabase.from("tasks").update({ status: "succeeded", result_json: { action: "do_no_match", input: doArg } }).eq("id", taskId);
         await sendMessage(chatId, `✅ Done: \`${taskId}\``, {}, `task:${taskId}:done`);
         _currentTaskId = null;
         return new Response("ok");
