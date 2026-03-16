@@ -1143,8 +1143,7 @@ const AGENT_TOOLS: ToolDef[] = [
   {
     name: "update_pitch_status" as const,
     description: "Update the status of a pitch (replied, placed, declined).",
-    properties: { playlist_id: { type: "string" }, status: { type: "string", description: "replied | placed | declined | do_not_pitch" }, notes: { type: "string" } },
-    required: ["playlist_id", "status"],
+    parameters: { type: "object", properties: { playlist_id: { type: "string" }, status: { type: "string", description: "replied | placed | declined | do_not_pitch" }, notes: { type: "string" } }, required: ["playlist_id", "status"] },
     execute: async (args: any) => {
       const res = await callFanFuelHub("control-center-api", { action: "update_pitch_status", ...args });
       return JSON.stringify(res);
