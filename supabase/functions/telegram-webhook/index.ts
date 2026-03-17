@@ -2614,7 +2614,8 @@ Be concise, professional, and use emoji sparingly.`;
         }).eq("id", taskId);
         await sendMessage(chatId, `❌ Failed: \`${taskId}\` — ${(lane2Error || "unknown").slice(0, 200)}`, {}, `task:${taskId}:failed`);
       }
-Apply Cursor findPlaylistMatch regex + AUTO_PROMOTE logging for Lane 1 routing debug    }
+      _currentTaskId = null;
+    }
     return new Response("ok");
   } catch (err) {
     console.error("Webhook error:", err);
