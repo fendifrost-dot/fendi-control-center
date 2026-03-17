@@ -2278,7 +2278,6 @@ serve(async (req) => {
     // Natural language like "run system status" auto-routes to Lane 1
     // ══════════════════════════════════════════════════════════
     const EXECUTION_INTENT_PREFIXES = ["run ", "execute ", "trigger ", "start "];
-    const EXECUTION_INTENT_PREFIXES = ["run ", "execute ", "trigger ", "start "];
     const lowerText = text.toLowerCase().trim();
     const hasExecutionIntent = EXECUTION_INTENT_PREFIXES.some(p => lowerText.startsWith(p));
     const findPlaylistMatch = /find\s+playlist\s+opportunities(\s+for\s+(.+))?/i.exec(lowerText);
@@ -2615,7 +2614,8 @@ Be concise, professional, and use emoji sparingly.`;
         }).eq("id", taskId);
         await sendMessage(chatId, `❌ Failed: \`${taskId}\` — ${(lane2Error || "unknown").slice(0, 200)}`, {}, `task:${taskId}:failed`);
       }
-Apply Cursor findPlaylistMatch regex + AUTO_PROMOTE logging for Lane 1 routing debug    }
+      _currentTaskId = null;
+    }
     return new Response("ok");
   } catch (err) {
     console.error("Webhook error:", err);
