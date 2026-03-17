@@ -21,6 +21,16 @@ const IMPLEMENTED_WORKFLOW_KEYS = new Set([
     "find_playlist_opportunities", "get_pitch_report", "send_playlist_pitch", "update_pitch_status"
 ]);
 
+// Synthetic workflow entry for find_playlist_opportunities (fallback when registry is empty)
+const SYNTHETIC_FIND_PLAYLIST_OPPORTUNITIES = {
+  id: "synthetic-find-playlist-opportunities",
+  key: "find_playlist_opportunities",
+  name: "Find Playlist Opportunities",
+  description: "Research playlist opportunities for a track on Spotify and SoundCloud",
+  trigger_phrases: ["find playlist opportunities", "playlist opportunities for"],
+  tools: ["find_playlist_opportunities"],
+};
+
 // ─── Workflow registry fetch ────────────────────────────────────
 interface WorkflowEntry {
   key: string; name: string; description: string;
@@ -2291,7 +2301,8 @@ serve(async (req) => {
           console.log("[AUTO_PROMOTE] Using workflow find_playlist_opportunities", { taskId, workflowKey: wf.key });
           autoPromotedWorkflow = wf;
         } else {
-          console.warn("[AUTO_PROMOTE] Workflow find_playlist_opportunities not found in registry", { taskId });
+          console.warn("[AUTO_PROMOTE] Workflow find_playlist_opportunities not found in registry, using synthetic", { taskId });
+          autoPromotedWorkflow = SYNTHETIC_FIND_PLAYLIST_OPPORTUNITIES as any;
         }
       } else {
         console.warn("[AUTO_PROMOTE] find_playlist_opportunities not in IMPLEMENTED_WORKFLOW_KEYS", { taskId });
