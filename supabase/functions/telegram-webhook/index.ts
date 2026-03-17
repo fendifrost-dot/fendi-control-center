@@ -2649,6 +2649,7 @@ async function callFanFuelHub(functionName: string, body: any) {
       "Content-Type": "application/json",
       "Authorization": `Bearer ${key}`,
       "apikey": key,
+        "x-api-key": key,
     },
     body: JSON.stringify(body),
   });
