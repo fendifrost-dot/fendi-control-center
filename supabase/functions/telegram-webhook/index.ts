@@ -1480,7 +1480,12 @@ async function executeAgenticLoop(chatId: string, userMessage: string, opts: { t
 
   // ── LOAD TOOLS FROM WORKFLOW ──
   const workflows = await fetchWorkflowRegistry();
-  const matchedWorkflow = workflows.find(w => w.key === opts.workflowKey);
+  let matchedWorkflow = workflows.find(w => w.key === opts.workflowKey);
+  // Synthetic fallback — if registry missing find_playlist_opportunities, use built-in constant
+  if (!matchedWorkflow && opts.workflowKey === "find_playlist_opportunities" && IMPLEMENTED_WORKFLOW_KEYS.has("find_playlist_opportunities")) {
+    matchedWorkflow = SYNTHETIC_FIND_PLAYLIST_OPPORTUNITIES as any;
+    console.log(JSON.stringify({ ts: Date.now(), event: "workflow_synthetic_fallback", key: opts.workflowKey, taskId: opts.taskId }));
+  }
 
   // ── VALIDATE WORKFLOW EXISTS ──
   if (!matchedWorkflow) {
