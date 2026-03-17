@@ -2278,7 +2278,6 @@ serve(async (req) => {
     // Natural language like "run system status" auto-routes to Lane 1
     // ══════════════════════════════════════════════════════════
     const EXECUTION_INTENT_PREFIXES = ["run ", "execute ", "trigger ", "start "];
-    const EXECUTION_INTENT_PREFIXES = ["run ", "execute ", "trigger ", "start "];
     const lowerText = text.toLowerCase().trim();
     const hasExecutionIntent = EXECUTION_INTENT_PREFIXES.some(p => lowerText.startsWith(p));
     const findPlaylistMatch = /find\s+playlist\s+opportunities(\s+for\s+(.+))?/i.exec(lowerText);
