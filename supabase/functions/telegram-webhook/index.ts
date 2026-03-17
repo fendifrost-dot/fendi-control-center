@@ -2310,10 +2310,32 @@ serve(async (req) => {
     const findPlaylistMatch = /find\s+playlist\s+opportunities(\s+for\s+(.+))?/i.exec(lowerText);
 
     let autoPromotedWorkflow: WorkflowEntry | undefined;
-    if (findPlaylistMatch && IMPLEMENTED_WORKFLOW_KEYS.has("find_playlist_opportunities")) {
-      const intentWorkflows = await fetchWorkflowRegistry();
-      const wf = intentWorkflows.find(w => w.key === "find_playlist_opportunities");
-      if (wf) autoPromotedWorkflow = wf;
+    if (findPlaylistMatch) {
+      console.log("[AUTO_PROMOTE] Matched playlist phrase", {
+        taskId,
+        text,
+        lowerText,
+      });
+      // If user asks to "find playlist opportunities ..." and the workflow is implemented, auto-promote directly
+      if (IMPLEMENTED_WORKFLOW_KEYS.has("find_playlist_opportunities")) {
+        const intentWorkflows = await fetchWorkflowRegistry();
+        const wf = intentWorkflows.find(w => w.key === "find_playlist_opportunities");
+        if (wf) {
+          console.log("[AUTO_PROMOTE] Using workflow find_playlist_opportunities", {
+            taskId,
+            workflowKey: wf.key,
+          });
+          autoPromotedWorkflow = wf;
+        } else {
+          console.warn("[AUTO_PROMOTE] Workflow find_playlist_opportunities implemented but not found in registry", {
+            taskId,
+          });
+        }
+      } else {
+        console.warn("[AUTO_PROMOTE] find_playlist_opportunities not in IMPLEMENTED_WORKFLOW_KEYS", {
+          taskId,
+        });
+      }
     }
     if (!autoPromotedWorkflow && hasExecutionIntent) {
       const intentArg = lowerText.replace(/^(run|execute|trigger|start)\s+/, "").trim();
@@ -2325,6 +2347,10 @@ serve(async (req) => {
     }
 
     if (autoPromotedWorkflow) {
+      console.log("[AUTO_PROMOTE] Routing to Lane 1", {
+        taskId,
+        workflowKey: autoPromotedWorkflow.key,
+      });
       await supabase.from("tasks").update({
         status: "running",
         selected_workflow: autoPromotedWorkflow.key,
