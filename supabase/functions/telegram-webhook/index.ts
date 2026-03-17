@@ -2278,33 +2278,32 @@ serve(async (req) => {
     // Natural language like "run system status" auto-routes to Lane 1
     // ══════════════════════════════════════════════════════════
     const EXECUTION_INTENT_PREFIXES = ["run ", "execute ", "trigger ", "start "];
+    const EXECUTION_INTENT_PREFIXES = ["run ", "execute ", "trigger ", "start "];
     const lowerText = text.toLowerCase().trim();
     const hasExecutionIntent = EXECUTION_INTENT_PREFIXES.some(p => lowerText.startsWith(p));
-
+    const findPlaylistMatch = /find\s+playlist\s+opportunities(\s+for\s+(.+))?/i.exec(lowerText);
     let autoPromotedWorkflow: WorkflowEntry | undefined;
-    if (hasExecutionIntent) {
+    if (findPlaylistMatch) {
+      console.log("[AUTO_PROMOTE] Matched playlist phrase", { taskId, text, lowerText });
+      if (IMPLEMENTED_WORKFLOW_KEYS.has("find_playlist_opportunities")) {
+        const intentWorkflows = await fetchWorkflowRegistry();
+        const wf = intentWorkflows.find(w => w.key === "find_playlist_opportunities");
+        if (wf) {
+          console.log("[AUTO_PROMOTE] Using workflow find_playlist_opportunities", { taskId, workflowKey: wf.key });
+          autoPromotedWorkflow = wf;
+        } else {
+          console.warn("[AUTO_PROMOTE] Workflow find_playlist_opportunities not found in registry", { taskId });
+        }
+      } else {
+        console.warn("[AUTO_PROMOTE] find_playlist_opportunities not in IMPLEMENTED_WORKFLOW_KEYS", { taskId });
+      }
+    }
+    if (!autoPromotedWorkflow && hasExecutionIntent) {
       const intentArg = lowerText.replace(/^(run|execute|trigger|start)\s+/, "").trim();
       const intentWorkflows = await fetchWorkflowRegistry();
       const { chosen: intentChosen } = _matchWorkflows(intentArg, intentWorkflows);
       if (intentChosen && IMPLEMENTED_WORKFLOW_KEYS.has(intentChosen.key)) {
         autoPromotedWorkflow = intentChosen;
-      }
-    }
-
-    if (!autoPromotedWorkflow) {
-      const FANFUEL_TRIGGERS: Record<string, string> = {
-        "find playlist opportunities": "find_playlist_opportunities",
-        "playlist opportunities": "find_playlist_opportunities",
-        "research playlists": "find_playlist_opportunities",
-        "get pitch report": "get_pitch_report",
-        "show pitch report": "get_pitch_report",
-        "pitch report": "get_pitch_report",
-        "send pitch": "send_playlist_pitch",
-        "pitch playlist": "send_playlist_pitch",
-      };
-      const matched = Object.keys(FANFUEL_TRIGGERS).find(t => lowerText.includes(t));
-      if (matched) {
-        autoPromotedWorkflow = { key: FANFUEL_TRIGGERS[matched], name: FANFUEL_TRIGGERS[matched], description: "", trigger_phrases: [], tools: [] };
       }
     }
     if (autoPromotedWorkflow) {
@@ -2616,8 +2615,7 @@ Be concise, professional, and use emoji sparingly.`;
         }).eq("id", taskId);
         await sendMessage(chatId, `❌ Failed: \`${taskId}\` — ${(lane2Error || "unknown").slice(0, 200)}`, {}, `task:${taskId}:failed`);
       }
-      _currentTaskId = null;
-    }
+Apply Cursor findPlaylistMatch regex + AUTO_PROMOTE logging for Lane 1 routing debug    }
     return new Response("ok");
   } catch (err) {
     console.error("Webhook error:", err);
