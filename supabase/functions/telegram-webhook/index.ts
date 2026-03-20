@@ -1914,6 +1914,45 @@ serve(async (req) => {
     // Send queued confirmation with task_id
     await sendMessage(chatId, `📋 Queued: \`${taskId}\``, {}, `task:${taskId}:queued`);
 
+    // ── Pending playlist confirmation: user replied to a vibe-check prompt ──
+    {
+      const { data: pendingRow } = await supabase
+        .from("bot_settings")
+        .select("setting_value")
+        .eq("setting_key", `pending_playlist:${chatId}`)
+        .single();
+      if (pendingRow) {
+        const pending = JSON.parse(pendingRow.setting_value) as { track_name: string; vibe: string };
+        await supabase.from("bot_settings").delete().eq("setting_key", `pending_playlist:${chatId}`);
+        const userContext = text.toLowerCase().trim() === "yes" ? "" : text;
+        const trackLabel = pending.track_name + (userContext ? ` (context: ${userContext})` : "");
+        await sendMessage(chatId, `🔍 Searching playlist opportunities for *${pending.track_name}*…`, {}, `task:${taskId}:playlist-searching`);
+        await supabase.from("tasks").update({
+          status: "running",
+          selected_workflow: "find_playlist_opportunities",
+          result_json: { execution_lane: "lane1_do", progress_step: "playlist_confirmed", track_name: pending.track_name, user_context: userContext || null }
+        }).eq("id", taskId);
+        try {
+          await Promise.race([
+            executeAgenticLoop(chatId, `find playlist opportunities for ${trackLabel}`, {
+              taskId,
+              lane: "lane1_do",
+              allowTools: true,
+              workflowKey: "find_playlist_opportunities",
+              sessionModel: session.active_model as "grok" | "gemini" | "chatgpt"
+            }),
+            new Promise<never>((_, reject) => setTimeout(() => reject(new Error("TIMEOUT")), 55000))
+          ]);
+        } catch (err) {
+          const errMsg = (err as Error).message || "unknown";
+          const failResult = buildFailureResultJson({ execution_lane: "lane1_do" }, errMsg);
+          await supabase.from("tasks").update({ status: "failed", error: errMsg.slice(0, 300), result_json: failResult }).eq("id", taskId);
+          await sendMessage(chatId, `❌ Failed: \`${taskId}\` — ${errMsg.slice(0, 200)}`, {}, `task:${taskId}:failed`);
+        }
+        return new Response("ok");
+      }
+    }
+
     // /start still shows the help menu
     if (text === "/start") {
       await setShortcutAttribution(taskId, "start");
