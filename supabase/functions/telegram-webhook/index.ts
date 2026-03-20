@@ -1914,6 +1914,45 @@ serve(async (req) => {
     // Send queued confirmation with task_id
     await sendMessage(chatId, `📋 Queued: \`${taskId}\``, {}, `task:${taskId}:queued`);
 
+    // ── Pending playlist confirmation: user replied to a vibe-check prompt ──
+    {
+      const { data: pendingRow } = await supabase
+        .from("bot_settings")
+        .select("setting_value")
+        .eq("setting_key", `pending_playlist:${chatId}`)
+        .single();
+      if (pendingRow) {
+        const pending = JSON.parse(pendingRow.setting_value) as { track_name: string; vibe: string };
+        await supabase.from("bot_settings").delete().eq("setting_key", `pending_playlist:${chatId}`);
+        const userContext = text.toLowerCase().trim() === "yes" ? "" : text;
+        const trackLabel = pending.track_name + (userContext ? ` (context: ${userContext})` : "");
+        await sendMessage(chatId, `🔍 Searching playlist opportunities for *${pending.track_name}*…`, {}, `task:${taskId}:playlist-searching`);
+        await supabase.from("tasks").update({
+          status: "running",
+          selected_workflow: "find_playlist_opportunities",
+          result_json: { execution_lane: "lane1_do", progress_step: "playlist_confirmed", track_name: pending.track_name, user_context: userContext || null }
+        }).eq("id", taskId);
+        try {
+          await Promise.race([
+            executeAgenticLoop(chatId, `find playlist opportunities for ${trackLabel}`, {
+              taskId,
+              lane: "lane1_do",
+              allowTools: true,
+              workflowKey: "find_playlist_opportunities",
+              sessionModel: session.active_model as "grok" | "gemini" | "chatgpt"
+            }),
+            new Promise<never>((_, reject) => setTimeout(() => reject(new Error("TIMEOUT")), 55000))
+          ]);
+        } catch (err) {
+          const errMsg = (err as Error).message || "unknown";
+          const failResult = buildFailureResultJson({ execution_lane: "lane1_do" }, errMsg);
+          await supabase.from("tasks").update({ status: "failed", error: errMsg.slice(0, 300), result_json: failResult }).eq("id", taskId);
+          await sendMessage(chatId, `❌ Failed: \`${taskId}\` — ${errMsg.slice(0, 200)}`, {}, `task:${taskId}:failed`);
+        }
+        return new Response("ok");
+      }
+    }
+
     // /start still shows the help menu
     if (text === "/start") {
       await setShortcutAttribution(taskId, "start");
@@ -2298,20 +2337,36 @@ serve(async (req) => {
     const findPlaylistMatch = /find\s+playlist\s+opportunities(\s+for\s+(.+))?/i.exec(lowerText);
     let autoPromotedWorkflow: WorkflowEntry | undefined;
     if (findPlaylistMatch) {
-      console.log("[AUTO_PROMOTE] Matched playlist phrase", { taskId, text, lowerText });
-      if (IMPLEMENTED_WORKFLOW_KEYS.has("find_playlist_opportunities")) {
-        const intentWorkflows = await fetchWorkflowRegistry();
-        const wf = intentWorkflows.find(w => w.key === "find_playlist_opportunities");
-        if (wf) {
-          console.log("[AUTO_PROMOTE] Using workflow find_playlist_opportunities", { taskId, workflowKey: wf.key });
-          autoPromotedWorkflow = wf;
-        } else {
-          console.warn("[AUTO_PROMOTE] Workflow find_playlist_opportunities not found in registry, using synthetic", { taskId });
-          autoPromotedWorkflow = SYNTHETIC_FIND_PLAYLIST_OPPORTUNITIES as any;
-        }
-      } else {
-        console.warn("[AUTO_PROMOTE] find_playlist_opportunities not in IMPLEMENTED_WORKFLOW_KEYS", { taskId });
-      }
+      // ── TWO-STEP CONVERSATIONAL CONFIRMATION ──
+      // Instead of auto-executing, store pending + send vibe-check message
+      const trackName = (findPlaylistMatch[2] || "").trim() || "your track";
+      const vibeGuesses: Record<string, string> = {
+        default: "chill / melodic",
+      };
+      const vibe = vibeGuesses.default;
+      console.log("[PLAYLIST_VIBE_CHECK] Storing pending playlist search", { taskId, trackName, vibe });
+
+      await supabase.from("bot_settings").upsert({
+        setting_key: `pending_playlist:${chatId}`,
+        setting_value: JSON.stringify({ track_name: trackName, vibe }),
+        updated_at: new Date().toISOString(),
+      }, { onConflict: "setting_key" });
+
+      await sendMessage(chatId, [
+        `🎵 Got it — searching playlist opportunities for *${trackName}*.`,
+        ``,
+        `Based on the title, I'm guessing this has a *${vibe}* vibe. Is that right?`,
+        ``,
+        `Add any context about the sound or mood (or just reply *yes*) and I'll start the search.`,
+      ].join("\n"), {}, `task:${taskId}:playlist-vibe-check`);
+
+      await supabase.from("tasks").update({
+        status: "succeeded",
+        selected_workflow: "find_playlist_opportunities",
+        result_json: { execution_lane: "lane1_do", progress_step: "playlist_vibe_check_sent", track_name: trackName, vibe }
+      }).eq("id", taskId);
+      await sendMessage(chatId, `✅ Done: \`${taskId}\``, {}, `task:${taskId}:done`);
+      return new Response("ok");
     }
     if (!autoPromotedWorkflow && hasExecutionIntent) {
       const intentArg = lowerText.replace(/^(run|execute|trigger|start)\s+/, "").trim();
