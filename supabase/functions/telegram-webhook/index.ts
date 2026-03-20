@@ -1126,9 +1126,9 @@ const AGENT_TOOLS: ToolDef[] = [
   },
   {
     name: "find_playlist_opportunities" as const,
-    description: "Research playlist opportunities for a track on Spotify and SoundCloud using sonic neighborhood analysis. Use when asked to find playlists or pitch a track.",
+    description: "Research playlist opportunities for a track on Spotify and SoundCloud using sonic neighborhood analysis. Use when asked to find playlists or pitch a track. [DESTRUCTIVE — requires user confirmation before executing]",
     parameters: { type: "object", properties: { track_name: { type: "string", description: "Track name to research" } }, required: ["track_name"] },
-    destructive: false,
+    destructive: true,
     execute: async (args: { track_name: string }) => {
       const res = await callFanFuelHub("playlist-research", { track_name: args.track_name });
       return JSON.stringify(res);
