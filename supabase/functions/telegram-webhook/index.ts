@@ -1131,8 +1131,6 @@ const AGENT_TOOLS: ToolDef[] = [
       });
     },
   },
-];
-
 /** Infer track title from /do text + recent chat (so /do find_playlist_opportunities still works). */
 function extractPlaylistTrackName(userMessage: string, conversationContext: string): string | null {
   const combined = `${userMessage}\n${conversationContext}`;
