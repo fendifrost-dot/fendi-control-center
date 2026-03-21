@@ -551,6 +551,26 @@ async function setPlaylistConfirm(chatId: string, data: { track_name: string; in
   );
 }
 
+/** Retrieve a pending playlist confirmation from bot_settings, or null. */
+async function getPlaylistConfirm(chatId: string): Promise<{ track_name: string; inferred_vibe: string; created_at: string } | null> {
+  const { data } = await supabase
+    .from("bot_settings")
+    .select("setting_value")
+    .eq("setting_key", `pending_playlist:${chatId}`)
+    .maybeSingle();
+  if (!data) return null;
+  try {
+    return JSON.parse(data.setting_value);
+  } catch {
+    return null;
+  }
+}
+
+/** Remove a pending playlist confirmation from bot_settings. */
+async function clearPlaylistConfirm(chatId: string) {
+  await supabase.from("bot_settings").delete().eq("setting_key", `pending_playlist:${chatId}`);
+}
+
 /** Execute the actual playlist research via FanFuel Hub. */
 /**
  * Calls FanFuel Hub playlist research. Prefer the dedicated playlist-research edge function.
@@ -2593,7 +2613,8 @@ serve(async (req) => {
     if (findPlaylistMatch) {
       // ── TWO-STEP CONVERSATIONAL CONFIRMATION ──
       // Instead of auto-executing, store pending + send vibe-check message
-      const trackName = (findPlaylistMatch[2] || "").trim() || "your track";
+      const forMatch = text.match(/\bfor\s+(.+)/i);
+      const trackName = (forMatch ? forMatch[1] : "").trim() || "your track";
       const vibeGuesses: Record<string, string> = {
         default: "chill / melodic",
       };
