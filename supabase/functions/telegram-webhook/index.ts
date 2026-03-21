@@ -28,6 +28,15 @@ interface WorkflowEntry {
   trigger_phrases: string[]; tools: string[];
 }
 
+// Synthetic workflow for auto-promoted "find playlist opportunities" when DB registry doesn't have it
+const SYNTHETIC_FIND_PLAYLIST_OPPORTUNITIES: WorkflowEntry = {
+  key: "find_playlist_opportunities",
+  name: "Find Playlist Opportunities",
+  description: "Research playlist opportunities for a track on Spotify and SoundCloud.",
+  trigger_phrases: ["find playlist opportunities", "playlist opportunities for"],
+  tools: ["find_playlist_opportunities"],
+};
+
 function _normalizeText(s: string): string {
   return (s ?? "").trim().toLowerCase();
 }
@@ -460,12 +469,19 @@ function systemHealthCheck() {
 // Each tool: { name, description, parameters, destructive, execute }
 // destructive tools require confirmation before execution
 
+/** Passed into tool.execute from the agentic loop (playlist tools use userMessage + conversationContext to infer track_name). */
+interface ToolExecuteContext {
+  chatId?: string;
+  userMessage?: string;
+  conversationContext?: string;
+}
+
 interface ToolDef {
   name: string;
   description: string;
   parameters: Record<string, any>;
   destructive: boolean;
-  execute: (args: any) => Promise<string>;
+  execute: (args: any, context?: ToolExecuteContext) => Promise<string>;
 }
 
 const AGENT_TOOLS: ToolDef[] = [
@@ -1122,17 +1138,64 @@ const AGENT_TOOLS: ToolDef[] = [
   },
   {
     name: "find_playlist_opportunities",
-    description: "Research playlist opportunities for a track on Spotify and SoundCloud using sonic neighborhood analysis. Use when asked to find playlists or pitch a track.",
-    parameters: { type: "object", properties: { track_name: { type: "string", description: "Track name to research" } }, required: ["track_name"] },
+    description:
+      "Research playlist opportunities for a track (FanFuel Hub). If the user has not confirmed a vibe yet, the tool will ask them to confirm in Telegram — do not invent results. When the user already confirmed or provided a vibe, pass user_vibe.",
+    parameters: {
+      type: "object",
+      properties: {
+        track_name: {
+          type: "string",
+          description:
+            "Track title to research. Omit if the user already named the track in the message — the tool infers from the user message and conversation.",
+        },
+        user_vibe: {
+          type: "string",
+          description:
+            "Optional. Confirmed vibe (e.g. west coast chill). Omit on first call if unknown — user will confirm in chat.",
+        },
+      },
+      required: [] as string[],
+    },
     destructive: false,
-    execute: async (args: { track_name?: string }) => {
-      const trackName = args?.track_name || "unknown track";
-      const result = await callFanFuelHub("playlist-research", { track_name: trackName });
-      if (result?.playlists && Array.isArray(result.playlists) && result.playlists.length > 0) {
-        const lines = result.playlists.slice(0, 15).map((p: any, i: number) => `${i + 1}. ${p.name} — ${typeof p.followers === "number" ? p.followers.toLocaleString() : (p.followers ?? "?")} followers`).join("\n");
-        return `Found ${result.playlists.length} playlist opportunities for "${trackName}":\n\n${lines}`;
+    execute: async (args: { track_name?: string; user_vibe?: string }, context?: ToolExecuteContext) => {
+      const trackName = await resolvePlaylistTrackName(args, context);
+      const explicitVibe = args?.user_vibe?.trim();
+
+      if (!trackName) {
+        return [
+          `🎧 *Playlist opportunities*`,
+          ``,
+          `I couldn’t detect a track name from your message.`,
+          `Try: \`/do find_playlist_opportunities\` with the track (e.g. *Meditate by Fendi Frost*) or name the track in your next message.`,
+        ].join("\n");
       }
-      return `Playlist research complete for "${trackName}". Results stored. Check back with "show pitch report".`;
+
+      if (explicitVibe) {
+        return await runPlaylistHubResearch(trackName, explicitVibe);
+      }
+
+      const chatId = context?.chatId;
+      if (!chatId) {
+        const inferred = inferVibeFromTrack(trackName);
+        return await runPlaylistHubResearch(trackName, inferred);
+      }
+
+      const inferred = inferVibeFromTrack(trackName);
+      await setPlaylistConfirm(chatId, {
+        track_name: trackName,
+        inferred_vibe: inferred,
+        created_at: new Date().toISOString(),
+      });
+
+      return [
+        `🎧 *Confirm vibe before playlist search*`,
+        ``,
+        `Track: *${trackName}*`,
+        `Suggested vibe: *${inferred}*`,
+        ``,
+        `Reply *yes*, *y*, or *ok* to use this vibe, or type your own vibe in one message.`,
+        `Send *cancel* to abort.`,
+      ].join("\n");
     },
   },
   {
@@ -1228,16 +1291,150 @@ async function deletePendingAction(actionId: string) {
   await supabase.from("bot_settings").delete().eq("setting_key", `pending_action:${actionId}`);
 }
 
+// ─── Playlist vibe confirmation (two-step) — persisted per chat ───
+function playlistConfirmKey(chatId: string): string {
+  return `playlist_confirm:${chatId}`;
+}
+
+interface PlaylistConfirmState {
+  track_name: string;
+  inferred_vibe: string;
+  created_at: string;
+}
+
+async function getPlaylistConfirm(chatId: string): Promise<PlaylistConfirmState | null> {
+  const { data } = await supabase
+    .from("bot_settings")
+    .select("setting_value")
+    .eq("setting_key", playlistConfirmKey(chatId))
+    .maybeSingle();
+  if (!data?.setting_value) return null;
+  try {
+    return JSON.parse(data.setting_value) as PlaylistConfirmState;
+  } catch {
+    return null;
+  }
+}
+
+async function setPlaylistConfirm(chatId: string, state: PlaylistConfirmState): Promise<void> {
+  await supabase.from("bot_settings").upsert(
+    {
+      setting_key: playlistConfirmKey(chatId),
+      setting_value: JSON.stringify(state),
+      updated_at: new Date().toISOString(),
+    },
+    { onConflict: "setting_key" },
+  );
+}
+
+async function clearPlaylistConfirm(chatId: string): Promise<void> {
+  await supabase.from("bot_settings").delete().eq("setting_key", playlistConfirmKey(chatId));
+}
+
+/** Heuristic vibe label from track title (no external API). */
+function inferVibeFromTrack(trackName: string): string {
+  const t = (trackName || "").toLowerCase();
+  if (/meditat|zen|calm|peace|sleep|ambient|lofi/.test(t)) return "calm / chill / ambient-adjacent";
+  if (/grind|hustle|motivat|money|boss/.test(t)) return "motivational hip-hop / street energy";
+  if (/love|heart|soul|slow/.test(t)) return "R&B / soulful / late-night";
+  return "West Coast hip-hop / smooth soulful lane (Larry June–adjacent)";
+}
+
+async function runPlaylistHubResearch(trackName: string, userVibe: string): Promise<string> {
+  const result = await callFanFuelHub("playlist-research", {
+    track_name: trackName,
+    user_vibe: userVibe,
+  });
+  if (result?.playlists && Array.isArray(result.playlists) && result.playlists.length > 0) {
+    const lines = result.playlists
+      .slice(0, 15)
+      .map(
+        (p: any, i: number) =>
+          `${i + 1}. ${p.name ?? p.playlist_name} — ${
+            typeof p.followers === "number" ? p.followers.toLocaleString() : (p.followers ?? "?")
+          } followers`,
+      )
+      .join("\n");
+    return `Found ${result.playlists.length} playlist opportunities for "${trackName}":\n\n${lines}`;
+  }
+  return `Playlist research complete for "${trackName}" (vibe: ${userVibe}). Results stored. Check back with "show pitch report".`;
+}
+
+/** Infer track title from /do text + recent chat (so /do find_playlist_opportunities still works). */
+function extractPlaylistTrackName(userMessage: string, conversationContext: string): string | null {
+  const combined = `${userMessage}\n${conversationContext}`;
+  // "Title by Artist" (e.g. Meditate by Fendi Frost)
+  const byMatch = combined.match(/\b([A-Za-z0-9][^\n]{0,100}?)\s+by\s+[A-Za-z]/i);
+  if (byMatch) {
+    const t = byMatch[1].trim().replace(/^["']|["']$/g, "");
+    if (t.length >= 1 && t.length <= 120) return t;
+  }
+  // "... for Meditate" / "for TRACK" (end of line, comma, or before by)
+  const forMatch = userMessage.match(
+    /(?:for|about)\s+["']?([^"'\n]+?)["']?(?:\s+by|\s*$|,)/i,
+  );
+  if (forMatch) {
+    const t = forMatch[1].trim();
+    if (t.length >= 1 && t.length <= 120 && !/^(me|the|a|an)$/i.test(t)) return t;
+  }
+  const opp = combined.match(
+    /playlist\s+opportunities?\s+for\s+["']?([^"'\n]+?)["']?(?:\s+by|\s*$|,|\s+)/i,
+  );
+  if (opp) {
+    const t = opp[1].trim();
+    if (t.length >= 1 && t.length <= 120) return t;
+  }
+  const opp2 = combined.match(/find\s+playlist\s+opportunities\s+for\s+["']?([^"'\n]+?)["']?/i);
+  if (opp2) {
+    const t = opp2[1].trim();
+    if (t.length >= 1 && t.length <= 120) return t;
+  }
+  return null;
+}
+
+/** Resolve track title for find_playlist_opportunities when the model omits or sends placeholder track_name. */
+async function resolvePlaylistTrackName(
+  args: { track_name?: string; user_vibe?: string },
+  context?: ToolExecuteContext,
+): Promise<string> {
+  let raw = (args?.track_name || "").trim();
+  if (raw && !/^unknown$/i.test(raw) && raw.toLowerCase() !== "unknown track") {
+    return raw;
+  }
+  const um = context?.userMessage || "";
+  const cc = context?.conversationContext || "";
+  const fromExtract = extractPlaylistTrackName(um, cc);
+  if (fromExtract) return fromExtract;
+  if (context?.chatId) {
+    const conv = cc || (await buildConversationContext(context.chatId));
+    const fromConv = extractPlaylistTrackName(um, conv);
+    if (fromConv) return fromConv;
+  }
+  return "";
+}
+
+function playlistWorkflowSystemAddendum(): string {
+  return `
+PLAYLIST WORKFLOW (ACTIVE — this run is restricted to find_playlist_opportunities):
+- You MUST call the tool find_playlist_opportunities with track_name set to a real song title.
+- If the user only sent a workflow key (e.g. "find_playlist_opportunities"), infer track_name from the Conversation Context below (e.g. messages like "Meditate by Fendi Frost" → track_name "Meditate").
+- Do NOT refuse. Do NOT say you have no tool — find_playlist_opportunities IS available in this workflow.
+- If track_name is truly impossible to infer, call find_playlist_opportunities with track_name "unknown" and the tool will prompt the user.
+`;
+}
+
 // ─── Agentic AI call with tool use ─────────────────────────────
 
 async function agenticGeminiCall(
   userMessage: string,
   docContext: string,
   conversationContext: string,
-  allowedToolNames?: string[]
+  allowedToolNames?: string[],
+  workflowKey?: string,
 ): Promise<{ text: string; toolCalls: Array<{ name: string; args: any }> }> {
+  const playlistBlock = workflowKey === "find_playlist_opportunities" ? playlistWorkflowSystemAddendum() : "";
   const systemPrompt = `You are the ${SYSTEM_IDENTITY}. You serve Fendi Frost as a personal command center assistant.
-
+${playlistBlock}
 CRITICAL RULES — MANDATORY:
 1. NO TOOL, NO CLAIM: You MUST use your available tools to fulfill requests. NEVER describe what you would do — actually call the function. If the user asks to see comments, call the tool. Do NOT respond with text saying "I'll do X" without calling the corresponding function.
 2. NO WORKFLOW, NO ACTION: If the user's request does not correspond to ANY of your available tools, respond with a short message suggesting they run /workflows to see available commands. Never invent workflows.
@@ -1249,6 +1446,7 @@ Available capabilities via tools:
 - Instagram: send DMs, reply to comments, reply to story mentions, view conversations & comments
 - Drive sync, file listing, client summaries
 - Connected project stats
+- FanFuel / playlists: find_playlist_opportunities (research playlists for a track — FanFuel Hub)
 
 Be concise, professional, and use emoji sparingly.
 
@@ -1300,9 +1498,10 @@ async function agenticGrokCall(
   userMessage: string,
   docContext: string,
   conversationContext: string,
-  allowedToolNames?: string[]
+  allowedToolNames?: string[],
+  workflowKey?: string,
 ): Promise<{ text: string; toolCalls: Array<{ name: string; args: any }> }> {
-  const isAutonomousLane = (opts as any)?.lane === "lane3_autonomous";
+  const isAutonomousLane = workflowKey === "free_agent";
   const autonomousPrefix = isAutonomousLane
     ? `🤖 AUTONOMOUS AGENT MODE ACTIVE
 You have full tool access. Your rules:
@@ -1325,7 +1524,8 @@ Systems:
 HARD RULE: propose_plan MUST be called before ingest_drive_clients. After calling propose_plan you MUST stop.
 `
     : "";
-  const systemPrompt = `${autonomousPrefix}You are the ${SYSTEM_IDENTITY}. You serve Fendi Frost as a personal command center assistant.
+  const playlistBlock = workflowKey === "find_playlist_opportunities" ? playlistWorkflowSystemAddendum() : "";
+  const systemPrompt = `${autonomousPrefix}${playlistBlock}You are the ${SYSTEM_IDENTITY}. You serve Fendi Frost as a personal command center assistant.
 
 CRITICAL RULES — MANDATORY:
 1. NO TOOL, NO CLAIM: You MUST use your available tools to fulfill requests. NEVER describe what you would do — actually call the function. If the user asks to see comments, call the tool. Do NOT respond with text saying "I'll do X" without calling the corresponding function.
@@ -1338,6 +1538,7 @@ Available capabilities via tools:
 - Instagram: send DMs, reply to comments, reply to story mentions, view conversations & comments
 - Drive sync, file listing, client summaries
 - Connected project stats
+- FanFuel / playlists: find_playlist_opportunities (research playlists for a track)
 
 Be witty, direct, and concise. Use emoji sparingly.
 
@@ -1397,19 +1598,6 @@ async function logToolAttempt(requestId: string, toolName: string, args: any, mo
   }).select("id").single();
   if (error || !data) {
     console.error("FATAL: Failed to create tool_execution_logs row", error);
-    if (toolName === "find_playlist_opportunities") {
-      const res = await callFanFuelHub("playlist-research", { track_name: toolInput.track_name });
-      toolResult = JSON.stringify(res);
-    } else if (toolName === "get_pitch_report") {
-      const res = await callFanFuelHub("control-center-api", { action: "get_pitch_log", track_name: toolInput.track_name });
-      toolResult = JSON.stringify(res);
-    } else if (toolName === "send_playlist_pitch") {
-      const res = await callFanFuelHub("control-center-api", { action: "send_pitch_email", ...toolInput });
-      toolResult = JSON.stringify(res);
-    } else if (toolName === "update_pitch_status") {
-      const res = await callFanFuelHub("control-center-api", { action: "update_pitch_status", ...toolInput });
-      toolResult = JSON.stringify(res);
-    }
     throw new Error(`Execution logging failed for ${toolName}: no log row created`);
   }
   return data.id;
@@ -1497,7 +1685,13 @@ async function executeAgenticLoop(chatId: string, userMessage: string, opts: { t
 
   // ── LOAD TOOLS FROM WORKFLOW ──
   const workflows = await fetchWorkflowRegistry();
-  const matchedWorkflow = workflows.find(w => w.key === opts.workflowKey);
+  let matchedWorkflow = workflows.find(w => w.key === opts.workflowKey);
+
+  // Allow known implemented workflows when registry doesn't have them (e.g. find_playlist_opportunities in Lovable)
+  if (!matchedWorkflow && opts.workflowKey === "find_playlist_opportunities" && IMPLEMENTED_WORKFLOW_KEYS.has("find_playlist_opportunities")) {
+    matchedWorkflow = SYNTHETIC_FIND_PLAYLIST_OPPORTUNITIES;
+    console.log(JSON.stringify({ ts: Date.now(), event: "workflow_synthetic_fallback", key: opts.workflowKey, taskId: opts.taskId }));
+  }
 
   // ── VALIDATE WORKFLOW EXISTS ──
   if (!matchedWorkflow) {
@@ -1526,9 +1720,27 @@ async function executeAgenticLoop(chatId: string, userMessage: string, opts: { t
 
   // Step 1: Get AI response with workflow-scoped tool calls
   logEvent({ event: "ai_call_start", taskId: opts.taskId, model, workflow: opts.workflowKey });
-  const result = model === "grok"
-    ? await agenticGrokCall(userMessage, docContext, conversationContext, workflowToolNames)
-    : await agenticGeminiCall(userMessage, docContext, conversationContext, workflowToolNames);
+
+  // Deterministic playlist run: if we can infer track from chat, skip LLM refusal paths
+  let result: { text: string; toolCalls: Array<{ name: string; args: any }> };
+  if (opts.workflowKey === "find_playlist_opportunities") {
+    const inferredTrack = extractPlaylistTrackName(userMessage, conversationContext);
+    if (inferredTrack) {
+      logEvent({ event: "playlist_track_inferred", taskId: opts.taskId, inferredTrack });
+      result = {
+        text: "",
+        toolCalls: [{ name: "find_playlist_opportunities", args: { track_name: inferredTrack } }],
+      };
+    } else {
+      result = model === "grok"
+        ? await agenticGrokCall(userMessage, docContext, conversationContext, workflowToolNames, opts.workflowKey)
+        : await agenticGeminiCall(userMessage, docContext, conversationContext, workflowToolNames, opts.workflowKey);
+    }
+  } else {
+    result = model === "grok"
+      ? await agenticGrokCall(userMessage, docContext, conversationContext, workflowToolNames, opts.workflowKey)
+      : await agenticGeminiCall(userMessage, docContext, conversationContext, workflowToolNames, opts.workflowKey);
+  }
   logEvent({ event: "ai_response", taskId: opts.taskId, workflow: opts.workflowKey, model, toolCalls: result.toolCalls.length, hasText: !!result.text });
   await supabase.from("tasks").update({ result_json: { progress_step: "E_ai_done", tool_count: result.toolCalls.length, execution_lock: lockId } }).eq("id", opts.taskId);
 
@@ -1611,7 +1823,7 @@ async function executeAgenticLoop(chatId: string, userMessage: string, opts: { t
       // Execute immediately with telemetry
       const toolStart = Date.now();
       try {
-        const output = await tool.execute(tc.args);
+        const output = await tool.execute(tc.args, { chatId, userMessage, conversationContext });
         const toolDuration = Date.now() - toolStart;
         await logToolSuccess(logId, output, startedAt);
         console.log(JSON.stringify({ event: "tool_execution", tool: tc.name, workflow: opts.workflowKey, duration_ms: toolDuration, taskId: opts.taskId, ts: Date.now() }));
@@ -1913,6 +2125,89 @@ serve(async (req) => {
     // Determine if this is an explicit model request (for requested_model field only — no mutation)
     const modelRequestMatch = text.match(/^\/model\s+(grok|gemini|chatgpt)$/i);
     const requestedModel = modelRequestMatch ? modelRequestMatch[1].toLowerCase() : null;
+
+    // ── Pending playlist vibe: handle BEFORE task row + lane routing (so Lane 2 never steals yes/cancel) ──
+    const pendingPlaylistEarly = await getPlaylistConfirm(chatId);
+    if (pendingPlaylistEarly) {
+      const lower = text.toLowerCase().trim();
+      const clearAndContinue =
+        lower.startsWith("/do ") ||
+        lower === "/start" ||
+        lower.startsWith("/workflows") ||
+        lower.startsWith("/metrics") ||
+        lower.startsWith("/triage") ||
+        lower.startsWith("/status") ||
+        lower.startsWith("/help") ||
+        lower === "/ping" ||
+        lower.startsWith("/resend") ||
+        lower.startsWith("/model");
+
+      if (clearAndContinue) {
+        await clearPlaylistConfirm(chatId);
+        // fall through: one task + normal routing
+      } else if (lower === "cancel" || lower === "no" || lower === "/playlist_cancel") {
+        try {
+          taskId = await createTaskRow(session.id, text, requestedModel);
+          _currentTaskId = taskId;
+        } catch (taskErr) {
+          console.error("FATAL: task creation failed:", taskErr);
+          await sendMessage(chatId, `🚨 *${SYSTEM_IDENTITY}* — Task creation failed: ${String(taskErr)}`);
+          return new Response("ok");
+        }
+        await sendMessage(chatId, `📋 Queued: \`${taskId}\``, {}, `task:${taskId}:queued`);
+        await clearPlaylistConfirm(chatId);
+        await sendMessage(chatId, `🎧 Playlist search cancelled.`, {}, `task:${taskId}:playlist-cancel`);
+        await supabase.from("tasks").update({ status: "succeeded", result_json: { shortcut: "playlist_confirm_cancel" } }).eq("id", taskId);
+        await sendMessage(chatId, `✅ Done: \`${taskId}\``, {}, `task:${taskId}:done`);
+        _currentTaskId = null;
+        return new Response("ok");
+      } else {
+        const isYes = /^(yes|y|confirm|ok|go|approve)$/i.test(text.trim());
+        const userVibe = isYes ? pendingPlaylistEarly.inferred_vibe : text.trim();
+        try {
+          taskId = await createTaskRow(session.id, text, requestedModel);
+          _currentTaskId = taskId;
+        } catch (taskErr) {
+          console.error("FATAL: task creation failed:", taskErr);
+          await sendMessage(chatId, `🚨 *${SYSTEM_IDENTITY}* — Task creation failed: ${String(taskErr)}`);
+          return new Response("ok");
+        }
+        await sendMessage(chatId, `📋 Queued: \`${taskId}\``, {}, `task:${taskId}:queued`);
+        if (!userVibe) {
+          await sendMessage(chatId, "Reply *yes* to use the suggested vibe, or type your own vibe. Send *cancel* to abort.");
+          await supabase.from("tasks").update({ status: "succeeded", result_json: { shortcut: "playlist_confirm_prompt" } }).eq("id", taskId);
+          await sendMessage(chatId, `✅ Done: \`${taskId}\``, {}, `task:${taskId}:done`);
+          _currentTaskId = null;
+          return new Response("ok");
+        }
+        await clearPlaylistConfirm(chatId);
+        const modelForPlaylist = (session.active_model === "grok" ? "grok" : "gemini") as "grok" | "gemini";
+        try {
+          const out = await runPlaylistHubResearch(pendingPlaylistEarly.track_name, userVibe);
+          await sendMessage(chatId, formatAssistantMessage(modelForPlaylist, out), {}, `task:${taskId}:playlist-result`);
+        } catch (e) {
+          const errStr = e instanceof Error ? e.message : String(e);
+          await sendMessage(chatId, formatAssistantMessage(modelForPlaylist, `❌ ${errStr}`), {}, `task:${taskId}:playlist-err`);
+        }
+        await appendConversationTurn(chatId, {
+          role: "user",
+          content: text,
+          model: modelForPlaylist,
+          at: new Date().toISOString(),
+        });
+        await supabase.from("tasks").update({
+          status: "succeeded",
+          result_json: {
+            shortcut: "playlist_confirm_execute",
+            track: pendingPlaylistEarly.track_name,
+            user_vibe: userVibe,
+          },
+        }).eq("id", taskId);
+        await sendMessage(chatId, `✅ Done: \`${taskId}\``, {}, `task:${taskId}:done`);
+        _currentTaskId = null;
+        return new Response("ok");
+      }
+    }
 
     try {
       taskId = await createTaskRow(session.id, text, requestedModel);
@@ -2307,10 +2602,16 @@ serve(async (req) => {
     const EXECUTION_INTENT_PREFIXES = ["run ", "execute ", "trigger ", "start "];
     const lowerText = text.toLowerCase().trim();
     const hasExecutionIntent = EXECUTION_INTENT_PREFIXES.some(p => lowerText.startsWith(p));
-    const findPlaylistMatch = /find\s+playlist\s+opportunities(\s+for\s+(.+))?/i.exec(lowerText);
+    // Match natural phrasing: "find playlist opportunities for X", "search playlist opportunities for", etc.
+    const findPlaylistRequested =
+      /\bfind\s+playlist\s+opportunities\b/i.test(lowerText) ||
+      /\bsearch\s+playlist\s+opportunities\s+for\s+/i.test(lowerText) ||
+      /\bplaylist\s+opportunities\s+for\s+/i.test(lowerText) ||
+      (/\bplaylist\s+opportunities\b/i.test(lowerText) && /\bfor\s+\S+/i.test(lowerText)) ||
+      /\bfind\s+playlists?\s+for\s+/i.test(lowerText);
 
     let autoPromotedWorkflow: WorkflowEntry | undefined;
-    if (findPlaylistMatch) {
+    if (findPlaylistRequested) {
       console.log("[AUTO_PROMOTE] Matched playlist phrase", {
         taskId,
         text,
@@ -2321,20 +2622,15 @@ serve(async (req) => {
         const intentWorkflows = await fetchWorkflowRegistry();
         const wf = intentWorkflows.find(w => w.key === "find_playlist_opportunities");
         if (wf) {
-          console.log("[AUTO_PROMOTE] Using workflow find_playlist_opportunities", {
-            taskId,
-            workflowKey: wf.key,
-          });
+          console.log("[AUTO_PROMOTE] Using workflow find_playlist_opportunities from registry", { taskId, workflowKey: wf.key });
           autoPromotedWorkflow = wf;
         } else {
-          console.warn("[AUTO_PROMOTE] Workflow find_playlist_opportunities implemented but not found in registry", {
-            taskId,
-          });
+          // Registry missing workflow (e.g. Lovable DB) — use synthetic so we still route to Lane 1
+          console.log("[AUTO_PROMOTE] Using synthetic find_playlist_opportunities (not in registry)", { taskId });
+          autoPromotedWorkflow = SYNTHETIC_FIND_PLAYLIST_OPPORTUNITIES;
         }
       } else {
-        console.warn("[AUTO_PROMOTE] find_playlist_opportunities not in IMPLEMENTED_WORKFLOW_KEYS", {
-          taskId,
-        });
+        console.warn("[AUTO_PROMOTE] find_playlist_opportunities not in IMPLEMENTED_WORKFLOW_KEYS", { taskId });
       }
     }
     if (!autoPromotedWorkflow && hasExecutionIntent) {
@@ -2673,14 +2969,25 @@ async function callFanFuelHub(functionName: string, body: any) {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
+      // FanFuel Hub's `control-center-api` authenticates using `x-api-key`.
+      "x-api-key": key,
+      // Keep these for compatibility with other deployments/endpoints.
       "Authorization": `Bearer ${key}`,
       "apikey": key,
     },
     body: JSON.stringify(body),
   });
+  const raw = await resp.text();
   if (!resp.ok) {
-    const err = await resp.text();
-    throw new Error(`FanFuel Hub error ${resp.status}: ${err.slice(0, 200)}`);
+    throw new Error(`FanFuel Hub error ${resp.status}: ${raw.slice(0, 500)}`);
   }
-  return resp.json();
+  // Avoid opaque JSON parse errors: Hub must return JSON; if not, surface first bytes for debugging.
+  try {
+    return raw.length ? JSON.parse(raw) : {};
+  } catch (e) {
+    const preview = raw.slice(0, 120).replace(/\s+/g, " ");
+    throw new Error(
+      `FanFuel Hub returned non-JSON (HTTP ${resp.status}): ${preview}${raw.length > 120 ? "…" : ""}`
+    );
+  }
 }
