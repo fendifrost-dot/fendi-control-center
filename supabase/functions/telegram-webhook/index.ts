@@ -1131,54 +1131,6 @@ const AGENT_TOOLS: ToolDef[] = [
       });
     },
   },
-/** Infer track title from /do text + recent chat (so /do find_playlist_opportunities still works). */
-function extractPlaylistTrackName(userMessage: string, conversationContext: string): string | null {
-  const combined = `${userMessage}\n${conversationContext}`;
-  const byMatch = combined.match(/\b([A-Za-z0-9][^\n]{0,100}?)\s+by\s+[A-Za-z]/i);
-  if (byMatch) {
-    const t = byMatch[1].trim().replace(/^["']|["']$/g, "");
-    if (t.length >= 1 && t.length <= 120) return t;
-  }
-  const forMatch = userMessage.match(/(?:for|about)\s+["']?([^"'\n]+?)["']?(?:\s+by|\s*$|,)/i);
-  if (forMatch) {
-    const t = forMatch[1].trim();
-    if (t.length >= 1 && t.length <= 120 && !/^(me|the|a|an)$/i.test(t)) return t;
-  }
-  const opp = combined.match(/playlist\s+opportunities?\s+for\s+["']?([^"'\n]+?)["']?(?:\s+by|\s*$|,|\s+)/i);
-  if (opp) {
-    const t = opp[1].trim();
-    if (t.length >= 1 && t.length <= 120) return t;
-  }
-  const opp2 = combined.match(/find\s+playlist\s+opportunities\s+for\s+["']?([^"'\n]+?)["']?/i);
-  if (opp2) {
-    const t = opp2[1].trim();
-    if (t.length >= 1 && t.length <= 120) return t;
-  }
-  return null;
-}
-
-/** Resolve track title for find_playlist_opportunities when the model omits or sends placeholder track_name. */
-async function resolvePlaylistTrackName(
-  args: { track_name?: string; user_vibe?: string },
-  context?: ToolExecuteContext,
-): Promise<string> {
-  let raw = (args?.track_name || "").trim();
-  if (raw && !/^unknown$/i.test(raw) && raw.toLowerCase() !== "unknown track") {
-    return raw;
-  }
-  const um = context?.userMessage || "";
-  const cc = context?.conversationContext || "";
-  const fromExtract = extractPlaylistTrackName(um, cc);
-  if (fromExtract) return fromExtract;
-  if (context?.chatId) {
-    const conv = cc || (await buildConversationContext(context.chatId));
-    const fromConv = extractPlaylistTrackName(um, conv);
-    if (fromConv) return fromConv;
-  }
-  return "";
-}
-
-
   {
     name: "find_playlist_opportunities",
     description:
