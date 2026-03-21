@@ -2252,11 +2252,10 @@ serve(async (req) => {
     const lowerText = text.toLowerCase().trim();
 
     // ══════════════════════════════════════════════════════════
-    // INTENT-BASED LANE 1 AUTO-PROMOTION (early — before shortcuts/Lane 2)
-    // Phrases like "Find playlist opportunities for Meditate" must not fall through to assistant mode.
+    // PLAYLIST INTENT — deterministic (NO executeAgenticLoop / NO Lane 2 Grok)
+    // Natural language: extract track → setPlaylistConfirm → vibe question → return.
+    // /do find_playlist_opportunities is handled later in the /do → Lane 1 path.
     // ══════════════════════════════════════════════════════════
-    const EXECUTION_INTENT_PREFIXES = ["run ", "execute ", "trigger ", "start "];
-    const hasExecutionIntent = EXECUTION_INTENT_PREFIXES.some(p => lowerText.startsWith(p));
     const findPlaylistRequested =
       /\bfind\s+playlist\s+opportunities\b/i.test(lowerText) ||
       /\bsearch\s+playlist\s+opportunities\s+for\s+/i.test(lowerText) ||
@@ -2264,28 +2263,71 @@ serve(async (req) => {
       (/\bplaylist\s+opportunities\b/i.test(lowerText) && /\bfor\s+\S+/i.test(lowerText)) ||
       /\bfind\s+playlists?\s+for\s+/i.test(lowerText);
 
-    let autoPromotedWorkflow: WorkflowEntry | undefined;
-    if (findPlaylistRequested) {
-      console.log("[AUTO_PROMOTE] Matched playlist phrase", {
-        taskId,
-        text,
-        lowerText,
-      });
-      if (IMPLEMENTED_WORKFLOW_KEYS.has("find_playlist_opportunities")) {
-        const intentWorkflows = await fetchWorkflowRegistry();
-        const wf = intentWorkflows.find(w => w.key === "find_playlist_opportunities");
-        if (wf) {
-          console.log("[AUTO_PROMOTE] Using workflow find_playlist_opportunities from registry", { taskId, workflowKey: wf.key });
-          autoPromotedWorkflow = wf;
-        } else {
-          console.log("[AUTO_PROMOTE] Using synthetic find_playlist_opportunities (not in registry)", { taskId });
-          autoPromotedWorkflow = SYNTHETIC_FIND_PLAYLIST_OPPORTUNITIES;
-        }
-      } else {
-        console.warn("[AUTO_PROMOTE] find_playlist_opportunities not in IMPLEMENTED_WORKFLOW_KEYS", { taskId });
+    if (
+      findPlaylistRequested &&
+      IMPLEMENTED_WORKFLOW_KEYS.has("find_playlist_opportunities") &&
+      !lowerText.startsWith("/do")
+    ) {
+      const conv = await buildConversationContext(chatId);
+      const trackNl = extractPlaylistTrackName(text, conv);
+      const modelNl = (session.active_model === "grok" ? "grok" : "gemini") as "grok" | "gemini";
+
+      if (trackNl) {
+        const inferredNl = inferVibeFromTrack(trackNl);
+        await setPlaylistConfirm(chatId, {
+          track_name: trackNl,
+          inferred_vibe: inferredNl,
+          created_at: new Date().toISOString(),
+        });
+        const vibePrompt = [
+          `🎧 *Confirm vibe before playlist search*`,
+          ``,
+          `Track: *${trackNl}*`,
+          `Suggested vibe: *${inferredNl}*`,
+          ``,
+          `Reply *yes*, *y*, or *ok* to use this vibe, or type your own vibe in one message.`,
+          `Send *cancel* to abort.`,
+        ].join("\n");
+        console.log("[PLAYLIST_NL] vibe prompt (deterministic)", { taskId, track: trackNl });
+        await sendMessage(chatId, formatAssistantMessage(modelNl, vibePrompt), {}, `task:${taskId}:playlist-vibe-prompt`);
+        await supabase.from("tasks").update({
+          status: "succeeded",
+          result_json: {
+            execution_lane: "playlist_nl",
+            shortcut: "playlist_vibe_prompt_natural",
+            track: trackNl,
+          },
+        }).eq("id", taskId);
+        await sendMessage(chatId, `✅ Done: \`${taskId}\``, {}, `task:${taskId}:done`);
+        _currentTaskId = null;
+        return new Response("ok");
       }
+
+      const needTrack = [
+        `🎧 *Playlist opportunities*`,
+        ``,
+        `I need a *track name* in your message.`,
+        `Example: *Find playlist opportunities for Meditate by Fendi Frost*.`,
+      ].join("\n");
+      await sendMessage(chatId, formatAssistantMessage(modelNl, needTrack), {}, `task:${taskId}:playlist-need-track`);
+      await supabase.from("tasks").update({
+        status: "succeeded",
+        result_json: { execution_lane: "playlist_nl", shortcut: "playlist_need_track_natural" },
+      }).eq("id", taskId);
+      await sendMessage(chatId, `✅ Done: \`${taskId}\``, {}, `task:${taskId}:done`);
+      _currentTaskId = null;
+      return new Response("ok");
     }
-    if (!autoPromotedWorkflow && hasExecutionIntent) {
+
+    // ══════════════════════════════════════════════════════════
+    // INTENT-BASED LANE 1 AUTO-PROMOTION (early — before shortcuts/Lane 2)
+    // "Run / execute / start …" → other workflows (playlist NL handled above).
+    // ══════════════════════════════════════════════════════════
+    const EXECUTION_INTENT_PREFIXES = ["run ", "execute ", "trigger ", "start "];
+    const hasExecutionIntent = EXECUTION_INTENT_PREFIXES.some(p => lowerText.startsWith(p));
+
+    let autoPromotedWorkflow: WorkflowEntry | undefined;
+    if (hasExecutionIntent) {
       const intentArg = lowerText.replace(/^(run|execute|trigger|start)\s+/, "").trim();
       const intentWorkflows = await fetchWorkflowRegistry();
       const { chosen: intentChosen } = _matchWorkflows(intentArg, intentWorkflows);
