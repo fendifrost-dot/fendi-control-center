@@ -479,6 +479,91 @@ interface ToolDef {
   execute: (args: any, context?: ToolExecuteContext) => Promise<string>;
 }
 
+/** Infer track title from /do text + recent chat. */
+function extractPlaylistTrackName(userMessage: string, conversationContext: string): string | null {
+  const combined = `${userMessage}\n${conversationContext}`;
+  const byMatch = combined.match(/\b([A-Za-z0-9][^\n]{0,100}?)\s+by\s+[A-Za-z]/i);
+  if (byMatch) {
+    const t = byMatch[1].trim().replace(/^["']|["']$/g, "");
+    if (t.length >= 1 && t.length <= 120) return t;
+  }
+  const forMatch = userMessage.match(/(?:for|about)\s+["']?([^"'\n]+?)["']?(?:\s+by|\s*$|,)/i);
+  if (forMatch) {
+    const t = forMatch[1].trim();
+    if (t.length >= 1 && t.length <= 120 && !/^(me|the|a|an)$/i.test(t)) return t;
+  }
+  const opp = combined.match(/playlist\s+opportunities?\s+for\s+["']?([^"'\n]+?)["']?(?:\s+by|\s*$|,|\s+)/i);
+  if (opp) {
+    const t = opp[1].trim();
+    if (t.length >= 1 && t.length <= 120) return t;
+  }
+  const opp2 = combined.match(/find\s+playlist\s+opportunities\s+for\s+["']?([^"'\n]+?)["']?/i);
+  if (opp2) {
+    const t = opp2[1].trim();
+    if (t.length >= 1 && t.length <= 120) return t;
+  }
+  return null;
+}
+
+/** Resolve track title for find_playlist_opportunities when the model omits or sends placeholder track_name. */
+async function resolvePlaylistTrackName(
+  args: { track_name?: string; user_vibe?: string },
+  context?: ToolExecuteContext,
+): Promise<string> {
+  let raw = (args?.track_name || "").trim();
+  if (raw && !/^unknown$/i.test(raw) && raw.toLowerCase() !== "unknown track") {
+    return raw;
+  }
+  const um = context?.userMessage || "";
+  const cc = context?.conversationContext || "";
+  const fromExtract = extractPlaylistTrackName(um, cc);
+  if (fromExtract) return fromExtract;
+  if (context?.chatId) {
+    const conv = cc || (await buildConversationContext(context.chatId));
+    const fromConv = extractPlaylistTrackName(um, conv);
+    if (fromConv) return fromConv;
+  }
+  return "";
+}
+
+/** Guess a vibe/mood keyword from the track name. */
+function inferVibeFromTrack(trackName: string): string {
+  const lower = trackName.toLowerCase();
+  if (/chill|vibe|wave|float|drift|ease/i.test(lower)) return "chill / lo-fi";
+  if (/fire|lit|heat|bang|hype|turn/i.test(lower)) return "energetic / hype";
+  if (/rain|cry|pain|hurt|blue|lone|miss/i.test(lower)) return "melancholic / emotional";
+  if (/love|kiss|heart|babe|honey/i.test(lower)) return "romantic / R&B";
+  if (/grind|hustle|money|boss|drip/i.test(lower)) return "motivational / trap";
+  if (/night|dark|shadow|smoke|fog/i.test(lower)) return "dark / atmospheric";
+  return "chill / melodic";
+}
+
+/** Store a pending playlist confirmation in bot_settings. */
+async function setPlaylistConfirm(chatId: string, data: { track_name: string; inferred_vibe: string; created_at: string }) {
+  await supabase.from("bot_settings").upsert(
+    {
+      setting_key: `pending_playlist:${chatId}`,
+      setting_value: JSON.stringify(data),
+      updated_at: new Date().toISOString(),
+    },
+    { onConflict: "setting_key" },
+  );
+}
+
+/** Execute the actual playlist research via FanFuel Hub. */
+async function runPlaylistHubResearch(trackName: string, vibe: string): Promise<string> {
+  try {
+    const res = await callFanFuelHub("control-center-api", {
+      action: "find_playlist_opportunities",
+      track_name: trackName,
+      vibe,
+    });
+    return typeof res === "string" ? res : JSON.stringify(res);
+  } catch (err: any) {
+    return JSON.stringify({ error: true, message: err?.message || "FanFuel Hub call failed" });
+  }
+}
+
 const AGENT_TOOLS: ToolDef[] = [
   {
     name: "get_system_status",
@@ -1131,54 +1216,6 @@ const AGENT_TOOLS: ToolDef[] = [
       });
     },
   },
-/** Infer track title from /do text + recent chat (so /do find_playlist_opportunities still works). */
-function extractPlaylistTrackName(userMessage: string, conversationContext: string): string | null {
-  const combined = `${userMessage}\n${conversationContext}`;
-  const byMatch = combined.match(/\b([A-Za-z0-9][^\n]{0,100}?)\s+by\s+[A-Za-z]/i);
-  if (byMatch) {
-    const t = byMatch[1].trim().replace(/^["']|["']$/g, "");
-    if (t.length >= 1 && t.length <= 120) return t;
-  }
-  const forMatch = userMessage.match(/(?:for|about)\s+["']?([^"'\n]+?)["']?(?:\s+by|\s*$|,)/i);
-  if (forMatch) {
-    const t = forMatch[1].trim();
-    if (t.length >= 1 && t.length <= 120 && !/^(me|the|a|an)$/i.test(t)) return t;
-  }
-  const opp = combined.match(/playlist\s+opportunities?\s+for\s+["']?([^"'\n]+?)["']?(?:\s+by|\s*$|,|\s+)/i);
-  if (opp) {
-    const t = opp[1].trim();
-    if (t.length >= 1 && t.length <= 120) return t;
-  }
-  const opp2 = combined.match(/find\s+playlist\s+opportunities\s+for\s+["']?([^"'\n]+?)["']?/i);
-  if (opp2) {
-    const t = opp2[1].trim();
-    if (t.length >= 1 && t.length <= 120) return t;
-  }
-  return null;
-}
-
-/** Resolve track title for find_playlist_opportunities when the model omits or sends placeholder track_name. */
-async function resolvePlaylistTrackName(
-  args: { track_name?: string; user_vibe?: string },
-  context?: ToolExecuteContext,
-): Promise<string> {
-  let raw = (args?.track_name || "").trim();
-  if (raw && !/^unknown$/i.test(raw) && raw.toLowerCase() !== "unknown track") {
-    return raw;
-  }
-  const um = context?.userMessage || "";
-  const cc = context?.conversationContext || "";
-  const fromExtract = extractPlaylistTrackName(um, cc);
-  if (fromExtract) return fromExtract;
-  if (context?.chatId) {
-    const conv = cc || (await buildConversationContext(context.chatId));
-    const fromConv = extractPlaylistTrackName(um, conv);
-    if (fromConv) return fromConv;
-  }
-  return "";
-}
-
-
   {
     name: "find_playlist_opportunities",
     description:
