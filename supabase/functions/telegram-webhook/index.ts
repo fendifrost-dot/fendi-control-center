@@ -1,5 +1,6 @@
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
 
+
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.49.1";
 
 const BOT_TOKEN = Deno.env.get("FendiAIbot")!;
@@ -551,17 +552,44 @@ async function setPlaylistConfirm(chatId: string, data: { track_name: string; in
 }
 
 /** Execute the actual playlist research via FanFuel Hub. */
-async function runPlaylistHubResearch(trackName: string, vibe: string): Promise<string> {
+/**
+ * Calls FanFuel Hub playlist research. Prefer the dedicated playlist-research edge function.
+ * Override edge name with FANFUEL_HUB_PLAYLIST_FN if your project uses a different function name.
+ */
+async function runPlaylistHubResearch(trackName: string, userVibe: string): Promise<string> {
+  const body = { track_name: trackName, user_vibe: userVibe };
+  const edgeName = (Deno.env.get("FANFUEL_HUB_PLAYLIST_FN") || "playlist-research").trim();
+  let result: any;
   try {
-    const res = await callFanFuelHub("control-center-api", {
-      action: "find_playlist_opportunities",
-      track_name: trackName,
-      vibe,
-    });
-    return typeof res === "string" ? res : JSON.stringify(res);
-  } catch (err: any) {
-    return JSON.stringify({ error: true, message: err?.message || "FanFuel Hub call failed" });
+    result = await callFanFuelHub(edgeName, body);
+  } catch (e1) {
+    const m = e1 instanceof Error ? e1.message : String(e1);
+    if (/404|not found|Unknown action|FunctionsHttpError|502|503/i.test(m)) {
+      try {
+        result = await callFanFuelHub("control-center-api", {
+          action: "playlist_research",
+          track_name: trackName,
+          user_vibe: userVibe,
+        });
+      } catch {
+        console.error("[runPlaylistHubResearch] primary failed:", m);
+        throw e1;
+      }
+    } else {
+      throw e1;
+    }
   }
+  if (result && result.playlists && Array.isArray(result.playlists) && result.playlists.length > 0) {
+    const lines = result.playlists
+      .slice(0, 15)
+      .map((p: any, i: number) =>
+        (i + 1) + ". " + (p.name || p.playlist_name) + " — " +
+        (typeof p.followers === "number" ? p.followers.toLocaleString() : (p.followers || "?")) + " followers"
+      )
+      .join("\n");
+    return 'Found ' + result.playlists.length + ' playlist opportunities for "' + trackName + '":\n\n' + lines;
+  }
+  return 'Playlist research complete for "' + trackName + '" (vibe: ' + userVibe + '). Results stored. Check back with "show pitch report".';
 }
 
 const AGENT_TOOLS: ToolDef[] = [
@@ -2040,6 +2068,88 @@ serve(async (req) => {
     // Determine if this is an explicit model request (for requested_model field only — no mutation)
     const modelRequestMatch = text.match(/^\/model\s+(grok|gemini|chatgpt)$/i);
     const requestedModel = modelRequestMatch ? modelRequestMatch[1].toLowerCase() : null;
+
+    // ── Pending playlist vibe: handle BEFORE task row + lane routing (so Lane 2 never steals yes/cancel) ──
+    const pendingPlaylistEarly = await getPlaylistConfirm(chatId);
+    if (pendingPlaylistEarly) {
+      const lower = text.toLowerCase().trim();
+      const clearAndContinue =
+        lower.startsWith("/do ") ||
+        lower === "/start" ||
+        lower.startsWith("/workflows") ||
+        lower.startsWith("/metrics") ||
+        lower.startsWith("/triage") ||
+        lower.startsWith("/status") ||
+        lower.startsWith("/help") ||
+        lower === "/ping" ||
+        lower.startsWith("/resend") ||
+        lower.startsWith("/model");
+      if (clearAndContinue) {
+        await clearPlaylistConfirm(chatId);
+        // fall through: one task + normal routing
+      } else if (lower === "cancel" || lower === "no" || lower === "/playlist_cancel") {
+        try {
+          taskId = await createTaskRow(session.id, text, requestedModel);
+          _currentTaskId = taskId;
+        } catch (taskErr) {
+          console.error("FATAL: task creation failed:", taskErr);
+          await sendMessage(chatId, `🚨 *${SYSTEM_IDENTITY}* — Task creation failed: ${String(taskErr)}`);
+          return new Response("ok");
+        }
+        await sendMessage(chatId, `📋 Queued: \`${taskId}\``, {}, `task:${taskId}:queued`);
+        await clearPlaylistConfirm(chatId);
+        await sendMessage(chatId, `🎧 Playlist search cancelled.`, {}, `task:${taskId}:playlist-cancel`);
+        await supabase.from("tasks").update({ status: "succeeded", result_json: { shortcut: "playlist_confirm_cancel" } }).eq("id", taskId);
+        await sendMessage(chatId, `✅ Done: \`${taskId}\``, {}, `task:${taskId}:done`);
+        _currentTaskId = null;
+        return new Response("ok");
+      } else {
+        const isYes = /^(yes|y|confirm|ok|go|approve)$/i.test(text.trim());
+        const userVibe = isYes ? pendingPlaylistEarly.inferred_vibe : text.trim();
+        try {
+          taskId = await createTaskRow(session.id, text, requestedModel);
+          _currentTaskId = taskId;
+        } catch (taskErr) {
+          console.error("FATAL: task creation failed:", taskErr);
+          await sendMessage(chatId, `🚨 *${SYSTEM_IDENTITY}* — Task creation failed: ${String(taskErr)}`);
+          return new Response("ok");
+        }
+        await sendMessage(chatId, `📋 Queued: \`${taskId}\``, {}, `task:${taskId}:queued`);
+        if (!userVibe) {
+          await sendMessage(chatId, "Reply *yes* to use the suggested vibe, or type your own vibe. Send *cancel* to abort.");
+          await supabase.from("tasks").update({ status: "succeeded", result_json: { shortcut: "playlist_confirm_prompt" } }).eq("id", taskId);
+          await sendMessage(chatId, `✅ Done: \`${taskId}\``, {}, `task:${taskId}:done`);
+          _currentTaskId = null;
+          return new Response("ok");
+        }
+        await clearPlaylistConfirm(chatId);
+        const modelForPlaylist = (session.active_model === "grok" ? "grok" : "gemini") as "grok" | "gemini";
+        try {
+          const out = await runPlaylistHubResearch(pendingPlaylistEarly.track_name, userVibe);
+          await sendMessage(chatId, formatAssistantMessage(modelForPlaylist, out), {}, `task:${taskId}:playlist-result`);
+        } catch (e) {
+          const errStr = e instanceof Error ? e.message : String(e);
+          await sendMessage(chatId, formatAssistantMessage(modelForPlaylist, `❌ ${errStr}`), {}, `task:${taskId}:playlist-err`);
+        }
+        await appendConversationTurn(chatId, {
+          role: "user",
+          content: text,
+          model: modelForPlaylist,
+          at: new Date().toISOString(),
+        });
+        await supabase.from("tasks").update({
+          status: "succeeded",
+          result_json: {
+            shortcut: "playlist_confirm_execute",
+            track: pendingPlaylistEarly.track_name,
+            user_vibe: userVibe,
+          },
+        }).eq("id", taskId);
+        await sendMessage(chatId, `✅ Done: \`${taskId}\``, {}, `task:${taskId}:done`);
+        _currentTaskId = null;
+        return new Response("ok");
+      }
+    }
 
     try {
       taskId = await createTaskRow(session.id, text, requestedModel);
