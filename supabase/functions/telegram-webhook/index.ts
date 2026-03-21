@@ -1340,11 +1340,38 @@ function inferVibeFromTrack(trackName: string): string {
   return "West Coast hip-hop / smooth soulful lane (Larry June–adjacent)";
 }
 
+/**
+ * Calls FanFuel Hub playlist research. Prefer the dedicated `playlist-research` edge function with body
+ * `{ track_name, user_vibe }` only — do NOT route this through control-center-api using the tool name as
+ * `action` (Hub reports "Unknown action: findplaylistopportunities" when misrouted).
+ * Override edge name with FANFUEL_HUB_PLAYLIST_FN if your project uses a different function name.
+ */
 async function runPlaylistHubResearch(trackName: string, userVibe: string): Promise<string> {
-  const result = await callFanFuelHub("playlist-research", {
-    track_name: trackName,
-    user_vibe: userVibe,
-  });
+  const body = { track_name: trackName, user_vibe: userVibe };
+  const edgeName = (Deno.env.get("FANFUEL_HUB_PLAYLIST_FN") || "playlist-research").trim();
+
+  let result: any;
+  try {
+    result = await callFanFuelHub(edgeName, body);
+  } catch (e1) {
+    const m = e1 instanceof Error ? e1.message : String(e1);
+    // Some Hub deployments only expose playlist via control-center-api with a fixed action name.
+    if (/404|not found|Unknown action|FunctionsHttpError|502|503/i.test(m)) {
+      try {
+        result = await callFanFuelHub("control-center-api", {
+          action: "playlist_research",
+          track_name: trackName,
+          user_vibe: userVibe,
+        });
+      } catch {
+        console.error("[runPlaylistHubResearch] primary failed:", m, "fallback playlist_research failed");
+        throw e1;
+      }
+    } else {
+      throw e1;
+    }
+  }
+
   if (result?.playlists && Array.isArray(result.playlists) && result.playlists.length > 0) {
     const lines = result.playlists
       .slice(0, 15)
@@ -2221,6 +2248,82 @@ serve(async (req) => {
     // Send queued confirmation with task_id
     await sendMessage(chatId, `📋 Queued: \`${taskId}\``, {}, `task:${taskId}:queued`);
 
+    // Normalized text for intent routing (auto-promote + autonomous mode). Must run before Lane 2.
+    const lowerText = text.toLowerCase().trim();
+
+    // ══════════════════════════════════════════════════════════
+    // INTENT-BASED LANE 1 AUTO-PROMOTION (early — before shortcuts/Lane 2)
+    // Phrases like "Find playlist opportunities for Meditate" must not fall through to assistant mode.
+    // ══════════════════════════════════════════════════════════
+    const EXECUTION_INTENT_PREFIXES = ["run ", "execute ", "trigger ", "start "];
+    const hasExecutionIntent = EXECUTION_INTENT_PREFIXES.some(p => lowerText.startsWith(p));
+    const findPlaylistRequested =
+      /\bfind\s+playlist\s+opportunities\b/i.test(lowerText) ||
+      /\bsearch\s+playlist\s+opportunities\s+for\s+/i.test(lowerText) ||
+      /\bplaylist\s+opportunities\s+for\s+/i.test(lowerText) ||
+      (/\bplaylist\s+opportunities\b/i.test(lowerText) && /\bfor\s+\S+/i.test(lowerText)) ||
+      /\bfind\s+playlists?\s+for\s+/i.test(lowerText);
+
+    let autoPromotedWorkflow: WorkflowEntry | undefined;
+    if (findPlaylistRequested) {
+      console.log("[AUTO_PROMOTE] Matched playlist phrase", {
+        taskId,
+        text,
+        lowerText,
+      });
+      if (IMPLEMENTED_WORKFLOW_KEYS.has("find_playlist_opportunities")) {
+        const intentWorkflows = await fetchWorkflowRegistry();
+        const wf = intentWorkflows.find(w => w.key === "find_playlist_opportunities");
+        if (wf) {
+          console.log("[AUTO_PROMOTE] Using workflow find_playlist_opportunities from registry", { taskId, workflowKey: wf.key });
+          autoPromotedWorkflow = wf;
+        } else {
+          console.log("[AUTO_PROMOTE] Using synthetic find_playlist_opportunities (not in registry)", { taskId });
+          autoPromotedWorkflow = SYNTHETIC_FIND_PLAYLIST_OPPORTUNITIES;
+        }
+      } else {
+        console.warn("[AUTO_PROMOTE] find_playlist_opportunities not in IMPLEMENTED_WORKFLOW_KEYS", { taskId });
+      }
+    }
+    if (!autoPromotedWorkflow && hasExecutionIntent) {
+      const intentArg = lowerText.replace(/^(run|execute|trigger|start)\s+/, "").trim();
+      const intentWorkflows = await fetchWorkflowRegistry();
+      const { chosen: intentChosen } = _matchWorkflows(intentArg, intentWorkflows);
+      if (intentChosen && IMPLEMENTED_WORKFLOW_KEYS.has(intentChosen.key)) {
+        autoPromotedWorkflow = intentChosen;
+      }
+    }
+
+    if (autoPromotedWorkflow) {
+      console.log("[AUTO_PROMOTE] Routing to Lane 1", {
+        taskId,
+        workflowKey: autoPromotedWorkflow.key,
+      });
+      await supabase.from("tasks").update({
+        status: "running",
+        selected_workflow: autoPromotedWorkflow.key,
+        result_json: { execution_lane: "lane1_do", progress_step: "lane1_auto_promoted", auto_promoted: true },
+      }).eq("id", taskId);
+      try {
+        await Promise.race([
+          executeAgenticLoop(chatId, text, {
+            taskId,
+            lane: "lane1_do",
+            allowTools: true,
+            workflowKey: autoPromotedWorkflow.key,
+            sessionModel: session.active_model as "grok" | "gemini" | "chatgpt",
+          }),
+          new Promise<never>((_, reject) => setTimeout(() => reject(new Error("TIMEOUT")), 55000)),
+        ]);
+      } catch (err) {
+        const errMsg = (err as Error).message || "unknown";
+        const failResult = buildFailureResultJson({ execution_lane: "lane1_do" }, errMsg);
+        await supabase.from("tasks").update({ status: "failed", error: errMsg.slice(0, 300), result_json: failResult }).eq("id", taskId);
+        await sendMessage(chatId, `❌ Failed: \`${taskId}\` — ${errMsg.slice(0, 200)}`, {}, `task:${taskId}:failed`);
+      }
+      return new Response("ok");
+    }
+
     // /start still shows the help menu
     if (text === "/start") {
       await setShortcutAttribution(taskId, "start");
@@ -2592,83 +2695,6 @@ serve(async (req) => {
         await sendMessage(chatId, `❌ Failed: \`${taskId}\` — ${errMsg.slice(0, 200)}`);
       }
       _currentTaskId = null;
-      return new Response("ok");
-    }
-
-    // ══════════════════════════════════════════════════════════
-    // INTENT-BASED LANE 1 AUTO-PROMOTION
-    // Natural language like "run system status" or "find playlist opportunities for X" auto-routes to Lane 1
-    // ══════════════════════════════════════════════════════════
-    const EXECUTION_INTENT_PREFIXES = ["run ", "execute ", "trigger ", "start "];
-    const lowerText = text.toLowerCase().trim();
-    const hasExecutionIntent = EXECUTION_INTENT_PREFIXES.some(p => lowerText.startsWith(p));
-    // Match natural phrasing: "find playlist opportunities for X", "search playlist opportunities for", etc.
-    const findPlaylistRequested =
-      /\bfind\s+playlist\s+opportunities\b/i.test(lowerText) ||
-      /\bsearch\s+playlist\s+opportunities\s+for\s+/i.test(lowerText) ||
-      /\bplaylist\s+opportunities\s+for\s+/i.test(lowerText) ||
-      (/\bplaylist\s+opportunities\b/i.test(lowerText) && /\bfor\s+\S+/i.test(lowerText)) ||
-      /\bfind\s+playlists?\s+for\s+/i.test(lowerText);
-
-    let autoPromotedWorkflow: WorkflowEntry | undefined;
-    if (findPlaylistRequested) {
-      console.log("[AUTO_PROMOTE] Matched playlist phrase", {
-        taskId,
-        text,
-        lowerText,
-      });
-      // If user asks to "find playlist opportunities ..." and the workflow is implemented, auto-promote directly
-      if (IMPLEMENTED_WORKFLOW_KEYS.has("find_playlist_opportunities")) {
-        const intentWorkflows = await fetchWorkflowRegistry();
-        const wf = intentWorkflows.find(w => w.key === "find_playlist_opportunities");
-        if (wf) {
-          console.log("[AUTO_PROMOTE] Using workflow find_playlist_opportunities from registry", { taskId, workflowKey: wf.key });
-          autoPromotedWorkflow = wf;
-        } else {
-          // Registry missing workflow (e.g. Lovable DB) — use synthetic so we still route to Lane 1
-          console.log("[AUTO_PROMOTE] Using synthetic find_playlist_opportunities (not in registry)", { taskId });
-          autoPromotedWorkflow = SYNTHETIC_FIND_PLAYLIST_OPPORTUNITIES;
-        }
-      } else {
-        console.warn("[AUTO_PROMOTE] find_playlist_opportunities not in IMPLEMENTED_WORKFLOW_KEYS", { taskId });
-      }
-    }
-    if (!autoPromotedWorkflow && hasExecutionIntent) {
-      const intentArg = lowerText.replace(/^(run|execute|trigger|start)\s+/, "").trim();
-      const intentWorkflows = await fetchWorkflowRegistry();
-      const { chosen: intentChosen } = _matchWorkflows(intentArg, intentWorkflows);
-      if (intentChosen && IMPLEMENTED_WORKFLOW_KEYS.has(intentChosen.key)) {
-        autoPromotedWorkflow = intentChosen;
-      }
-    }
-
-    if (autoPromotedWorkflow) {
-      console.log("[AUTO_PROMOTE] Routing to Lane 1", {
-        taskId,
-        workflowKey: autoPromotedWorkflow.key,
-      });
-      await supabase.from("tasks").update({
-        status: "running",
-        selected_workflow: autoPromotedWorkflow.key,
-        result_json: { execution_lane: "lane1_do", progress_step: "lane1_auto_promoted", auto_promoted: true }
-      }).eq("id", taskId);
-      try {
-        await Promise.race([
-          executeAgenticLoop(chatId, text, {
-            taskId,
-            lane: "lane1_do",
-            allowTools: true,
-            workflowKey: autoPromotedWorkflow.key,
-            sessionModel: session.active_model as "grok" | "gemini" | "chatgpt"
-          }),
-          new Promise<never>((_, reject) => setTimeout(() => reject(new Error("TIMEOUT")), 55000))
-        ]);
-      } catch (err) {
-        const errMsg = (err as Error).message || "unknown";
-        const failResult = buildFailureResultJson({ execution_lane: "lane1_do" }, errMsg);
-        await supabase.from("tasks").update({ status: "failed", error: errMsg.slice(0, 300), result_json: failResult }).eq("id", taskId);
-        await sendMessage(chatId, `❌ Failed: \`${taskId}\` — ${errMsg.slice(0, 200)}`, {}, `task:${taskId}:failed`);
-      }
       return new Response("ok");
     }
 
