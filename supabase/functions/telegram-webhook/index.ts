@@ -1,4 +1,5 @@
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
+
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.49.1";
 
 const BOT_TOKEN = Deno.env.get("FendiAIbot")!;
@@ -464,12 +465,18 @@ function systemHealthCheck() {
 // Each tool: { name, description, parameters, destructive, execute }
 // destructive tools require confirmation before execution
 
+interface ToolExecuteContext {
+  chatId?: string;
+  userMessage?: string;
+  conversationContext?: string;
+}
+
 interface ToolDef {
   name: string;
   description: string;
   parameters: Record<string, any>;
   destructive: boolean;
-  execute: (args: any) => Promise<string>;
+  execute: (args: any, context?: ToolExecuteContext) => Promise<string>;
 }
 
 const AGENT_TOOLS: ToolDef[] = [
@@ -1124,14 +1131,109 @@ const AGENT_TOOLS: ToolDef[] = [
       });
     },
   },
+/** Infer track title from /do text + recent chat (so /do find_playlist_opportunities still works). */
+function extractPlaylistTrackName(userMessage: string, conversationContext: string): string | null {
+  const combined = `${userMessage}\n${conversationContext}`;
+  const byMatch = combined.match(/\b([A-Za-z0-9][^\n]{0,100}?)\s+by\s+[A-Za-z]/i);
+  if (byMatch) {
+    const t = byMatch[1].trim().replace(/^["']|["']$/g, "");
+    if (t.length >= 1 && t.length <= 120) return t;
+  }
+  const forMatch = userMessage.match(/(?:for|about)\s+["']?([^"'\n]+?)["']?(?:\s+by|\s*$|,)/i);
+  if (forMatch) {
+    const t = forMatch[1].trim();
+    if (t.length >= 1 && t.length <= 120 && !/^(me|the|a|an)$/i.test(t)) return t;
+  }
+  const opp = combined.match(/playlist\s+opportunities?\s+for\s+["']?([^"'\n]+?)["']?(?:\s+by|\s*$|,|\s+)/i);
+  if (opp) {
+    const t = opp[1].trim();
+    if (t.length >= 1 && t.length <= 120) return t;
+  }
+  const opp2 = combined.match(/find\s+playlist\s+opportunities\s+for\s+["']?([^"'\n]+?)["']?/i);
+  if (opp2) {
+    const t = opp2[1].trim();
+    if (t.length >= 1 && t.length <= 120) return t;
+  }
+  return null;
+}
+
+/** Resolve track title for find_playlist_opportunities when the model omits or sends placeholder track_name. */
+async function resolvePlaylistTrackName(
+  args: { track_name?: string; user_vibe?: string },
+  context?: ToolExecuteContext,
+): Promise<string> {
+  let raw = (args?.track_name || "").trim();
+  if (raw && !/^unknown$/i.test(raw) && raw.toLowerCase() !== "unknown track") {
+    return raw;
+  }
+  const um = context?.userMessage || "";
+  const cc = context?.conversationContext || "";
+  const fromExtract = extractPlaylistTrackName(um, cc);
+  if (fromExtract) return fromExtract;
+  if (context?.chatId) {
+    const conv = cc || (await buildConversationContext(context.chatId));
+    const fromConv = extractPlaylistTrackName(um, conv);
+    if (fromConv) return fromConv;
+  }
+  return "";
+}
+
+
   {
-    name: "find_playlist_opportunities" as const,
-    description: "Research playlist opportunities for a track on Spotify and SoundCloud using sonic neighborhood analysis. Use when asked to find playlists or pitch a track. [DESTRUCTIVE — requires user confirmation before executing]",
-    parameters: { type: "object", properties: { track_name: { type: "string", description: "Track name to research" } }, required: ["track_name"] },
-    destructive: true,
-    execute: async (args: { track_name: string }) => {
-      const res = await callFanFuelHub("playlist-research", { track_name: args.track_name });
-      return JSON.stringify(res);
+    name: "find_playlist_opportunities",
+    description:
+      "Research playlist opportunities for a track (FanFuel Hub). If the user has not confirmed a vibe yet, the tool will ask them to confirm in Telegram — do not invent results. When the user already confirmed or provided a vibe, pass user_vibe.",
+    parameters: {
+      type: "object",
+      properties: {
+        track_name: {
+          type: "string",
+          description:
+            "Track title to research. Omit if the user already named the track in the message — the tool infers from the user message and conversation.",
+        },
+        user_vibe: {
+          type: "string",
+          description:
+            "Optional. Confirmed vibe (e.g. west coast chill). Omit on first call if unknown — user will confirm in chat.",
+        },
+      },
+      required: [] as string[],
+    },
+    destructive: false,
+    execute: async (args: { track_name?: string; user_vibe?: string }, context?: ToolExecuteContext) => {
+      const trackName = await resolvePlaylistTrackName(args, context);
+      const explicitVibe = args?.user_vibe?.trim();
+      if (!trackName) {
+        return [
+          `🎧 *Playlist opportunities*`,
+          ``,
+          `I couldn't detect a track name from your message.`,
+          `Try: \`/do find_playlist_opportunities\` with the track (e.g. *Meditate by Fendi Frost*) or name the track in your next message.`,
+        ].join("\n");
+      }
+      if (explicitVibe) {
+        return await runPlaylistHubResearch(trackName, explicitVibe);
+      }
+      const chatId = context?.chatId;
+      if (!chatId) {
+        const inferred = inferVibeFromTrack(trackName);
+        return await runPlaylistHubResearch(trackName, inferred);
+      }
+      const inferred = inferVibeFromTrack(trackName);
+      await setPlaylistConfirm(chatId, {
+        track_name: trackName,
+        inferred_vibe: inferred,
+        created_at: new Date().toISOString(),
+      });
+      return [
+        `🎧 *Confirm vibe before playlist search*`,
+        ``,
+        `Track: *${trackName}*`,
+        `Suggested vibe: *${inferred}*`,
+        ``,
+        `Reply *yes*, *y*, or *ok* to use this vibe, or type your own vibe in one message.`,
+        `Send *cancel* to abort.`,
+      ].join("\n");
     },
   },
   {
@@ -1599,7 +1701,7 @@ async function executeAgenticLoop(chatId: string, userMessage: string, opts: { t
       // Execute immediately with telemetry
       const toolStart = Date.now();
       try {
-        const output = await tool.execute(tc.args);
+        const output = await tool.execute(tc.args, { chatId, userMessage, conversationContext });
         const toolDuration = Date.now() - toolStart;
         await logToolSuccess(logId, output, startedAt);
         console.log(JSON.stringify({ event: "tool_execution", tool: tc.name, workflow: opts.workflowKey, duration_ms: toolDuration, taskId: opts.taskId, ts: Date.now() }));
@@ -2334,7 +2436,12 @@ serve(async (req) => {
     const EXECUTION_INTENT_PREFIXES = ["run ", "execute ", "trigger ", "start "];
     const lowerText = text.toLowerCase().trim();
     const hasExecutionIntent = EXECUTION_INTENT_PREFIXES.some(p => lowerText.startsWith(p));
-    const findPlaylistMatch = /find\s+playlist\s+opportunities(\s+for\s+(.+))?/i.exec(lowerText);
+    const findPlaylistMatch =
+      /\bfind\s+playlist\s+opportunities\b/i.test(lowerText) ||
+      /\bsearch\s+playlist\s+opportunities\s+for\s+/i.test(lowerText) ||
+      /\bplaylist\s+opportunities\s+for\s+/i.test(lowerText) ||
+      (/\bplaylist\s+opportunities\b/i.test(lowerText) && /\bfor\s+\S+/i.test(lowerText)) ||
+      /\bfind\s+playlists?\s+for\s+/i.test(lowerText);
     let autoPromotedWorkflow: WorkflowEntry | undefined;
     if (findPlaylistMatch) {
       // ── TWO-STEP CONVERSATIONAL CONFIRMATION ──
