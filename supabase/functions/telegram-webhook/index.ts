@@ -564,7 +564,7 @@ async function runPlaylistHubResearch(trackName: string, vibe: string): Promise<
   }
 }
 
-
+const AGENT_TOOLS: ToolDef[] = [
   {
     name: "get_system_status",
     description: "Get overall system status: document counts, pending approvals, active/failed jobs, and current AI model.",
