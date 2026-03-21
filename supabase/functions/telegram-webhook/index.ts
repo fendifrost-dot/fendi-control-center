@@ -2613,7 +2613,8 @@ serve(async (req) => {
     if (findPlaylistMatch) {
       // ── TWO-STEP CONVERSATIONAL CONFIRMATION ──
       // Instead of auto-executing, store pending + send vibe-check message
-      const trackName = (findPlaylistMatch[2] || "").trim() || "your track";
+      const forMatch = text.match(/\bfor\s+(.+)/i);
+      const trackName = (forMatch ? forMatch[1] : "").trim() || "your track";
       const vibeGuesses: Record<string, string> = {
         default: "chill / melodic",
       };
