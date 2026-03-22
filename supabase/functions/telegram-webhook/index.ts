@@ -1,6 +1,7 @@
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
 
 
+
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.49.1";
 
 const BOT_TOKEN = Deno.env.get("FendiAIbot")!;
@@ -601,7 +602,7 @@ async function runPlaylistHubResearch(trackName: string, userVibe: string): Prom
   }
   if (result && result.playlists && Array.isArray(result.playlists) && result.playlists.length > 0) {
     const lines = result.playlists
-      .slice(0, 15)
+      .slice(0, 20)
       .map((p: any, i: number) =>
         (i + 1) + ". " + (p.name || p.playlist_name) + " — " +
         (typeof p.followers === "number" ? p.followers.toLocaleString() : (p.followers || "?")) + " followers"
@@ -2630,9 +2631,13 @@ serve(async (req) => {
       await sendMessage(chatId, [
         `🎵 Got it — searching playlist opportunities for *${trackName}*.`,
         ``,
-        `Based on the title, I'm guessing this has a *${vibe}* vibe. Is that right?`,
+        `🎵 To find the right playlists for *${trackName}*, tell me:`,
         ``,
-        `Add any context about the sound or mood (or just reply *yes*) and I'll start the search.`,
+        `1️⃣ *Genre/subgenre* — e.g. chill trap, drill, conscious rap, west coast`,
+        `2️⃣ *Similar artists or features* — e.g. Larry June, FBG Duck`,
+        `3️⃣ *Mood/theme* — e.g. spiritual, street, introspective, healing`,
+        ``,
+        `Just reply with whatever fits. More detail = better results.`,
       ].join("\n"), {}, `task:${taskId}:playlist-vibe-check`);
 
       await supabase.from("tasks").update({
