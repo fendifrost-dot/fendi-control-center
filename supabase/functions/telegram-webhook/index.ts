@@ -22,7 +22,7 @@ const IMPLEMENTED_WORKFLOW_KEYS = new Set([
     "active_jobs_summary", "document_ingestion_processing",
     "drive_ingest", "free_agent",
     "find_playlist_opportunities", "get_pitch_report", "send_playlist_pitch", "update_pitch_status"
-]);
+, "analyze_client_credit", "get_client_report", "generate_dispute_letters"]);
 
 // Synthetic workflow entry for find_playlist_opportunities (fallback when registry is empty)
 const SYNTHETIC_FIND_PLAYLIST_OPPORTUNITIES = {
@@ -1350,6 +1350,221 @@ const AGENT_TOOLS: ToolDef[] = [
     execute: async (args: any) => {
       const res = await callFanFuelHub("control-center-api", { action: "update_pitch_status", ...args });
       return JSON.stringify(res);
+    },
+  },
+  {
+    name: "analyze_client_credit",
+    description: "Sync Google Drive files for a client and run the full credit analysis pipeline. Use when Fendi asks to analyze, check, process, or run credit reports for a client like Nicholas, Corey, or Lamonze.",
+    parameters: {
+      client_name: { type: "string", description: "Client name (e.g. 'Nicholas', 'Corey', 'Lamonze')" },
+    },
+    destructive: false,
+    execute: async (params: any) => {
+      const { client_name } = params;
+      const ANON_KEY = Deno.env.get("SUPABASE_PUBLISHABLE_KEY") || SUPABASE_SERVICE_ROLE_KEY;
+      // 1. Trigger drive-sync to pull latest files from Google Drive
+      const syncResp = await fetch(SUPABASE_URL + "/functions/v1/drive-sync", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: "Bearer " + ANON_KEY },
+        body: JSON.stringify({}),
+      });
+      const syncResult = syncResp.ok ? await syncResp.json() : { error: await syncResp.text() };
+      // 2. Find client by name
+      const { data: clients } = await supabase
+        .from("clients")
+        .select("id, name")
+        .ilike("name", "%" + client_name + "%")
+        .limit(5);
+      if (!clients || clients.length === 0) {
+        return JSON.stringify({ error: "No client found matching '" + client_name + "'. Drive sync ran: " + JSON.stringify(syncResult) });
+      }
+      const client = clients[0];
+      // 3. Count and trigger process-document for queued jobs
+      const { count: queuedCount } = await supabase
+        .from("ingestion_jobs")
+        .select("id", { count: "exact", head: true })
+        .eq("client_id", client.id)
+        .eq("status", "queued");
+      let processed = 0;
+      const toProcess = Math.min(queuedCount || 0, 8);
+      for (let i = 0; i < toProcess; i++) {
+        const procResp = await fetch(SUPABASE_URL + "/functions/v1/process-document", {
+          method: "POST",
+          headers: { "Content-Type": "application/json", Authorization: "Bearer " + ANON_KEY },
+          body: JSON.stringify({}),
+        });
+        if (procResp.ok) processed++;
+      }
+      // 4. Return summary
+      const { count: obsCount } = await supabase
+        .from("observations")
+        .select("id", { count: "exact", head: true })
+        .eq("client_id", client.id);
+      const { data: docs } = await supabase
+        .from("documents")
+        .select("file_name, status, bureau, doc_type")
+        .eq("client_id", client.id)
+        .order("updated_at", { ascending: false })
+        .limit(10);
+      return JSON.stringify({
+        client: client.name,
+        client_id: client.id,
+        drive_sync_result: syncResult,
+        processing_jobs_triggered: processed,
+        jobs_queued_before_sync: queuedCount || 0,
+        total_observations_on_file: obsCount || 0,
+        recent_documents: (docs || []).map((d: any) => ({ name: d.file_name, status: d.status, bureau: d.bureau, type: d.doc_type })),
+      });
+    },
+  },
+  {
+    name: "get_client_report",
+    description: "Get a full credit analysis summary for a client - negative tradelines, hard inquiries, public records, bureaus covered. Use when asked to show, read, or summarize a client's credit data.",
+    parameters: {
+      client_name: { type: "string", description: "Client name (e.g. 'Nicholas', 'Corey', 'Lamonze')" },
+      bureau: { type: "string", description: "Optional: filter by bureau - equifax, experian, transunion" },
+    },
+    destructive: false,
+    execute: async (params: any) => {
+      const { client_name, bureau } = params;
+      const { data: clients } = await supabase
+        .from("clients")
+        .select("id, name")
+        .ilike("name", "%" + client_name + "%")
+        .limit(3);
+      if (!clients || clients.length === 0) {
+        return JSON.stringify({ error: "No client found matching '" + client_name + "'. Run analyze_client_credit first." });
+      }
+      const client = clients[0];
+      let docsQuery = supabase
+        .from("documents")
+        .select("id, file_name, bureau, doc_type, status, report_date")
+        .eq("client_id", client.id)
+        .eq("doc_type", "credit_report");
+      if (bureau) docsQuery = (docsQuery as any).eq("bureau", bureau.toLowerCase());
+      const { data: docs } = await (docsQuery as any).order("report_date", { ascending: false });
+      const { data: negTradelines } = await supabase
+        .from("observations")
+        .select("object_key, field_name, field_value_text, evidence_snippet")
+        .eq("client_id", client.id)
+        .eq("object_type", "tradeline")
+        .or("field_value_text.ilike.%late%,field_value_text.ilike.%charge off%,field_value_text.ilike.%collection%,field_value_text.ilike.%derogatory%,field_value_text.ilike.%past due%")
+        .limit(40);
+      const { count: hardInqCount } = await supabase
+        .from("observations")
+        .select("id", { count: "exact", head: true })
+        .eq("client_id", client.id)
+        .eq("object_type", "inquiry")
+        .eq("field_name", "inquiry_type")
+        .eq("field_value_text", "hard");
+      const { data: pubRecs } = await supabase
+        .from("observations")
+        .select("object_key, field_name, field_value_text")
+        .eq("client_id", client.id)
+        .eq("object_type", "public_record")
+        .limit(10);
+      const negByAccount: Record<string, any[]> = {};
+      for (const obs of negTradelines || []) {
+        if (!negByAccount[obs.object_key]) negByAccount[obs.object_key] = [];
+        negByAccount[obs.object_key].push({ field: obs.field_name, value: obs.field_value_text });
+      }
+      return JSON.stringify({
+        client: client.name,
+        documents_processed: docs?.length || 0,
+        bureaus_covered: [...new Set((docs || []).map((d: any) => d.bureau).filter(Boolean))],
+        negative_tradeline_count: Object.keys(negByAccount).length,
+        negative_tradelines: Object.entries(negByAccount).slice(0, 20).map(([key, items]) => ({ account: key, issues: items })),
+        hard_inquiries: hardInqCount || 0,
+        public_records_count: pubRecs?.length || 0,
+        public_record_details: pubRecs || [],
+        documents: docs || [],
+      });
+    },
+  },
+  {
+    name: "generate_dispute_letters",
+    description: "Generate professional FCRA-compliant credit dispute letters for a client based on their analyzed credit data. Creates one letter per bureau targeting all negative items found.",
+    parameters: {
+      client_name: { type: "string", description: "Client name (e.g. 'Nicholas', 'Corey', 'Lamonze')" },
+      bureau: { type: "string", description: "Optional: target one bureau - equifax, experian, transunion. Leave blank for all bureaus." },
+    },
+    destructive: false,
+    execute: async (params: any) => {
+      const { client_name, bureau } = params;
+      const { data: clients } = await supabase
+        .from("clients")
+        .select("id, name")
+        .ilike("name", "%" + client_name + "%")
+        .limit(3);
+      if (!clients || clients.length === 0) {
+        return JSON.stringify({ error: "No client found matching '" + client_name + "'" });
+      }
+      const client = clients[0];
+      const { data: personalObs } = await supabase
+        .from("observations")
+        .select("field_name, field_value_text")
+        .eq("client_id", client.id)
+        .eq("object_type", "personal_info")
+        .in("field_name", ["full_name", "address", "dob"]);
+      const personalInfo: Record<string, string> = {};
+      for (const obs of personalObs || []) personalInfo[obs.field_name] = obs.field_value_text;
+      const { data: negObs } = await supabase
+        .from("observations")
+        .select("object_key, field_name, field_value_text, document_id")
+        .eq("client_id", client.id)
+        .eq("object_type", "tradeline")
+        .or("field_value_text.ilike.%late%,field_value_text.ilike.%charge off%,field_value_text.ilike.%collection%,field_value_text.ilike.%derogatory%,field_value_text.ilike.%past due%")
+        .limit(60);
+      const { data: creditDocs } = await supabase
+        .from("documents")
+        .select("id, bureau")
+        .eq("client_id", client.id)
+        .eq("doc_type", "credit_report");
+      const docBureau: Record<string, string> = {};
+      for (const d of creditDocs || []) docBureau[d.id] = d.bureau;
+      const byBureau: Record<string, Record<string, string[]>> = {};
+      for (const obs of negObs || []) {
+        const b = docBureau[obs.document_id] || "unknown";
+        if (bureau && b !== bureau.toLowerCase()) continue;
+        if (!byBureau[b]) byBureau[b] = {};
+        if (!byBureau[b][obs.object_key]) byBureau[b][obs.object_key] = [];
+        byBureau[b][obs.object_key].push(obs.field_name + ": " + obs.field_value_text);
+      }
+      if (Object.keys(byBureau).length === 0) {
+        return JSON.stringify({ error: "No negative items found. Run analyze_client_credit first to process credit files." });
+      }
+      const bureauAddresses: Record<string, string> = {
+        equifax: "Equifax Information Services LLC\nP.O. Box 740256\nAtlanta, GA 30374-0256",
+        experian: "Experian\nP.O. Box 4500\nAllen, TX 75013",
+        transunion: "TransUnion LLC Consumer Dispute Center\nP.O. Box 2000\nChester, PA 19016",
+      };
+      const letters: any[] = [];
+      for (const [bur, accountMap] of Object.entries(byBureau)) {
+        const disputeItems = Object.entries(accountMap)
+          .map(([acct, issues]) => "Account: " + acct + "\n  Issues: " + issues.join(", "))
+          .join("\n\n");
+        const clientName = personalInfo.full_name || client.name;
+        const clientAddress = personalInfo.address || "[Client Address]";
+        const today = new Date().toLocaleDateString("en-US", { year: "numeric", month: "long", day: "numeric" });
+        const prompt = "Generate a professional credit dispute letter.\n\nClient: " + clientName + "\nClient Address: " + clientAddress + "\nDate: " + today + "\n\nBureau: " + bur.toUpperCase() + "\nBureau Address:\n" + (bureauAddresses[bur] || "[Bureau Address]") + "\n\nNegative items to dispute:\n" + disputeItems + "\n\nInstructions: Write a firm, professional dispute letter citing the Fair Credit Reporting Act (FCRA) Section 611. State that each item is being disputed as inaccurate or unverifiable. Request investigation and removal or correction of each item. Request written response within 30 days. Format as a complete ready-to-send letter.";
+        const geminiUrl = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=" + GEMINI_KEY;
+        const geminiResp = await fetch(geminiUrl, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            contents: [{ role: "user", parts: [{ text: prompt }] }],
+            generationConfig: { maxOutputTokens: 2048 },
+          }),
+        });
+        if (geminiResp.ok) {
+          const geminiData = await geminiResp.json();
+          const letterText = geminiData.candidates?.[0]?.content?.parts?.[0]?.text || "Failed to generate letter";
+          letters.push({ bureau: bur, accounts_disputed: Object.keys(accountMap).length, letter: letterText });
+        } else {
+          letters.push({ bureau: bur, error: "Gemini error: " + geminiResp.status });
+        }
+      }
+      return JSON.stringify({ client: client.name, letters_generated: letters.length, letters });
     },
   }
 ];
