@@ -25,6 +25,11 @@ const IMPLEMENTED_WORKFLOW_KEYS = new Set([
   "get_client_report",
   "generate_dispute_letters",
   "query_credit_compass",
+  "get_tax_status",
+  "get_tax_transactions",
+  "get_tax_documents",
+  "get_tax_discrepancies",
+  "query_cc_tax",
 ]);
 
 // ─── Workflow registry fetch ────────────────────────────────────
@@ -1111,16 +1116,17 @@ const AGENT_TOOLS: ToolDef[] = [
       assessment_id?: string;
     }) => {
       const { action, client_name, client_id, assessment_id } = params;
+      // Set in Control Center Edge secrets to the Credit Compass project URL (https://….supabase.co). Find it: Lovable → Credit Compass → Cloud → Secrets / connection details, or fight-plan repo `src/integrations/supabase/client.ts` (VITE_SUPABASE_URL).
       const CREDIT_COMPASS_URL = Deno.env.get("CREDIT_COMPASS_URL");
       if (!CREDIT_COMPASS_URL) {
         return JSON.stringify({ error: "CREDIT_COMPASS_URL secret is not set in this project" });
       }
-      // fendi-fight-plan service role only (copy from fight-plan Supabase → CC Edge secrets). Not Control Center's key.
-      const compassKey = Deno.env.get("CREDIT_COMPASS_SERVICE_ROLE_KEY") ?? "";
+      // fendi-fight-plan API key (same project’s service role or shared secret — stored as CREDIT_COMPASS_KEY in CC Edge secrets).
+      const compassKey = Deno.env.get("CREDIT_COMPASS_KEY") ?? "";
       if (!compassKey) {
         return JSON.stringify({
           error:
-            "CREDIT_COMPASS_SERVICE_ROLE_KEY is not set — add fendi-fight-plan's service_role key to Control Center secrets",
+            "CREDIT_COMPASS_KEY is not set — add it to Control Center Edge Function secrets",
         });
       }
       try {
@@ -1142,6 +1148,85 @@ const AGENT_TOOLS: ToolDef[] = [
       } catch (err: unknown) {
         const msg = err instanceof Error ? err.message : String(err);
         return JSON.stringify({ error: `Failed to reach Credit Compass: ${msg}` });
+      }
+    },
+  },
+  {
+    name: "query_cc_tax" as const,
+    description:
+      "Query CC Tax (taxgenerator project) for tax data — workflow status, tax year configuration, documents, transactions, evidence, invoices, income reconciliation, and discrepancies. Use when the user asks about tax filings, tax year progress, tax documents, expenses, or anything CC Tax-related.",
+    parameters: {
+      type: "object" as const,
+      properties: {
+        action: {
+          type: "string",
+          enum: [
+            "get_workflow_status",
+            "get_year_config",
+            "get_documents",
+            "get_transactions",
+            "get_evidence",
+            "get_invoices",
+            "get_reconciliations",
+            "get_discrepancies",
+            "get_pl_report",
+          ],
+          description: "The CC Tax action to perform",
+        },
+        tax_year: {
+          type: "number",
+          description: "The tax year to query (e.g. 2024). Defaults to current/most recent year if omitted.",
+        },
+        status_filter: {
+          type: "string",
+          description: "Optional filter — e.g. 'unresolved', 'missing', 'critical', 'pending'",
+        },
+        limit: {
+          type: "number",
+          description: "Max number of records to return (default 20)",
+        },
+      },
+      required: ["action"],
+    },
+    destructive: false,
+    execute: async (params: {
+      action: string;
+      tax_year?: number;
+      status_filter?: string;
+      limit?: number;
+    }) => {
+      const { action, tax_year, status_filter, limit } = params;
+      const CC_TAX_URL = Deno.env.get("CC_TAX_URL");
+      if (!CC_TAX_URL) {
+        return JSON.stringify({
+          error: "CC_TAX_URL secret is not set in this project. CC Tax integration is not yet connected.",
+        });
+      }
+      const ccTaxKey = Deno.env.get("CC_TAX_KEY") ?? "";
+      if (!ccTaxKey) {
+        return JSON.stringify({
+          error: "CC_TAX_KEY is not set — add taxgenerator service role to Control Center Edge Function secrets",
+        });
+      }
+      try {
+        const resp = await fetch(`${CC_TAX_URL}/functions/v1/control-center-api`, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: `Bearer ${ccTaxKey}`,
+          },
+          body: JSON.stringify({ action, tax_year, status_filter, limit }),
+        });
+        if (!resp.ok) {
+          return JSON.stringify({
+            error: `CC Tax returned ${resp.status}`,
+            detail: (await resp.text()).slice(0, 2000),
+          });
+        }
+        return JSON.stringify(await resp.json());
+      } catch (err: unknown) {
+        const msg = err instanceof Error ? err.message : String(err);
+        return JSON.stringify({ error: `Failed to reach CC Tax: ${msg}` });
       }
     },
   },
