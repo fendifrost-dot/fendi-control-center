@@ -1,5 +1,6 @@
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.49.1";
+import { fetchCreditGuardian } from "../_shared/creditGuardian.ts";
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
@@ -14,8 +15,6 @@ const DRIVE_FOLDER_ID = RAW_DRIVE_FOLDER.includes("/folders/")
   : RAW_DRIVE_FOLDER;
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
 const SUPABASE_SERVICE_ROLE_KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
-const CG_URL = Deno.env.get("CREDIT_GUARDIAN_URL") || "https://gflvvzkiuleeochqcdeb.supabase.co";
-const CG_KEY = Deno.env.get("CREDIT_GUARDIAN_KEY")!;
 const GEMINI_KEY = Deno.env.get("Frost_Gemini")!;
 
 const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
@@ -113,18 +112,10 @@ Return ONLY the JSON array, no markdown or explanation.`;
 
 async function pushEventsToCreditGuardian(clientName: string, events: any[]): Promise<{ success: boolean; count: number; error?: string }> {
   try {
-    const resp = await fetch(`${CG_URL}/functions/v1/control-center-api`, {
-      method: "POST",
-      headers: {
-        "Authorization": `Bearer ${CG_KEY}`,
-        "Content-Type": "application/json",
-        "x-api-key": CG_KEY,
-      },
-      body: JSON.stringify({
-        action: "import_timeline_events",
-        client_name: clientName,
-        events,
-      }),
+    const resp = await fetchCreditGuardian({
+      action: "import_timeline_events",
+      client_name: clientName,
+      events,
     });
 
     if (!resp.ok) {
@@ -133,7 +124,10 @@ async function pushEventsToCreditGuardian(clientName: string, events: any[]): Pr
     }
 
     const data = await resp.json();
-    return { success: true, count: data.imported_count || events.length };
+    if (data.error) {
+      return { success: false, count: 0, error: String(data.error).slice(0, 200) };
+    }
+    return { success: true, count: data.imported_count ?? events.length };
   } catch (err) {
     return { success: false, count: 0, error: String(err).slice(0, 200) };
   }
