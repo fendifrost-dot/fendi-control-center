@@ -1,5 +1,6 @@
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.49.1";
+import { fetchCreditGuardian } from "../_shared/creditGuardian.ts";
 
 const BOT_TOKEN = Deno.env.get("FendiAIbot")!;
 const CHAT_ID = Deno.env.get("TELEGRAM_CHAT_ID")!;
@@ -19,7 +20,11 @@ const IMPLEMENTED_WORKFLOW_KEYS = new Set([
     "file_browsing", "connected_project_stats", "error_explanation",
     "active_jobs_summary", "document_ingestion_processing",
     "drive_ingest", "free_agent",
-    "find_playlist_opportunities", "get_pitch_report", "send_playlist_pitch", "update_pitch_status"
+    "find_playlist_opportunities", "get_pitch_report", "send_playlist_pitch", "update_pitch_status",
+  "analyze_client_credit",
+  "get_client_report",
+  "generate_dispute_letters",
+  "query_credit_compass",
 ]);
 
 // ─── Workflow registry fetch ────────────────────────────────────
@@ -420,21 +425,23 @@ async function fetchProjectStats(project: any): Promise<{ name: string; tables: 
       return null;
     }
 
-    // Try POST endpoints with x-api-key
+    // Fairway Fixer / Credit Guardian: POST cross-project-api (or control-center-api) with x-api-key
     for (const ep of CROSS_PROJECT_ENDPOINTS) {
       try {
         const resp = await fetch(`${project.supabase_url}/functions/v1/${ep}`, {
           method: "POST",
           headers: { "Content-Type": "application/json", "x-api-key": apiKey },
-          body: JSON.stringify({ action: "get_stats" }),
+          body: JSON.stringify({ action: "get_clients" }),
         });
-        if (resp.ok) return await resp.json();
-        // consume body to avoid leak
+        if (resp.ok) {
+          const j = await resp.json();
+          const n = Array.isArray(j.data) ? j.data.length : 0;
+          return { name: project.name, tables: { clients: n } };
+        }
         await resp.text();
       } catch { /* try next */ }
     }
 
-    // Fallback: legacy project-stats GET
     try {
       const fallback = await fetch(`${project.supabase_url}/functions/v1/project-stats`, {
         method: "GET",
@@ -985,37 +992,157 @@ const AGENT_TOOLS: ToolDef[] = [
   },
   {
     name: "query_credit_guardian" as const,
-    description: "Read-only query of Credit Guardian. Returns assessments, timeline events, or reports. Safe to call without approval.",
+    description:
+      "Read-only query of Fairway Fixer (Credit Guardian) via cross-project-api. Uses get_clients, get_client_detail (includes timeline events), get_documents, get_recent_activity. For legacy prompts, session_id is treated as Fairway client UUID.",
     destructive: false,
     parameters: {
       type: "object" as const,
       properties: {
         action: {
           type: "string",
-          enum: ["get_assessments", "get_timeline_events", "get_assessment_detail", "get_report"],
-          description: "Which Credit Guardian API action to call.",
+          enum: [
+            "get_clients",
+            "get_client_detail",
+            "get_documents",
+            "get_recent_activity",
+            "get_assessments",
+            "get_timeline_events",
+            "get_assessment_detail",
+            "get_report",
+          ],
+          description:
+            "Fairway actions: get_clients, get_client_detail, get_documents, get_recent_activity. Legacy names map to get_clients or get_client_detail (use client_id).",
+        },
+        client_id: {
+          type: "string",
+          description: "Fairway client UUID — required for get_client_detail, get_documents; optional filter for get_recent_activity.",
         },
         session_id: {
           type: "string",
-          description: "Required for get_timeline_events, get_assessment_detail, get_report.",
+          description: "Alias for client_id (legacy). Used when client_id omitted.",
+        },
+        limit: { type: "number", description: "For get_recent_activity (max 100)." },
+      },
+      required: ["action"],
+    },
+    execute: async (args: {
+      action: string;
+      client_id?: string;
+      session_id?: string;
+      limit?: number;
+    }) => {
+      const cid = args.client_id || args.session_id;
+      let body: Record<string, unknown>;
+
+      switch (args.action) {
+        case "get_clients":
+        case "get_assessments":
+          body = { action: "get_clients" };
+          break;
+        case "get_timeline_events":
+        case "get_assessment_detail":
+        case "get_report":
+        case "get_client_detail":
+          if (!cid) {
+            throw new Error("client_id or session_id (Fairway client UUID) required for this action");
+          }
+          body = { action: "get_client_detail", params: { client_id: cid } };
+          break;
+        case "get_documents":
+          if (!cid) throw new Error("client_id or session_id required");
+          body = { action: "get_documents", params: { client_id: cid } };
+          break;
+        case "get_recent_activity": {
+          const params: Record<string, unknown> = {};
+          if (typeof args.limit === "number") params.limit = args.limit;
+          if (cid) params.client_id = cid;
+          body = { action: "get_recent_activity", params };
+          break;
+        }
+        default:
+          throw new Error(`Unknown action: ${args.action}`);
+      }
+
+      const resp = await fetchCreditGuardian(body);
+      const text = await resp.text();
+      if (!resp.ok) throw new Error(`Credit Guardian query failed: ${resp.status} — ${text.slice(0, 300)}`);
+      return text;
+    },
+  },
+  {
+    name: "query_credit_compass" as const,
+    description:
+      "Query Credit Compass (fendi-fight-plan project) for credit assessment data, client credit records, dispute sessions, and credit improvement strategies. Use when the user asks about credit assessments, credit battle plans, or wants data from Credit Compass specifically.",
+    parameters: {
+      type: "object" as const,
+      properties: {
+        action: {
+          type: "string",
+          enum: [
+            "get_clients",
+            "get_client_detail",
+            "get_assessment",
+            "create_assessment",
+            "get_dispute_letters",
+            "generate_dispute_letters",
+          ],
+          description: "The Credit Compass action to perform",
+        },
+        client_name: {
+          type: "string",
+          description: "Client name to look up",
+        },
+        client_id: {
+          type: "string",
+          description: "Client ID for specific record lookups",
+        },
+        assessment_id: {
+          type: "string",
+          description: "Assessment ID for detailed queries",
         },
       },
       required: ["action"],
     },
-    execute: async (args: { action: string; session_id?: string }) => {
-      const CG_URL = Deno.env.get("CREDIT_GUARDIAN_URL") || "https://gflvvzkiuleeochqcdeb.supabase.co";
-      const CG_KEY = Deno.env.get("CREDIT_GUARDIAN_KEY")!;
-      const resp = await fetch(`${CG_URL}/functions/v1/control-center-api`, {
-        method: "POST",
-        headers: {
-          "Authorization": `Bearer ${CG_KEY}`,
-          "Content-Type": "application/json",
-          "x-api-key": CG_KEY,
-        },
-        body: JSON.stringify({ action: args.action, session_id: args.session_id }),
-      });
-      if (!resp.ok) throw new Error(`Credit Guardian query failed: ${resp.status}`);
-      return JSON.stringify(await resp.json());
+    destructive: false,
+    execute: async (params: {
+      action: string;
+      client_name?: string;
+      client_id?: string;
+      assessment_id?: string;
+    }) => {
+      const { action, client_name, client_id, assessment_id } = params;
+      const CREDIT_COMPASS_URL = Deno.env.get("CREDIT_COMPASS_URL");
+      if (!CREDIT_COMPASS_URL) {
+        return JSON.stringify({ error: "CREDIT_COMPASS_URL secret is not set in this project" });
+      }
+      // fendi-fight-plan service role only (copy from fight-plan Supabase → CC Edge secrets). Not Control Center's key.
+      const compassKey = Deno.env.get("CREDIT_COMPASS_SERVICE_ROLE_KEY") ?? "";
+      if (!compassKey) {
+        return JSON.stringify({
+          error:
+            "CREDIT_COMPASS_SERVICE_ROLE_KEY is not set — add fendi-fight-plan's service_role key to Control Center secrets",
+        });
+      }
+      try {
+        const resp = await fetch(`${CREDIT_COMPASS_URL}/functions/v1/control-center-api`, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: `Bearer ${compassKey}`,
+          },
+          body: JSON.stringify({ action, client_name, client_id, assessment_id }),
+        });
+        if (!resp.ok) {
+          return JSON.stringify({
+            error: `Credit Compass returned ${resp.status}`,
+            detail: (await resp.text()).slice(0, 2000),
+          });
+        }
+        return JSON.stringify(await resp.json());
+      } catch (err: unknown) {
+        const msg = err instanceof Error ? err.message : String(err);
+        return JSON.stringify({ error: `Failed to reach Credit Compass: ${msg}` });
+      }
     },
   },
   {
@@ -1171,7 +1298,7 @@ const AGENT_TOOLS: ToolDef[] = [
       }
 
       if (explicitVibe) {
-        return await runPlaylistHubResearch(trackName, explicitVibe);
+        return await runPlaylistHubResearch(trackName, explicitVibe, context?.chatId);
       }
 
       const chatId = context?.chatId;
@@ -1204,31 +1331,63 @@ const AGENT_TOOLS: ToolDef[] = [
     parameters: { type: "object", properties: { track_name: { type: "string" } }, required: [] },
     destructive: false,
     execute: async (args: { track_name?: string }) => {
-      const result = await callFanFuelHub("control-center-api", { action: "get_pitch_log", track_name: args?.track_name });
-      const pitches = result?.pitches ?? result?.data ?? [];
-      if (!Array.isArray(pitches) || pitches.length === 0) return "No pitches sent yet.";
-      const lines = pitches.slice(0, 20).map((p: any) => `• ${p.playlist_name ?? p.playlist_id} — ${p.status}`).join("\n");
-      return `Pitch Report (${pitches.length} total):\n\n${lines}`;
+      const result = await callFanFuelHub("pitch-status", { track_name: args?.track_name ?? "" });
+      const entries = result?.entries ?? [];
+      if (!Array.isArray(entries) || entries.length === 0) return "No pitches logged yet.";
+      const lines = entries.slice(0, 25).map((p: any) =>
+        `• ${p.playlist_id} — ${p.track_name} — ${p.status} (${p.method ?? "?"})`
+      ).join("\n");
+      const cap = result?.summary?.email_pitches_last_24h;
+      const capLine = typeof cap === "number" ? `\nEmail pitches (last 24h): ${cap}/10` : "";
+      return `Pitch log (${entries.length} shown):\n\n${lines}${capLine}`;
     },
   },
   {
     name: "send_playlist_pitch",
-    description: "Send a pitch email to a playlist curator. WRITE operation - requires propose_plan approval first.",
-    parameters: { type: "object", properties: { playlist_id: { type: "string" }, curator_email: { type: "string" }, curator_name: { type: "string" }, playlist_name: { type: "string" }, track_name: { type: "string" }, subject: { type: "string" }, body: { type: "string" } }, required: ["playlist_id", "curator_email", "track_name", "subject", "body"] },
+    description: "Execute one pitch for a playlist via FanFuel Hub (email or instructions). Pass playlist_id and track_name.",
+    parameters: {
+      type: "object",
+      properties: {
+        playlist_id: { type: "string" },
+        track_name: { type: "string" },
+        tier_confirmed: { type: "boolean", description: "Set true if user confirmed a tier-3 target." },
+      },
+      required: ["playlist_id", "track_name"],
+    },
     destructive: true,
     execute: async (args: any) => {
-      const res = await callFanFuelHub("control-center-api", { action: "send_pitch_email", ...args });
-      return typeof res === "string" ? res : JSON.stringify(res ?? { ok: true });
+      const res = await callFanFuelHub("execute-pitch", {
+        playlist_id: args.playlist_id,
+        track_name: args.track_name,
+        tier_confirmed: Boolean(args.tier_confirmed),
+      });
+      return typeof res?.message_to_user === "string" ? res.message_to_user : JSON.stringify(res ?? {});
     },
   },
   {
     name: "update_pitch_status",
-    description: "Update the status of a pitch (replied, placed, declined).",
-    parameters: { type: "object", properties: { playlist_id: { type: "string" }, status: { type: "string", description: "replied | placed | declined | do_not_pitch" }, notes: { type: "string" } }, required: ["playlist_id", "status"] },
+    description: "Update curator response for a pitch (responded or rejected) in pitch_log.",
+    parameters: {
+      type: "object",
+      properties: {
+        playlist_id: { type: "string" },
+        playlist_name: { type: "string", description: "If playlist_id unknown, pass name to resolve." },
+        track_name: { type: "string" },
+        status: { type: "string", description: "responded | rejected" },
+        notes: { type: "string" },
+      },
+      required: ["track_name", "status"],
+    },
     destructive: false,
     execute: async (args: any) => {
-      const res = await callFanFuelHub("control-center-api", { action: "update_pitch_status", ...args });
-      return typeof res === "string" ? res : JSON.stringify(res ?? { ok: true });
+      const res = await callFanFuelHub("update-pitch-status", {
+        playlist_id: args.playlist_id,
+        playlist_name: args.playlist_name,
+        track_name: args.track_name,
+        status: args.status,
+        notes: args.notes,
+      });
+      return typeof res?.message_to_user === "string" ? res.message_to_user : JSON.stringify(res ?? {});
     },
   },
 ];
@@ -1331,6 +1490,122 @@ async function clearPlaylistConfirm(chatId: string): Promise<void> {
   await supabase.from("bot_settings").delete().eq("setting_key", playlistConfirmKey(chatId));
 }
 
+// ─── Last playlist research (pitch report / pitch N) ─────────────────
+type LastPlaylistResearch = {
+  track_name: string;
+  user_vibe: string;
+  ranked_playlist_ids: string[];
+  ts: string;
+};
+
+function lastPlaylistResearchKey(chatId: string): string {
+  return `last_playlist_research:${chatId}`;
+}
+
+function pendingPitchBulkKey(chatId: string): string {
+  return `pending_pitch_bulk:${chatId}`;
+}
+
+function pendingPitchTier3Key(chatId: string): string {
+  return `pending_pitch_tier3:${chatId}`;
+}
+
+async function saveLastPlaylistResearch(chatId: string, data: LastPlaylistResearch): Promise<void> {
+  await supabase.from("bot_settings").upsert(
+    {
+      setting_key: lastPlaylistResearchKey(chatId),
+      setting_value: JSON.stringify(data),
+      updated_at: new Date().toISOString(),
+    },
+    { onConflict: "setting_key" },
+  );
+}
+
+async function getLastPlaylistResearch(chatId: string): Promise<LastPlaylistResearch | null> {
+  const { data } = await supabase
+    .from("bot_settings")
+    .select("setting_value")
+    .eq("setting_key", lastPlaylistResearchKey(chatId))
+    .maybeSingle();
+  if (!data?.setting_value) return null;
+  try {
+    const p = JSON.parse(data.setting_value);
+    if (p && typeof p.track_name === "string" && Array.isArray(p.ranked_playlist_ids)) {
+      return p as LastPlaylistResearch;
+    }
+  } catch { /* ignore */ }
+  return null;
+}
+
+type PendingPitchBulk = { track_name: string; playlist_ids: string[]; ts: string };
+type PendingPitchTier3 = { playlist_id: string; track_name: string; ts: string };
+
+async function setPendingPitchBulk(chatId: string, state: PendingPitchBulk): Promise<void> {
+  await supabase.from("bot_settings").upsert(
+    {
+      setting_key: pendingPitchBulkKey(chatId),
+      setting_value: JSON.stringify(state),
+      updated_at: new Date().toISOString(),
+    },
+    { onConflict: "setting_key" },
+  );
+}
+
+async function getPendingPitchBulk(chatId: string): Promise<PendingPitchBulk | null> {
+  const { data } = await supabase
+    .from("bot_settings")
+    .select("setting_value")
+    .eq("setting_key", pendingPitchBulkKey(chatId))
+    .maybeSingle();
+  if (!data?.setting_value) return null;
+  try {
+    const p = JSON.parse(data.setting_value);
+    if (p?.track_name && Array.isArray(p.playlist_ids)) return p as PendingPitchBulk;
+  } catch { /* ignore */ }
+  return null;
+}
+
+async function clearPendingPitchBulk(chatId: string): Promise<void> {
+  await supabase.from("bot_settings").delete().eq("setting_key", pendingPitchBulkKey(chatId));
+}
+
+async function setPendingPitchTier3(chatId: string, state: PendingPitchTier3): Promise<void> {
+  await supabase.from("bot_settings").upsert(
+    {
+      setting_key: pendingPitchTier3Key(chatId),
+      setting_value: JSON.stringify(state),
+      updated_at: new Date().toISOString(),
+    },
+    { onConflict: "setting_key" },
+  );
+}
+
+async function getPendingPitchTier3(chatId: string): Promise<PendingPitchTier3 | null> {
+  const { data } = await supabase
+    .from("bot_settings")
+    .select("setting_value")
+    .eq("setting_key", pendingPitchTier3Key(chatId))
+    .maybeSingle();
+  if (!data?.setting_value) return null;
+  try {
+    const p = JSON.parse(data.setting_value);
+    if (p?.playlist_id && p?.track_name) return p as PendingPitchTier3;
+  } catch { /* ignore */ }
+  return null;
+}
+
+async function clearPendingPitchTier3(chatId: string): Promise<void> {
+  await supabase.from("bot_settings").delete().eq("setting_key", pendingPitchTier3Key(chatId));
+}
+
+const NON_BULK_PITCH_METHODS = new Set(["algorithmic", "distributor_pitch"]);
+
+async function hubPlaylistBatch(playlistIds: string[]): Promise<any[]> {
+  if (!playlistIds.length) return [];
+  const r = await callFanFuelHub("playlist-batch", { playlist_ids: playlistIds });
+  return Array.isArray(r?.playlists) ? r.playlists : [];
+}
+
 /** Heuristic vibe label from track title (no external API). */
 function inferVibeFromTrack(trackName: string): string {
   const t = (trackName || "").toLowerCase();
@@ -1346,7 +1621,7 @@ function inferVibeFromTrack(trackName: string): string {
  * `action` (Hub reports "Unknown action: findplaylistopportunities" when misrouted).
  * Override edge name with FANFUEL_HUB_PLAYLIST_FN if your project uses a different function name.
  */
-async function runPlaylistHubResearch(trackName: string, userVibe: string): Promise<string> {
+async function runPlaylistHubResearch(trackName: string, userVibe: string, chatId?: string): Promise<string> {
   const body = { track_name: trackName, user_vibe: userVibe };
   const edgeName = (Deno.env.get("FANFUEL_HUB_PLAYLIST_FN") || "playlist-research").trim();
 
@@ -1373,14 +1648,28 @@ async function runPlaylistHubResearch(trackName: string, userVibe: string): Prom
   }
 
   if (result?.playlists && Array.isArray(result.playlists) && result.playlists.length > 0) {
+    const rankedIds = result.playlists.map((p: { playlist_id?: string }) => p.playlist_id).filter(Boolean) as string[];
+    if (chatId && rankedIds.length > 0) {
+      await saveLastPlaylistResearch(chatId, {
+        track_name: trackName,
+        user_vibe: userVibe,
+        ranked_playlist_ids: rankedIds,
+        ts: new Date().toISOString(),
+      });
+    }
     const lines = result.playlists
-      .slice(0, 15)
-      .map(
-        (p: any, i: number) =>
-          `${i + 1}. ${p.name ?? p.playlist_name} — ${
-            typeof p.followers === "number" ? p.followers.toLocaleString() : (p.followers ?? "?")
-          } followers`,
-      )
+      .slice(0, 20)
+      .map((p: any, i: number) => {
+        const mid =
+          p.followers_label ??
+          (typeof p.followers === "number"
+            ? p.followers.toLocaleString()
+            : p.follower_count != null
+              ? p.follower_count.toLocaleString()
+              : "?");
+        const suffix = mid === "editorial" || mid === "N/A" ? "" : " followers";
+        return `${i + 1}. ${p.name ?? p.playlist_name} — ${mid}${suffix}`;
+      })
       .join("\n");
     return `Found ${result.playlists.length} playlist opportunities for "${trackName}":\n\n${lines}`;
   }
@@ -2153,6 +2442,136 @@ serve(async (req) => {
     const modelRequestMatch = text.match(/^\/model\s+(grok|gemini|chatgpt)$/i);
     const requestedModel = modelRequestMatch ? modelRequestMatch[1].toLowerCase() : null;
 
+    const routingClearAndContinue =
+      text.toLowerCase().trim().startsWith("/do ") ||
+      text.toLowerCase().trim() === "/start" ||
+      text.toLowerCase().trim().startsWith("/workflows") ||
+      text.toLowerCase().trim().startsWith("/metrics") ||
+      text.toLowerCase().trim().startsWith("/triage") ||
+      text.toLowerCase().trim().startsWith("/status") ||
+      text.toLowerCase().trim().startsWith("/help") ||
+      text.toLowerCase().trim() === "/ping" ||
+      text.toLowerCase().trim().startsWith("/resend") ||
+      text.toLowerCase().trim().startsWith("/model");
+
+    // ── Pending bulk pitch (confirm all) ────────────────────────────────
+    const pendingBulkEarly = await getPendingPitchBulk(chatId);
+    if (pendingBulkEarly) {
+      const lower = text.toLowerCase().trim();
+      if (routingClearAndContinue) {
+        await clearPendingPitchBulk(chatId);
+      } else if (lower === "cancel" || lower === "no") {
+        try {
+          taskId = await createTaskRow(session.id, text, requestedModel);
+          _currentTaskId = taskId;
+        } catch (taskErr) {
+          console.error("FATAL: task creation failed:", taskErr);
+          await sendMessage(chatId, `🚨 *${SYSTEM_IDENTITY}* — Task creation failed: ${String(taskErr)}`);
+          return new Response("ok");
+        }
+        await sendMessage(chatId, `📋 Queued: \`${taskId}\``, {}, `task:${taskId}:queued`);
+        await clearPendingPitchBulk(chatId);
+        await sendMessage(chatId, "Bulk pitch cancelled.", {}, `task:${taskId}:bulk-cancel`);
+        await supabase.from("tasks").update({ status: "succeeded", result_json: { shortcut: "pitch_bulk_cancel" } }).eq("id", taskId);
+        await sendMessage(chatId, `✅ Done: \`${taskId}\``, {}, `task:${taskId}:done`);
+        _currentTaskId = null;
+        return new Response("ok");
+      } else if (/^confirm\s+all$/i.test(text.trim())) {
+        try {
+          taskId = await createTaskRow(session.id, text, requestedModel);
+          _currentTaskId = taskId;
+        } catch (taskErr) {
+          console.error("FATAL: task creation failed:", taskErr);
+          await sendMessage(chatId, `🚨 *${SYSTEM_IDENTITY}* — Task creation failed: ${String(taskErr)}`);
+          return new Response("ok");
+        }
+        await sendMessage(chatId, `📋 Queued: \`${taskId}\``, {}, `task:${taskId}:queued`);
+        const modelForPitch = (session.active_model === "grok" ? "grok" : "gemini") as "grok" | "gemini";
+        const ids = [...pendingBulkEarly.playlist_ids];
+        await clearPendingPitchBulk(chatId);
+        for (const pid of ids) {
+          try {
+            const res = await callFanFuelHub("execute-pitch", {
+              playlist_id: pid,
+              track_name: pendingBulkEarly.track_name,
+              bulk: true,
+            });
+            const msg = typeof res?.message_to_user === "string" ? res.message_to_user : JSON.stringify(res ?? {});
+            await sendMessage(chatId, formatAssistantMessage(modelForPitch, msg), {}, `task:${taskId}:bulk-pitch`);
+          } catch (e) {
+            const errStr = e instanceof Error ? e.message : String(e);
+            await sendMessage(chatId, formatAssistantMessage(modelForPitch, `❌ ${errStr}`), {}, `task:${taskId}:bulk-pitch-err`);
+          }
+        }
+        await supabase.from("tasks").update({
+          status: "succeeded",
+          result_json: { shortcut: "pitch_bulk_done", count: ids.length },
+        }).eq("id", taskId);
+        await sendMessage(chatId, `✅ Done: \`${taskId}\``, {}, `task:${taskId}:done`);
+        _currentTaskId = null;
+        return new Response("ok");
+      } else {
+        await sendMessage(chatId, "Reply *confirm all* to pitch the listed playlists, or *cancel*.");
+        return new Response("ok");
+      }
+    }
+
+    // ── Pending tier-3 pitch confirm ────────────────────────────────────
+    const pendingTier3Early = await getPendingPitchTier3(chatId);
+    if (pendingTier3Early) {
+      const lower = text.toLowerCase().trim();
+      if (routingClearAndContinue) {
+        await clearPendingPitchTier3(chatId);
+      } else if (lower === "cancel" || lower === "no") {
+        try {
+          taskId = await createTaskRow(session.id, text, requestedModel);
+          _currentTaskId = taskId;
+        } catch (taskErr) {
+          console.error("FATAL: task creation failed:", taskErr);
+          await sendMessage(chatId, `🚨 *${SYSTEM_IDENTITY}* — Task creation failed: ${String(taskErr)}`);
+          return new Response("ok");
+        }
+        await sendMessage(chatId, `📋 Queued: \`${taskId}\``, {}, `task:${taskId}:queued`);
+        await clearPendingPitchTier3(chatId);
+        await sendMessage(chatId, "Tier-3 pitch cancelled.", {}, `task:${taskId}:t3-cancel`);
+        await supabase.from("tasks").update({ status: "succeeded", result_json: { shortcut: "pitch_t3_cancel" } }).eq("id", taskId);
+        await sendMessage(chatId, `✅ Done: \`${taskId}\``, {}, `task:${taskId}:done`);
+        _currentTaskId = null;
+        return new Response("ok");
+      } else if (/^confirm$/i.test(text.trim())) {
+        try {
+          taskId = await createTaskRow(session.id, text, requestedModel);
+          _currentTaskId = taskId;
+        } catch (taskErr) {
+          console.error("FATAL: task creation failed:", taskErr);
+          await sendMessage(chatId, `🚨 *${SYSTEM_IDENTITY}* — Task creation failed: ${String(taskErr)}`);
+          return new Response("ok");
+        }
+        await sendMessage(chatId, `📋 Queued: \`${taskId}\``, {}, `task:${taskId}:queued`);
+        const modelForPitch = (session.active_model === "grok" ? "grok" : "gemini") as "grok" | "gemini";
+        await clearPendingPitchTier3(chatId);
+        try {
+          const res = await callFanFuelHub("execute-pitch", {
+            playlist_id: pendingTier3Early.playlist_id,
+            track_name: pendingTier3Early.track_name,
+            tier_confirmed: true,
+          });
+          const msg = typeof res?.message_to_user === "string" ? res.message_to_user : JSON.stringify(res ?? {});
+          await sendMessage(chatId, formatAssistantMessage(modelForPitch, msg), {}, `task:${taskId}:t3-pitch`);
+        } catch (e) {
+          const errStr = e instanceof Error ? e.message : String(e);
+          await sendMessage(chatId, formatAssistantMessage(modelForPitch, `❌ ${errStr}`), {}, `task:${taskId}:t3-pitch-err`);
+        }
+        await supabase.from("tasks").update({ status: "succeeded", result_json: { shortcut: "pitch_tier3_confirmed" } }).eq("id", taskId);
+        await sendMessage(chatId, `✅ Done: \`${taskId}\``, {}, `task:${taskId}:done`);
+        _currentTaskId = null;
+        return new Response("ok");
+      } else {
+        await sendMessage(chatId, "Reply *confirm* to pitch this tier-3 playlist, or *cancel*.");
+        return new Response("ok");
+      }
+    }
+
     // ── Pending playlist vibe: handle BEFORE task row + lane routing (so Lane 2 never steals yes/cancel) ──
     const pendingPlaylistEarly = await getPlaylistConfirm(chatId);
     if (pendingPlaylistEarly) {
@@ -2210,7 +2629,7 @@ serve(async (req) => {
         await clearPlaylistConfirm(chatId);
         const modelForPlaylist = (session.active_model === "grok" ? "grok" : "gemini") as "grok" | "gemini";
         try {
-          const out = await runPlaylistHubResearch(pendingPlaylistEarly.track_name, userVibe);
+          const out = await runPlaylistHubResearch(pendingPlaylistEarly.track_name, userVibe, chatId);
           await sendMessage(chatId, formatAssistantMessage(modelForPlaylist, out), {}, `task:${taskId}:playlist-result`);
         } catch (e) {
           const errStr = e instanceof Error ? e.message : String(e);
@@ -2248,6 +2667,252 @@ serve(async (req) => {
     // Send queued confirmation with task_id
     await sendMessage(chatId, `📋 Queued: \`${taskId}\``, {}, `task:${taskId}:queued`);
 
+    const modelPitch = (session.active_model === "grok" ? "grok" : "gemini") as "grok" | "gemini";
+
+    // ── Manual curator response → pitch_log ───────────────────────────
+    const plResp = text.match(/^playlist\s+(.+?)\s+responded\s*[—–-]\s*interested\s*$/i);
+    const plRej = text.match(/^playlist\s+(.+?)\s+rejected\s*$/i);
+    if (plResp || plRej) {
+      const lastRs = await getLastPlaylistResearch(chatId);
+      const trackForStatus = lastRs?.track_name?.trim() || "";
+      if (!trackForStatus) {
+        await sendMessage(
+          chatId,
+          formatAssistantMessage(modelPitch, "No recent research — run *find playlist opportunities for [track]* first."),
+          {},
+          `task:${taskId}:pitch-status-no-track`,
+        );
+        await supabase.from("tasks").update({ status: "succeeded", result_json: { shortcut: "pitch_status_no_track" } }).eq("id", taskId);
+        await sendMessage(chatId, `✅ Done: \`${taskId}\``, {}, `task:${taskId}:done`);
+        _currentTaskId = null;
+        return new Response("ok");
+      }
+      const namePart = (plResp ?? plRej)?.[1]?.trim() ?? "";
+      try {
+        const res = await callFanFuelHub("update-pitch-status", {
+          playlist_name: namePart,
+          track_name: trackForStatus,
+          status: plResp ? "responded" : "rejected",
+        });
+        const msg = typeof res?.message_to_user === "string" ? res.message_to_user : JSON.stringify(res ?? {});
+        await sendMessage(chatId, formatAssistantMessage(modelPitch, msg), {}, `task:${taskId}:pitch-manual-status`);
+      } catch (e) {
+        const errStr = e instanceof Error ? e.message : String(e);
+        await sendMessage(chatId, formatAssistantMessage(modelPitch, `❌ ${errStr}`), {}, `task:${taskId}:pitch-manual-err`);
+      }
+      await supabase.from("tasks").update({ status: "succeeded", result_json: { shortcut: "pitch_manual_status" } }).eq("id", taskId);
+      await sendMessage(chatId, `✅ Done: \`${taskId}\``, {}, `task:${taskId}:done`);
+      _currentTaskId = null;
+      return new Response("ok");
+    }
+
+    // ── pitch all tier 1 (max 5, confirm) ─────────────────────────────
+    if (/^pitch\s+all\s+(?:tier\s*1|t1)\s*$/i.test(text.trim())) {
+      const lastBulk = await getLastPlaylistResearch(chatId);
+      if (!lastBulk?.ranked_playlist_ids?.length) {
+        await sendMessage(
+          chatId,
+          formatAssistantMessage(modelPitch, "No recent research found. Try: *find playlist opportunities for [track name]*"),
+          {},
+          `task:${taskId}:pitch-all-no-research`,
+        );
+        await supabase.from("tasks").update({ status: "succeeded", result_json: { shortcut: "pitch_all_no_research" } }).eq("id", taskId);
+        await sendMessage(chatId, `✅ Done: \`${taskId}\``, {}, `task:${taskId}:done`);
+        _currentTaskId = null;
+        return new Response("ok");
+      }
+      const allPl = await hubPlaylistBatch(lastBulk.ranked_playlist_ids);
+      const tier1 = allPl
+        .filter((p: { tier?: number; submission_method?: string }) =>
+          p.tier === 1 && !NON_BULK_PITCH_METHODS.has(String(p.submission_method || "").toLowerCase())
+        )
+        .slice(0, 5);
+      if (!tier1.length) {
+        await sendMessage(
+          chatId,
+          formatAssistantMessage(
+            modelPitch,
+            "No tier *1* pitchable targets in your last results (or all are algorithmic/distributor). Run research again or pitch by number.",
+          ),
+          {},
+          `task:${taskId}:pitch-all-empty`,
+        );
+        await supabase.from("tasks").update({ status: "succeeded", result_json: { shortcut: "pitch_all_empty" } }).eq("id", taskId);
+        await sendMessage(chatId, `✅ Done: \`${taskId}\``, {}, `task:${taskId}:done`);
+        _currentTaskId = null;
+        return new Response("ok");
+      }
+      const lines = tier1
+        .map((p: { playlist_name?: string; playlist_id: string; submission_method?: string }, i: number) =>
+          `${i + 1}. *${p.playlist_name ?? p.playlist_id}* — ${p.submission_method ?? "?"}`
+        )
+        .join("\n");
+      await setPendingPitchBulk(chatId, {
+        track_name: lastBulk.track_name,
+        playlist_ids: tier1.map((p: { playlist_id: string }) => p.playlist_id),
+        ts: new Date().toISOString(),
+      });
+      const bulkMsg = [
+        `📣 *Pitch all tier 1* (max 5)`,
+        ``,
+        `Track: *${lastBulk.track_name}*`,
+        ``,
+        lines,
+        ``,
+        `Reply *confirm all* to run these pitches sequentially, or *cancel*.`,
+      ].join("\n");
+      await sendMessage(chatId, formatAssistantMessage(modelPitch, bulkMsg), {}, `task:${taskId}:pitch-all-confirm`);
+      await supabase.from("tasks").update({
+        status: "succeeded",
+        result_json: { shortcut: "pitch_all_await_confirm", count: tier1.length },
+      }).eq("id", taskId);
+      await sendMessage(chatId, `✅ Done: \`${taskId}\``, {}, `task:${taskId}:done`);
+      _currentTaskId = null;
+      return new Response("ok");
+    }
+
+    // ── show pitch report ─────────────────────────────────────────────
+    if (/^(?:show\s+)?pitch\s+report$/i.test(text.trim())) {
+      const lastRep = await getLastPlaylistResearch(chatId);
+      if (!lastRep?.ranked_playlist_ids?.length) {
+        await sendMessage(
+          chatId,
+          formatAssistantMessage(modelPitch, "No recent research found. Try: *find playlist opportunities for [track name]*"),
+          {},
+          `task:${taskId}:pitch-report-empty`,
+        );
+      } else {
+        const playlists = await hubPlaylistBatch(lastRep.ranked_playlist_ids.slice(0, 20));
+        const repLines = playlists
+          .map((p: { playlist_name?: string; playlist_id: string; tier?: number; submission_method?: string }, i: number) => {
+            const tier = p.tier != null ? `T${p.tier}` : "?";
+            const method = p.submission_method ?? "—";
+            return `${i + 1}. *${p.playlist_name ?? p.playlist_id}* — ${tier} — ${method}`;
+          })
+          .join("\n");
+        const reportMsg = [
+          `📋 *Pitch report* (last search: *${lastRep.track_name}*)`,
+          ``,
+          repLines,
+          ``,
+          `Reply *pitch 1* … *pitch 20*, *pitch [name]*, or *pitch all tier 1*.`,
+        ].join("\n");
+        await sendMessage(chatId, formatAssistantMessage(modelPitch, reportMsg), {}, `task:${taskId}:pitch-report`);
+      }
+      await supabase.from("tasks").update({ status: "succeeded", result_json: { shortcut: "pitch_report" } }).eq("id", taskId);
+      await sendMessage(chatId, `✅ Done: \`${taskId}\``, {}, `task:${taskId}:done`);
+      _currentTaskId = null;
+      return new Response("ok");
+    }
+
+    // ── pitch status / my pitches ─────────────────────────────────────
+    if (/^(?:pitch\s+status|my\s+pitches)$/i.test(text.trim())) {
+      try {
+        const lastSt = await getLastPlaylistResearch(chatId);
+        const r = await callFanFuelHub("pitch-status", { track_name: lastSt?.track_name ?? "" });
+        const entries = r?.entries ?? [];
+        const cap = r?.summary?.email_pitches_last_24h;
+        let body: string;
+        if (!entries.length) {
+          body = "No pitches logged yet.";
+        } else {
+          const lines = entries.slice(0, 25).map((p: Record<string, string>) =>
+            `• ${p.playlist_id} — ${p.track_name} — ${p.status} (${p.method ?? "?"})`
+          ).join("\n");
+          body = `*Pitch log* (${entries.length})\n\n${lines}`;
+          if (typeof cap === "number") body += `\n\n📧 Email pitches (last 24h): ${cap}/10`;
+        }
+        await sendMessage(chatId, formatAssistantMessage(modelPitch, body), {}, `task:${taskId}:pitch-status`);
+      } catch (e) {
+        const errStr = e instanceof Error ? e.message : String(e);
+        await sendMessage(chatId, formatAssistantMessage(modelPitch, `❌ ${errStr}`), {}, `task:${taskId}:pitch-status-err`);
+      }
+      await supabase.from("tasks").update({ status: "succeeded", result_json: { shortcut: "pitch_status_cmd" } }).eq("id", taskId);
+      await sendMessage(chatId, `✅ Done: \`${taskId}\``, {}, `task:${taskId}:done`);
+      _currentTaskId = null;
+      return new Response("ok");
+    }
+
+    // ── pitch [n] / pitch [name] ──────────────────────────────────────
+    const pitchNumMatch = text.match(/^pitch\s+#?(\d+)\s*$/i);
+    const pitchNameMatch = !pitchNumMatch && /^pitch\s+(.+)$/i.exec(text.trim());
+    if (pitchNumMatch || pitchNameMatch) {
+      const lastOne = await getLastPlaylistResearch(chatId);
+      if (!lastOne?.ranked_playlist_ids?.length) {
+        await sendMessage(
+          chatId,
+          formatAssistantMessage(modelPitch, "No recent research found. Try: *find playlist opportunities for [track name]*"),
+          {},
+          `task:${taskId}:pitch-single-no-research`,
+        );
+        await supabase.from("tasks").update({ status: "succeeded", result_json: { shortcut: "pitch_single_no_research" } }).eq("id", taskId);
+        await sendMessage(chatId, `✅ Done: \`${taskId}\``, {}, `task:${taskId}:done`);
+        _currentTaskId = null;
+        return new Response("ok");
+      }
+      let playlistId: string | null = null;
+      if (pitchNumMatch) {
+        const idx = Number(pitchNumMatch[1]);
+        if (!Number.isFinite(idx) || idx < 1 || idx > lastOne.ranked_playlist_ids.length) {
+          await sendMessage(
+            chatId,
+            formatAssistantMessage(modelPitch, `Pick a number between 1 and ${lastOne.ranked_playlist_ids.length}.`),
+            {},
+            `task:${taskId}:pitch-bad-index`,
+          );
+          await supabase.from("tasks").update({ status: "succeeded", result_json: { shortcut: "pitch_bad_index" } }).eq("id", taskId);
+          await sendMessage(chatId, `✅ Done: \`${taskId}\``, {}, `task:${taskId}:done`);
+          _currentTaskId = null;
+          return new Response("ok");
+        }
+        playlistId = lastOne.ranked_playlist_ids[idx - 1];
+      } else if (pitchNameMatch) {
+        const q = pitchNameMatch[1].trim().toLowerCase();
+        const allNm = await hubPlaylistBatch(lastOne.ranked_playlist_ids);
+        const hit = allNm.find((p: { playlist_name?: string; playlist_id?: string }) =>
+          String(p.playlist_name ?? "").toLowerCase().includes(q) ||
+          String(p.playlist_id ?? "").toLowerCase().includes(q)
+        );
+        if (!hit) {
+          await sendMessage(
+            chatId,
+            formatAssistantMessage(modelPitch, `No playlist in your last results matches "${pitchNameMatch[1].trim()}". Try *show pitch report*.`),
+            {},
+            `task:${taskId}:pitch-name-miss`,
+          );
+          await supabase.from("tasks").update({ status: "succeeded", result_json: { shortcut: "pitch_name_miss" } }).eq("id", taskId);
+          await sendMessage(chatId, `✅ Done: \`${taskId}\``, {}, `task:${taskId}:done`);
+          _currentTaskId = null;
+          return new Response("ok");
+        }
+        playlistId = hit.playlist_id;
+      }
+      if (playlistId) {
+        try {
+          const res = await callFanFuelHub("execute-pitch", {
+            playlist_id: playlistId,
+            track_name: lastOne.track_name,
+          });
+          if (res?.action_taken === "tier_gate" && res?.ok === false) {
+            await setPendingPitchTier3(chatId, {
+              playlist_id: playlistId,
+              track_name: lastOne.track_name,
+              ts: new Date().toISOString(),
+            });
+          }
+          const msg = typeof res?.message_to_user === "string" ? res.message_to_user : JSON.stringify(res ?? {});
+          await sendMessage(chatId, formatAssistantMessage(modelPitch, msg), {}, `task:${taskId}:pitch-one`);
+        } catch (e) {
+          const errStr = e instanceof Error ? e.message : String(e);
+          await sendMessage(chatId, formatAssistantMessage(modelPitch, `❌ ${errStr}`), {}, `task:${taskId}:pitch-one-err`);
+        }
+      }
+      await supabase.from("tasks").update({ status: "succeeded", result_json: { shortcut: "pitch_single" } }).eq("id", taskId);
+      await sendMessage(chatId, `✅ Done: \`${taskId}\``, {}, `task:${taskId}:done`);
+      _currentTaskId = null;
+      return new Response("ok");
+    }
+
     // Normalized text for intent routing (auto-promote + autonomous mode). Must run before Lane 2.
     const lowerText = text.toLowerCase().trim();
 
@@ -2279,15 +2944,12 @@ serve(async (req) => {
           inferred_vibe: inferredNl,
           created_at: new Date().toISOString(),
         });
-        const vibePrompt = [
-          `🎧 *Confirm vibe before playlist search*`,
-          ``,
-          `Track: *${trackNl}*`,
-          `Suggested vibe: *${inferredNl}*`,
-          ``,
-          `Reply *yes*, *y*, or *ok* to use this vibe, or type your own vibe in one message.`,
-          `Send *cancel* to abort.`,
-        ].join("\n");
+        const vibePrompt =
+          `🎵 To find the right playlists for *${trackNl}*, tell me:\n\n` +
+          `1️⃣ *Genre/subgenre* — e.g. chill trap, drill, conscious rap, west coast\n` +
+          `2️⃣ *Similar artists or features* — e.g. Larry June, FBG Duck\n` +
+          `3️⃣ *Mood/theme* — e.g. spiritual, street, introspective, healing\n\n` +
+          `Just reply with whatever fits. More detail = better results.`;
         console.log("[PLAYLIST_NL] vibe prompt (deterministic)", { taskId, track: trackNl });
         await sendMessage(chatId, formatAssistantMessage(modelNl, vibePrompt), {}, `task:${taskId}:playlist-vibe-prompt`);
         await supabase.from("tasks").update({
