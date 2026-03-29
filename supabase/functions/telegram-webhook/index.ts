@@ -1,3 +1,8 @@
+
+  if (chatId) {
+    const rankedIds = ranked.slice(0, 20).map((p: any) => p.playlist_id || p.id);
+    await saveLastPlaylistResearch(chatId, { track_name: trackName, user_vibe: userVibe, ranked_playlist_ids: rankedIds, ts: new Date().toISOString() });
+  }
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
 
 
@@ -572,12 +577,60 @@ async function clearPlaylistConfirm(chatId: string) {
   await supabase.from("bot_settings").delete().eq("setting_key", `pending_playlist:${chatId}`);
 }
 
+type LastPlaylistResearch = {
+  track_name: string; user_vibe: string; ranked_playlist_ids: string[]; ts: string;
+};
+function lastPlaylistResearchKey(chatId: string) { return `last_playlist_research:${chatId}`; }
+function pendingPitchBulkKey(chatId: string) { return `pending_pitch_bulk:${chatId}`; }
+function pendingPitchTier3Key(chatId: string) { return `pending_pitch_tier3:${chatId}`; }
+async function saveLastPlaylistResearch(chatId: string, data: LastPlaylistResearch) {
+  await supabase.from("bot_settings").upsert({ setting_key: lastPlaylistResearchKey(chatId), setting_value: JSON.stringify(data), updated_at: new Date().toISOString() }, { onConflict: "setting_key" });
+}
+async function getLastPlaylistResearch(chatId: string): Promise<LastPlaylistResearch | null> {
+  const { data } = await supabase.from("bot_settings").select("setting_value").eq("setting_key", lastPlaylistResearchKey(chatId)).maybeSingle();
+  if (!data?.setting_value) return null;
+  try { const p = JSON.parse(data.setting_value); if (p?.track_name && Array.isArray(p.ranked_playlist_ids)) return p; } catch {}
+  return null;
+}
+type PendingPitchBulk = { track_name: string; playlist_ids: string[]; ts: string };
+type PendingPitchTier3 = { playlist_id: string; track_name: string; ts: string };
+async function setPendingPitchBulk(chatId: string, state: PendingPitchBulk) {
+  await supabase.from("bot_settings").upsert({ setting_key: pendingPitchBulkKey(chatId), setting_value: JSON.stringify(state), updated_at: new Date().toISOString() }, { onConflict: "setting_key" });
+}
+async function getPendingPitchBulk(chatId: string): Promise<PendingPitchBulk | null> {
+  const { data } = await supabase.from("bot_settings").select("setting_value").eq("setting_key", pendingPitchBulkKey(chatId)).maybeSingle();
+  if (!data?.setting_value) return null;
+  try { const p = JSON.parse(data.setting_value); if (p?.track_name && Array.isArray(p.playlist_ids)) return p; } catch {}
+  return null;
+}
+async function clearPendingPitchBulk(chatId: string) {
+  await supabase.from("bot_settings").delete().eq("setting_key", pendingPitchBulkKey(chatId));
+}
+async function setPendingPitchTier3(chatId: string, state: PendingPitchTier3) {
+  await supabase.from("bot_settings").upsert({ setting_key: pendingPitchTier3Key(chatId), setting_value: JSON.stringify(state), updated_at: new Date().toISOString() }, { onConflict: "setting_key" });
+}
+async function getPendingPitchTier3(chatId: string): Promise<PendingPitchTier3 | null> {
+  const { data } = await supabase.from("bot_settings").select("setting_value").eq("setting_key", pendingPitchTier3Key(chatId)).maybeSingle();
+  if (!data?.setting_value) return null;
+  try { const p = JSON.parse(data.setting_value); if (p?.playlist_id && p?.track_name) return p; } catch {}
+  return null;
+}
+async function clearPendingPitchTier3(chatId: string) {
+  await supabase.from("bot_settings").delete().eq("setting_key", pendingPitchTier3Key(chatId));
+}
+async function hubPlaylistBatch(playlistIds: string[]): Promise<any[]> {
+  if (!playlistIds.length) return [];
+  const r = await callFanFuelHub("playlist-batch", { playlist_ids: playlistIds });
+  return Array.isArray(r?.playlists) ? r.playlists : [];
+}
+
+
 /** Execute the actual playlist research via FanFuel Hub. */
 /**
  * Calls FanFuel Hub playlist research. Prefer the dedicated playlist-research edge function.
  * Override edge name with FANFUEL_HUB_PLAYLIST_FN if your project uses a different function name.
  */
-async function runPlaylistHubResearch(trackName: string, userVibe: string): Promise<string> {
+async function runPlaylistHubResearch(trackName: string, userVibe: string, chatId?: string): Promise<string> {
   const body = { track_name: trackName, user_vibe: userVibe };
   const edgeName = (Deno.env.get("FANFUEL_HUB_PLAYLIST_FN") || "playlist-research").trim();
   let result: any;
@@ -608,6 +661,11 @@ async function runPlaylistHubResearch(trackName: string, userVibe: string): Prom
         (typeof p.followers === "number" ? p.followers.toLocaleString() : (p.followers || "?")) + " followers"
       )
       .join("\n");
+  if (chatId && result?.playlists) {
+    const rankedIds = result.playlists.slice(0, 20).map((p: any) => p.playlist_id || p.id);
+    await saveLastPlaylistResearch(chatId, { track_name: trackName, user_vibe: userVibe, ranked_playlist_ids: rankedIds, ts: new Date().toISOString() });
+  }
+
     return 'Found ' + result.playlists.length + ' playlist opportunities for "' + trackName + '":\n\n' + lines;
   }
   return 'Playlist research complete for "' + trackName + '" (vibe: ' + userVibe + '). Results stored. Check back with "show pitch report".';
@@ -1328,7 +1386,7 @@ const AGENT_TOOLS: ToolDef[] = [
     parameters: { type: "object", properties: { track_name: { type: "string" } }, required: [] as string[] },
     destructive: false,
     execute: async (args: { track_name?: string }) => {
-      const res = await callFanFuelHub("control-center-api", { action: "get_pitch_log", track_name: args.track_name });
+      const res = await callFanFuelHub("pitch-status", { action: "get_pitch_log", track_name: args.track_name });
       return JSON.stringify(res);
     },
   },
@@ -1338,7 +1396,7 @@ const AGENT_TOOLS: ToolDef[] = [
     parameters: { type: "object", properties: { playlist_id: { type: "string" }, curator_email: { type: "string" }, curator_name: { type: "string" }, playlist_name: { type: "string" }, track_name: { type: "string" }, subject: { type: "string" }, body: { type: "string" } }, required: ["playlist_id", "curator_email", "track_name", "subject", "body"] },
     destructive: false,
     execute: async (args: any) => {
-      const res = await callFanFuelHub("control-center-api", { action: "send_pitch_email", ...args });
+      const res = await callFanFuelHub("execute-pitch", { action: "send_pitch_email", ...args });
       return JSON.stringify(res);
     },
   },
@@ -1348,7 +1406,7 @@ const AGENT_TOOLS: ToolDef[] = [
     parameters: { type: "object", properties: { playlist_id: { type: "string" }, status: { type: "string", description: "replied | placed | declined | do_not_pitch" }, notes: { type: "string" } }, required: ["playlist_id", "status"] },
     destructive: false,
     execute: async (args: any) => {
-      const res = await callFanFuelHub("control-center-api", { action: "update_pitch_status", ...args });
+      const res = await callFanFuelHub("update-pitch-status", { action: "update_pitch_status", ...args });
       return JSON.stringify(res);
     },
   },
@@ -2386,6 +2444,128 @@ serve(async (req) => {
         return new Response("ok");
       }
     }
+
+    // ── Pitch routing ──────────────────────────────────────────
+    const lowerText = messageText.toLowerCase().trim();
+
+    // "show pitch report"
+    if (lowerText === 'show pitch report' || lowerText === 'pitch report') {
+      const research = await getLastPlaylistResearch(chatId);
+      if (!research) {
+        await sendTelegram(chatId, "No playlist research found. Run 'find playlist opportunities for [track]' first.");
+      } else {
+        const playlists = await hubPlaylistBatch(research.ranked_playlist_ids);
+        if (!playlists.length) {
+          await sendTelegram(chatId, "Could not load playlist details. Try running research again.");
+        } else {
+          let report = "Pitch Report for \"" + research.track_name + "\":\n\n";
+          playlists.forEach((p: any, i: number) => {
+            const tier = p.tier || (i < 5 ? 1 : i < 12 ? 2 : 3);
+            const tierLabel = tier === 1 ? "Tier 1" : tier === 2 ? "Tier 2" : "Tier 3";
+            report += (i + 1) + ". " + (p.name || p.playlist_id) + " [" + tierLabel + "]";
+            if (p.followers) report += " (" + p.followers + " followers)";
+            if (p.pitch_status) report += " - " + p.pitch_status;
+            report += "\n";
+          });
+          report += "\nCommands: 'pitch N' to pitch one, 'pitch all tier 1' to batch pitch tier 1 playlists.";
+          await sendTelegram(chatId, report);
+        }
+      }
+      return new Response("ok");
+    }
+
+    // "pitch N" — pitch a single playlist by index
+    const pitchMatch = lowerText.match(/^pitch\s+(\d+)$/);
+    if (pitchMatch) {
+      const idx = parseInt(pitchMatch[1], 10) - 1;
+      const research = await getLastPlaylistResearch(chatId);
+      if (!research) {
+        await sendTelegram(chatId, "No playlist research found. Run research first.");
+        return new Response("ok");
+      }
+      if (idx < 0 || idx >= research.ranked_playlist_ids.length) {
+        await sendTelegram(chatId, "Invalid playlist number. Use 1-" + research.ranked_playlist_ids.length);
+        return new Response("ok");
+      }
+      const playlistId = research.ranked_playlist_ids[idx];
+      const playlists = await hubPlaylistBatch([playlistId]);
+      const p = playlists[0];
+      const tier = p?.tier || (idx < 5 ? 1 : idx < 12 ? 2 : 3);
+      if (tier === 3) {
+        await setPendingPitchTier3(chatId, { playlist_id: playlistId, track_name: research.track_name, ts: new Date().toISOString() });
+        await sendTelegram(chatId, "Playlist #" + (idx + 1) + " (" + (p?.name || playlistId) + ") is Tier 3. These have lower acceptance rates. Type 'confirm' to pitch anyway, or choose a different number.");
+        return new Response("ok");
+      }
+      const result = await callFanFuelHub("execute-pitch", { playlist_id: playlistId, track_name: research.track_name });
+      await sendTelegram(chatId, result?.message || ("Pitch sent to " + (p?.name || playlistId)));
+      return new Response("ok");
+    }
+
+    // "pitch all tier 1"
+    if (lowerText === 'pitch all tier 1') {
+      const research = await getLastPlaylistResearch(chatId);
+      if (!research) {
+        await sendTelegram(chatId, "No playlist research found. Run research first.");
+        return new Response("ok");
+      }
+      const playlists = await hubPlaylistBatch(research.ranked_playlist_ids);
+      const tier1 = playlists.filter((p: any, i: number) => (p.tier || (i < 5 ? 1 : 2)) === 1);
+      if (!tier1.length) {
+        await sendTelegram(chatId, "No Tier 1 playlists found in your research results.");
+        return new Response("ok");
+      }
+      const tier1Ids = tier1.map((p: any) => p.playlist_id || p.id);
+      await setPendingPitchBulk(chatId, { track_name: research.track_name, playlist_ids: tier1Ids, ts: new Date().toISOString() });
+      let msg = "Ready to pitch " + tier1.length + " Tier 1 playlists for \"" + research.track_name + "\":\n";
+      tier1.forEach((p: any, i: number) => { msg += (i + 1) + ". " + (p.name || p.playlist_id) + "\n"; });
+      msg += "\nType 'confirm all' to send all pitches.";
+      await sendTelegram(chatId, msg);
+      return new Response("ok");
+    }
+
+    // "confirm all" — execute bulk pitch
+    if (lowerText === 'confirm all') {
+      const pending = await getPendingPitchBulk(chatId);
+      if (!pending) {
+        await sendTelegram(chatId, "Nothing pending. Use 'pitch all tier 1' first.");
+        return new Response("ok");
+      }
+      await clearPendingPitchBulk(chatId);
+      let sent = 0;
+      for (const pid of pending.playlist_ids) {
+        try {
+          await callFanFuelHub("execute-pitch", { playlist_id: pid, track_name: pending.track_name });
+          sent++;
+        } catch (e) { console.error("Pitch failed for", pid, e); }
+      }
+      await sendTelegram(chatId, "Pitched " + sent + "/" + pending.playlist_ids.length + " Tier 1 playlists for \"" + pending.track_name + "\".");
+      return new Response("ok");
+    }
+
+    // "confirm" — confirm tier 3 single pitch
+    if (lowerText === 'confirm') {
+      const pending = await getPendingPitchTier3(chatId);
+      if (!pending) {
+        await sendTelegram(chatId, "Nothing pending to confirm.");
+        return new Response("ok");
+      }
+      await clearPendingPitchTier3(chatId);
+      const result = await callFanFuelHub("execute-pitch", { playlist_id: pending.playlist_id, track_name: pending.track_name });
+      await sendTelegram(chatId, result?.message || ("Pitch sent to " + pending.playlist_id));
+      return new Response("ok");
+    }
+
+    // "playlist X responded" / "playlist X rejected"
+    const statusMatch = lowerText.match(/^playlist\s+(.+?)\s+(responded|rejected|accepted)$/);
+    if (statusMatch) {
+      const playlistName = statusMatch[1];
+      const newStatus = statusMatch[2];
+      const result = await callFanFuelHub("update-pitch-status", { playlist_name: playlistName, status: newStatus });
+      await sendTelegram(chatId, result?.message || ("Updated pitch status for " + playlistName + " to " + newStatus));
+      return new Response("ok");
+    }
+    // ── End pitch routing ──────────────────────────────────────
+
 
     try {
       taskId = await createTaskRow(session.id, text, requestedModel);
