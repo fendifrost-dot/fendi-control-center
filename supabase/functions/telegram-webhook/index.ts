@@ -3022,7 +3022,7 @@ serve(async (req) => {
         await Promise.race([
           executeAgenticLoop(chatId, creditUserMsg, {
             taskId,
-            lane: "lane_do",
+            lane: "lane1_do",
             allowTools: true,
             workflowKey: creditWorkflowKey,
             sessionModel: (session?.active_model === "grok" ? "grok" : session?.active_model === "gemini" ? "gemini" : "chatgpt") as "grok" | "gemini" | "chatgpt",
@@ -3031,7 +3031,7 @@ serve(async (req) => {
         ]);
       } catch (err) {
         const errMsg = err instanceof Error ? err.message : "unknown";
-        const failResult = buildFailureResult({ execution_lane: "lane_do" }, errMsg);
+        const failResult = buildFailureResultJson({ execution_lane: "lane1_do" }, errMsg);
         await supabase.from("tasks").update({ status: "failed", error: errMsg.slice(0, 500), result_json: failResult }).eq("id", taskId);
         await sendMessage(chatId, `\u274C Failed: ${taskId} — ${errMsg.slice(0, 200)}`, `task|${taskId}|failed`);
       }
