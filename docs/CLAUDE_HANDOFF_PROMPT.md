@@ -37,7 +37,7 @@ git push -u origin handoff/claude-docs
 
 Open GitHub → **Compare & pull request** → `handoff/claude-docs` into `main` → merge.
 
-**Option B — Your local `main` already includes** commit `eca2059` (same docs + small comments in `creditGuardian.ts` / `telegram-webhook`). If your `main` has diverged from `origin/main`, **merge or rebase** with remote first, resolve conflicts, then `git push origin main`.
+**Option B — Your local `main`** includes these docs plus optional comment edits in `creditGuardian.ts` / `telegram-webhook` (see `git log`). If your `main` has diverged from `origin/main`, **merge or rebase** with remote first, resolve conflicts, then `git push origin main`.
 
 ---
 
