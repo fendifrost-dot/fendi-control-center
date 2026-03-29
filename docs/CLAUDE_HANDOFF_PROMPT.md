@@ -19,6 +19,28 @@ Use this as the **system or task preamble** when you want Claude to continue wor
 
 ---
 
+## Pushing to GitHub (credentials required)
+
+Automated pushes may fail with `Authentication failed`. Run from **your Mac** (where `gh` or GitHub credentials work):
+
+**Option A — Docs-only PR (clean, matches current `origin/main`):** a branch **`handoff/claude-docs`** was created with only:
+
+- `docs/CLAUDE_HANDOFF_PROMPT.md`
+- `docs/fairway-fixer-18/PROJECT_CONTEXT.md`
+
+```bash
+cd /path/to/fendi-control-center
+git fetch origin
+git checkout handoff/claude-docs
+git push -u origin handoff/claude-docs
+```
+
+Open GitHub → **Compare & pull request** → `handoff/claude-docs` into `main` → merge.
+
+**Option B — Your local `main` already includes** commit `eca2059` (same docs + small comments in `creditGuardian.ts` / `telegram-webhook`). If your `main` has diverged from `origin/main`, **merge or rebase** with remote first, resolve conflicts, then `git push origin main`.
+
+---
+
 ## After you change code
 
 1. **Commit and push to GitHub** (`main` or the default branch):
