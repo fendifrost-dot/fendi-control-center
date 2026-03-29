@@ -2441,17 +2441,17 @@ serve(async (req) => {
     }
 
     // ── Pitch routing ──────────────────────────────────────────
-    const lowerText = messageText.toLowerCase().trim();
+    let lowerText = messageText.toLowerCase().trim();
 
     // "show pitch report"
     if (lowerText === 'show pitch report' || lowerText === 'pitch report') {
       const research = await getLastPlaylistResearch(chatId);
       if (!research) {
-        await sendTelegram(chatId, "No playlist research found. Run 'find playlist opportunities for [track]' first.");
+        await sendMessage(chatId, "No playlist research found. Run 'find playlist opportunities for [track]' first.");
       } else {
         const playlists = await hubPlaylistBatch(research.ranked_playlist_ids);
         if (!playlists.length) {
-          await sendTelegram(chatId, "Could not load playlist details. Try running research again.");
+          await sendMessage(chatId, "Could not load playlist details. Try running research again.");
         } else {
           let report = "Pitch Report for \"" + research.track_name + "\":\n\n";
           playlists.forEach((p: any, i: number) => {
@@ -2463,7 +2463,7 @@ serve(async (req) => {
             report += "\n";
           });
           report += "\nCommands: 'pitch N' to pitch one, 'pitch all tier 1' to batch pitch tier 1 playlists.";
-          await sendTelegram(chatId, report);
+          await sendMessage(chatId, report);
         }
       }
       return new Response("ok");
@@ -2475,11 +2475,11 @@ serve(async (req) => {
       const idx = parseInt(pitchMatch[1], 10) - 1;
       const research = await getLastPlaylistResearch(chatId);
       if (!research) {
-        await sendTelegram(chatId, "No playlist research found. Run research first.");
+        await sendMessage(chatId, "No playlist research found. Run research first.");
         return new Response("ok");
       }
       if (idx < 0 || idx >= research.ranked_playlist_ids.length) {
-        await sendTelegram(chatId, "Invalid playlist number. Use 1-" + research.ranked_playlist_ids.length);
+        await sendMessage(chatId, "Invalid playlist number. Use 1-" + research.ranked_playlist_ids.length);
         return new Response("ok");
       }
       const playlistId = research.ranked_playlist_ids[idx];
@@ -2488,11 +2488,11 @@ serve(async (req) => {
       const tier = p?.tier || (idx < 5 ? 1 : idx < 12 ? 2 : 3);
       if (tier === 3) {
         await setPendingPitchTier3(chatId, { playlist_id: playlistId, track_name: research.track_name, ts: new Date().toISOString() });
-        await sendTelegram(chatId, "Playlist #" + (idx + 1) + " (" + (p?.name || playlistId) + ") is Tier 3. These have lower acceptance rates. Type 'confirm' to pitch anyway, or choose a different number.");
+        await sendMessage(chatId, "Playlist #" + (idx + 1) + " (" + (p?.name || playlistId) + ") is Tier 3. These have lower acceptance rates. Type 'confirm' to pitch anyway, or choose a different number.");
         return new Response("ok");
       }
       const result = await callFanFuelHub("execute-pitch", { playlist_id: playlistId, track_name: research.track_name });
-      await sendTelegram(chatId, result?.message || ("Pitch sent to " + (p?.name || playlistId)));
+      await sendMessage(chatId, result?.message || ("Pitch sent to " + (p?.name || playlistId)));
       return new Response("ok");
     }
 
@@ -2500,13 +2500,13 @@ serve(async (req) => {
     if (lowerText === 'pitch all tier 1') {
       const research = await getLastPlaylistResearch(chatId);
       if (!research) {
-        await sendTelegram(chatId, "No playlist research found. Run research first.");
+        await sendMessage(chatId, "No playlist research found. Run research first.");
         return new Response("ok");
       }
       const playlists = await hubPlaylistBatch(research.ranked_playlist_ids);
       const tier1 = playlists.filter((p: any, i: number) => (p.tier || (i < 5 ? 1 : 2)) === 1);
       if (!tier1.length) {
-        await sendTelegram(chatId, "No Tier 1 playlists found in your research results.");
+        await sendMessage(chatId, "No Tier 1 playlists found in your research results.");
         return new Response("ok");
       }
       const tier1Ids = tier1.map((p: any) => p.playlist_id || p.id);
@@ -2514,7 +2514,7 @@ serve(async (req) => {
       let msg = "Ready to pitch " + tier1.length + " Tier 1 playlists for \"" + research.track_name + "\":\n";
       tier1.forEach((p: any, i: number) => { msg += (i + 1) + ". " + (p.name || p.playlist_id) + "\n"; });
       msg += "\nType 'confirm all' to send all pitches.";
-      await sendTelegram(chatId, msg);
+      await sendMessage(chatId, msg);
       return new Response("ok");
     }
 
@@ -2522,7 +2522,7 @@ serve(async (req) => {
     if (lowerText === 'confirm all') {
       const pending = await getPendingPitchBulk(chatId);
       if (!pending) {
-        await sendTelegram(chatId, "Nothing pending. Use 'pitch all tier 1' first.");
+        await sendMessage(chatId, "Nothing pending. Use 'pitch all tier 1' first.");
         return new Response("ok");
       }
       await clearPendingPitchBulk(chatId);
@@ -2533,7 +2533,7 @@ serve(async (req) => {
           sent++;
         } catch (e) { console.error("Pitch failed for", pid, e); }
       }
-      await sendTelegram(chatId, "Pitched " + sent + "/" + pending.playlist_ids.length + " Tier 1 playlists for \"" + pending.track_name + "\".");
+      await sendMessage(chatId, "Pitched " + sent + "/" + pending.playlist_ids.length + " Tier 1 playlists for \"" + pending.track_name + "\".");
       return new Response("ok");
     }
 
@@ -2541,12 +2541,12 @@ serve(async (req) => {
     if (lowerText === 'confirm') {
       const pending = await getPendingPitchTier3(chatId);
       if (!pending) {
-        await sendTelegram(chatId, "Nothing pending to confirm.");
+        await sendMessage(chatId, "Nothing pending to confirm.");
         return new Response("ok");
       }
       await clearPendingPitchTier3(chatId);
       const result = await callFanFuelHub("execute-pitch", { playlist_id: pending.playlist_id, track_name: pending.track_name });
-      await sendTelegram(chatId, result?.message || ("Pitch sent to " + pending.playlist_id));
+      await sendMessage(chatId, result?.message || ("Pitch sent to " + pending.playlist_id));
       return new Response("ok");
     }
 
@@ -2556,7 +2556,7 @@ serve(async (req) => {
       const playlistName = statusMatch[1];
       const newStatus = statusMatch[2];
       const result = await callFanFuelHub("update-pitch-status", { playlist_name: playlistName, status: newStatus });
-      await sendTelegram(chatId, result?.message || ("Updated pitch status for " + playlistName + " to " + newStatus));
+      await sendMessage(chatId, result?.message || ("Updated pitch status for " + playlistName + " to " + newStatus));
       return new Response("ok");
     }
     // ── End pitch routing ──────────────────────────────────────
@@ -2992,7 +2992,7 @@ serve(async (req) => {
     // Natural language like "run system status" auto-routes to Lane 1
     // ══════════════════════════════════════════════════════════
     const EXECUTION_INTENT_PREFIXES = ["run ", "execute ", "trigger ", "start "];
-    const lowerText = text.toLowerCase().trim();
+    lowerText = text.toLowerCase().trim();
     const hasExecutionIntent = EXECUTION_INTENT_PREFIXES.some(p => lowerText.startsWith(p));
     const findPlaylistMatch =
       /\bfind\s+playlist\s+opportunities\b/i.test(lowerText) ||
