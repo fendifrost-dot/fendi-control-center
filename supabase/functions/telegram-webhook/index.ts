@@ -1,8 +1,3 @@
-
-  if (chatId) {
-    const rankedIds = ranked.slice(0, 20).map((p: any) => p.playlist_id || p.id);
-    await saveLastPlaylistResearch(chatId, { track_name: trackName, user_vibe: userVibe, ranked_playlist_ids: rankedIds, ts: new Date().toISOString() });
-  }
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
 
 
