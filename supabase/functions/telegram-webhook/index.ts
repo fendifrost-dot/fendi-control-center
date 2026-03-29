@@ -1762,7 +1762,7 @@ READ tools — run immediately, no approval needed:
   • scan_drive_overview
   • query_credit_guardian
   • get_system_status, list_failed_jobs, list_pending_approvals, list_connected_projects
-WRITE tools — ALWAYS call propose_plan first, then STOP:
+WRITE tools — ALWAYS call propose_plan first, then STOP (EXCEPTION: analyze_client_credit runs directly without propose_plan):
   • ingest_drive_clients
 WORKFLOW:
 1. Call scan_drive_overview and/or query_credit_guardian to understand current state
@@ -1774,7 +1774,7 @@ Systems:
   • Google Drive → client folders with dispute documents
   • Credit Guardian → dispute sessions, accounts, timeline events
   • Fendi Control Center → tasks, jobs, settings
-HARD RULE: propose_plan MUST be called before ingest_drive_clients. After calling propose_plan you MUST stop.
+HARD RULE: For analyze_client_credit, execute it DIRECTLY without propose_plan. For standalone ingest_drive_clients, call propose_plan first then stop.
 `
     : "";
   const systemPrompt = `${autonomousPrefix}You are the ${SYSTEM_IDENTITY}. You serve Fendi Frost as a personal command center assistant.
@@ -2991,7 +2991,7 @@ serve(async (req) => {
     // INTENT-BASED LANE 1 AUTO-PROMOTION
     // Natural language like "run system status" auto-routes to Lane 1
     // ══════════════════════════════════════════════════════════
-    const EXECUTION_INTENT_PREFIXES = ["run ", "execute ", "trigger ", "start "];
+    const EXECUTION_INTENT_PREFIXES = ["run ", "execute ", "trigger ", "start ", "pull up ", "check ", "analyze ", "get me ", "show me ", "do "];
     lowerText = text.toLowerCase().trim();
     const hasExecutionIntent = EXECUTION_INTENT_PREFIXES.some(p => lowerText.startsWith(p));
     const findPlaylistMatch =
@@ -3000,7 +3000,45 @@ serve(async (req) => {
       /\bplaylist\s+opportunities\s+for\s+/i.test(lowerText) ||
       (/\bplaylist\s+opportunities\b/i.test(lowerText) && /\bfor\s+\S+/i.test(lowerText)) ||
       /\bfind\s+playlists?\s+for\s+/i.test(lowerText);
+    // ── Credit analysis intent matching ──
+    const creditAnalysisMatch =
+      /\b(credit\s*report|credit\s*analysis|analyze\s*credit|check\s*credit|run\s*(the\s+)?(full\s+)?analysis|pull\s*up.*credit|credit.*analyz)\b/i.test(lowerText);
+    const clientNameMatch = text.match(/\b([A-Z][a-z]+\s+[A-Z][a-z]+)(?:'s)?\b/);
+    const creditClientName = clientNameMatch ? clientNameMatch[1] : null;
+
     let autoPromotedWorkflow: WorkflowEntry | undefined;
+    if (creditAnalysisMatch && IMPLEMENTED_WORKFLOW_KEYS.has("analyze_client_credit")) {
+      // ── AUTO-PROMOTE: Credit analysis → lane_do ──
+      const creditWorkflowKey = "analyze_client_credit";
+      const creditUserMsg = creditClientName
+        ? `Analyze credit for ${creditClientName}. Run the full pipeline: sync Drive, ingest documents, and run Credit Guardian analysis.`
+        : text;
+      await supabase.from("tasks").update({
+        status: "running",
+        selected_workflow: creditWorkflowKey,
+        result_json: { execution_lane: "lane_do", progress_step: "credit_auto_promoted", auto_promoted: true, client_name: creditClientName },
+      }).eq("id", taskId);
+      try {
+        await Promise.race([
+          executeAgenticLoop(chatId, creditUserMsg, {
+            taskId,
+            lane: "lane_do",
+            allowTools: true,
+            workflowKey: creditWorkflowKey,
+            sessionModel: (session?.active_model === "grok" ? "grok" : session?.active_model === "gemini" ? "gemini" : "chatgpt") as "grok" | "gemini" | "chatgpt",
+          }),
+          new Promise<never>((_, reject) => setTimeout(() => reject(new Error("TIMEOUT")), 150_000)),
+        ]);
+      } catch (err) {
+        const errMsg = err instanceof Error ? err.message : "unknown";
+        const failResult = buildFailureResult({ execution_lane: "lane_do" }, errMsg);
+        await supabase.from("tasks").update({ status: "failed", error: errMsg.slice(0, 500), result_json: failResult }).eq("id", taskId);
+        await sendMessage(chatId, `\u274C Failed: ${taskId} — ${errMsg.slice(0, 200)}`, `task|${taskId}|failed`);
+      }
+      _currentTaskId = null;
+      return new Response("ok");
+    }
+
     if (findPlaylistMatch) {
       // ── TWO-STEP CONVERSATIONAL CONFIRMATION ──
       // Instead of auto-executing, store pending + send vibe-check message
@@ -3269,6 +3307,8 @@ TWO-LANE RULE — You are in ASSISTANT MODE (Lane 2).
 - When the user asks to DO something (execute, run, trigger), respond:
   "This can be executed. Reply with \`/do <workflow>\` to run it."
   and suggest the matching workflow key.
+
+CREDIT ANALYSIS ROUTING: When the user asks about credit reports, credit analysis, credit disputes, or anything related to analyzing a client's credit — suggest /do analyze_client_credit. This is the full pipeline that syncs Drive, ingests documents, and runs Credit Guardian analysis. Do NOT suggest /do client_overview for credit analysis requests..
 
 Available commands:
 - /do <workflow> — Execute a workflow (Lane 1)
