@@ -2441,7 +2441,7 @@ serve(async (req) => {
     }
 
     // ── Pitch routing ──────────────────────────────────────────
-    let lowerText = messageText.toLowerCase().trim();
+    let lowerText = text.toLowerCase().trim();
 
     // "show pitch report"
     if (lowerText === 'show pitch report' || lowerText === 'pitch report') {
