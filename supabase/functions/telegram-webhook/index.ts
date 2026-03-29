@@ -13,6 +13,7 @@ const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
 const TELEGRAM_API = `https://api.telegram.org/bot${BOT_TOKEN}`;
 const SYSTEM_IDENTITY = "Fendi Control Center AI";
 // ─── Implemented workflow keys → handler names (deterministic routing) ───
+// Cardinality is IMPLEMENTED_WORKFLOW_KEYS.size (also exposed in /status health); do not hardcode counts in docs.
 const IMPLEMENTED_WORKFLOW_KEYS = new Set([
   "ping", "system_status", "resend_failed", "list_workflows", "help",
     "model_switch", "document_approval", "document_rejection",

@@ -1,7 +1,10 @@
 /**
  * Fairway Fixer (Credit Guardian) edge functions — shared fetch.
- * Default function name: cross-project-api (alias: control-center-api).
+ * Default function name: cross-project-api (same project also deploys control-center-api alias).
  * Set CREDIT_GUARDIAN_FUNCTION to override.
+ *
+ * Not to be confused with: Credit Compass (fendi-fight-plan) or CC Tax (taxgenerator) — those
+ * are different Supabase projects; they also use a function named control-center-api with Bearer auth.
  */
 export function getCreditGuardianUrl(): string {
   return Deno.env.get("CREDIT_GUARDIAN_URL") || "https://gflvvzkiuleeochqcdeb.supabase.co";
