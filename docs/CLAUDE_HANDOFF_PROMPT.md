@@ -1,6 +1,8 @@
 # Prompt for Claude — Fendi Control Hub / Fairway / Lovable
 
-Use this as the **system or task preamble** when you want Claude to continue work on these projects with correct repo boundaries and deploy flow.
+For **full system context, git state, and prioritized next steps**, read **`docs/CLAUDE_COMPREHENSIVE_ONBOARDING.md`** in this repo (or **`CLAUDE_COMPREHENSIVE_ONBOARDING.md`** in `Documents/Claude/Projects/Control Hub/` on the Mac).
+
+Use this file as the **short system or task preamble** when you want Claude to continue work on these projects with correct repo boundaries and deploy flow.
 
 ---
 
@@ -76,7 +78,7 @@ If you only have access to **fendi-control-center** in an agent session, commit 
 
 **One-line instruction for Claude:**
 
-> Copy `docs/fairway-fixer-18/PROJECT_CONTEXT.md` from `fendifrost-dot/fendi-control-center` to `PROJECT_CONTEXT.md` at the root of `fendifrost-dot/fairway-fixer-18`, commit, push, then confirm Lovable picked up the commit for Credit Guardian.
+> Copy `docs/fairway-fixer-18/PROJECT_CONTEXT.md` from `fendifrost-dot/fendi-control-center` to `PROJECT_CONTEXT.md` at the root of `fendifrost-dot/fairway-fixer-18`, commit, push, then confirm Lovable picked up the commit for the Credit Guardian / Credit Compass app.
 
 ---
 
