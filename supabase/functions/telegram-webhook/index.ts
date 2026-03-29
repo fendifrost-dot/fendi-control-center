@@ -3022,7 +3022,7 @@ serve(async (req) => {
         await Promise.race([
           executeAgenticLoop(chatId, creditUserMsg, {
             taskId,
-            lane: "lane_do",
+            lane: "lane1_do",
             allowTools: true,
             workflowKey: creditWorkflowKey,
             sessionModel: (session?.active_model === "grok" ? "grok" : session?.active_model === "gemini" ? "gemini" : "chatgpt") as "grok" | "gemini" | "chatgpt",
