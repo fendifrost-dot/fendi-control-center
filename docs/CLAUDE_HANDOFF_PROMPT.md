@@ -25,9 +25,10 @@ Use this file as the **short system or task preamble** when you want Claude to c
 
 Automated pushes may fail with `Authentication failed`. Run from **your Mac** (where `gh` or GitHub credentials work):
 
-**Option A — Docs-only PR (clean, matches current `origin/main`):** a branch **`handoff/claude-docs`** was created with only:
+**Option A — Docs-only PR (clean, matches current `origin/main`):** a branch **`handoff/claude-docs`** was created with at least:
 
 - `docs/CLAUDE_HANDOFF_PROMPT.md`
+- `docs/CLAUDE_COMPREHENSIVE_ONBOARDING.md` (add via merge/cherry-pick from `main` if not on that branch yet)
 - `docs/fairway-fixer-18/PROJECT_CONTEXT.md`
 
 ```bash
