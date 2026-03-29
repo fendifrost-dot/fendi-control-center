@@ -113,7 +113,7 @@ Return ONLY the JSON array, no markdown or explanation.`;
 
 async function pushEventsToCreditGuardian(clientName: string, events: any[]): Promise<{ success: boolean; count: number; error?: string }> {
   try {
-    const resp = await fetch(`${CG_URL}/functions/v1/control-center-api`, {
+    const resp = await fetch(`${CG_URL}/functions/v1/cross-project-api`, {
       method: "POST",
       headers: {
         "Authorization": `Bearer ${CG_KEY}`,
