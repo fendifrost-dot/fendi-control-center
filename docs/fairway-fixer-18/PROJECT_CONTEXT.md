@@ -1,5 +1,6 @@
 # Fairway Fixer — project context (for humans & Cursor)
 
+> **Names:** This repo is **Credit Guardian / Fairway Fixer** in code and **Credit Compass** in some Lovable labels — **same project** (rename/rebrand, not a separate app).  
 > **Sync:** A duplicate used for GitHub sync from the Control Center repo lives at **`fendi-control-center/docs/fairway-fixer-18/PROJECT_CONTEXT.md`**. Keep this file and **`fairway-fixer-18/PROJECT_CONTEXT.md`** (repo root) in lockstep; see `fendi-control-center/docs/CLAUDE_HANDOFF_PROMPT.md`.
 
 Forensic-grade **evidence ledger and operator console** for documenting credit-file disputes and bureau/data-furnisher correspondence. This is not a “credit repair bot”; the operator remains in control.

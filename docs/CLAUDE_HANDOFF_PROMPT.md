@@ -9,13 +9,13 @@ Use this as the **system or task preamble** when you want Claude to continue wor
 | Repo | Lovable / product | What to edit |
 |------|-------------------|--------------|
 | `fendi-control-center` | Control Center (Telegram, orchestration) | `supabase/functions/*`, especially `telegram-webhook`, `_shared/creditGuardian.ts` |
-| `fairway-fixer-18` | Credit Guardian (Fairway Fixer) | App + `supabase/functions/*`, `PROJECT_CONTEXT.md` at **repo root** |
-| `fendi-fight-plan` | Credit Compass (not FanFuel) | `supabase/functions/control-center-api` |
+| `fairway-fixer-18` | **Credit Guardian** + **Credit Compass** (same app; Lovable may show Credit Compass after rename) | App + `supabase/functions/*`, `PROJECT_CONTEXT.md` at **repo root** |
+| `fendi-fight-plan` | Legacy / optional — only if you still maintain a separate repo | Was previously confused with Credit Compass; **Credit Compass = fairway-fixer-18** now |
 | `taxgenerator` | CC Tax | `supabase/functions/control-center-api` |
 
-**FanFuel / playlists** use env `FANFUEL_HUB_URL` — a **separate** Supabase project, not the fight-plan repo.
+**FanFuel / playlists** use env `FANFUEL_HUB_URL` — a **separate** Supabase project.
 
-**Three different `control-center-api` functions** exist on three projects; auth differs (`x-api-key` vs Bearer). See `Documents/Claude/Projects/Control Hub/FENDI_CONTROL_HUB_FULL_AUDIT_2026-03-29.md` on this machine for the full map.
+**`control-center-api` name collision:** CC Tax and (legacy) other apps each expose their own function name. **Fairway** deploys `cross-project-api` and **`control-center-api` as the same handler** (`x-api-key`). See the full audit doc for Bearer vs `x-api-key` on `query_credit_compass`.
 
 ---
 
@@ -88,6 +88,6 @@ If you only have access to **fendi-control-center** in an agent session, commit 
 
 ## Constraints for agents
 
-- Do not confuse **Credit Compass** (`fendi-fight-plan`) with **FanFuel** (`FANFUEL_HUB_URL`).
+- **Credit Compass** is the **fairway-fixer-18** project (rebranded / display name); do not confuse with **FanFuel** (`FANFUEL_HUB_URL`).
 - Default CG endpoint from Control Center is **`cross-project-api`**; Fairway also deploys **`control-center-api`** as an alias on the **same** CG project.
 - Workflow count in the bot is **`IMPLEMENTED_WORKFLOW_KEYS.size`** — never hardcode a fixed number in documentation.

@@ -37,7 +37,7 @@ VALUES
   (
     'query_credit_compass',
     'Query Credit Compass',
-    'Directly queries Credit Compass (fendi-fight-plan) for credit assessment data, client records, dispute sessions, and credit strategy information.',
+    'Directly queries Credit Compass (fairway-fixer-18 / same project as Credit Guardian; Lovable may show Credit Compass) for credit assessment data, client records, dispute sessions, and credit strategy information.',
     '["credit compass", "credit assessment", "fight plan", "credit battle plan", "dispute session", "credit strategy", "assessment detail", "credit compass data"]'::jsonb,
     '["query_credit_compass", "query_credit_guardian"]'::jsonb
   )

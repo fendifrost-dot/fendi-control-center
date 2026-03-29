@@ -1078,7 +1078,7 @@ const AGENT_TOOLS: ToolDef[] = [
   {
     name: "query_credit_compass" as const,
     description:
-      "Query Credit Compass (fendi-fight-plan project) for credit assessment data, client credit records, dispute sessions, and credit improvement strategies. Use when the user asks about credit assessments, credit battle plans, or wants data from Credit Compass specifically.",
+      "Query Credit Compass (same Supabase/Lovable project as Credit Guardian — GitHub: fairway-fixer-18; Lovable may show the Credit Compass name) for credit assessment data, client records, dispute sessions, and strategy context. Use when the user asks about credit assessments, battle plans, or Credit Compass specifically.",
     parameters: {
       type: "object" as const,
       properties: {
@@ -1117,12 +1117,15 @@ const AGENT_TOOLS: ToolDef[] = [
       assessment_id?: string;
     }) => {
       const { action, client_name, client_id, assessment_id } = params;
-      // Set in Control Center Edge secrets to the Credit Compass project URL (https://….supabase.co). Find it: Lovable → Credit Compass → Cloud → Secrets / connection details, or fight-plan repo `src/integrations/supabase/client.ts` (VITE_SUPABASE_URL).
+      // Credit Compass = fairway-fixer-18 / Credit Guardian (same project); Lovable display name may say Credit Compass.
+      // Secrets: often same host as CREDIT_GUARDIAN_URL. This path uses Bearer → control-center-api (legacy shape).
+      // Fairway’s control-center-api handler is the same as cross-project-api and expects x-api-key — if CREDIT_COMPASS_URL
+      // points at Fairway and you get 401, align with CREDIT_GUARDIAN_KEY or refactor this tool to fetchCreditGuardian().
       const CREDIT_COMPASS_URL = Deno.env.get("CREDIT_COMPASS_URL");
       if (!CREDIT_COMPASS_URL) {
         return JSON.stringify({ error: "CREDIT_COMPASS_URL secret is not set in this project" });
       }
-      // fendi-fight-plan API key (same project’s service role or shared secret — stored as CREDIT_COMPASS_KEY in CC Edge secrets).
+      // Service role or shared secret for the Credit Compass / Fairway project (CREDIT_COMPASS_KEY in CC Edge secrets).
       const compassKey = Deno.env.get("CREDIT_COMPASS_KEY") ?? "";
       if (!compassKey) {
         return JSON.stringify({
