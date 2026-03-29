@@ -34,6 +34,16 @@ const SYNTHETIC_FIND_PLAYLIST_OPPORTUNITIES = {
   tools: ["find_playlist_opportunities"],
 };
 
+// Synthetic workflow entry for analyze_client_credit (fallback when registry is empty)
+const SYNTHETIC_ANALYZE_CLIENT_CREDIT = {
+  id: "synthetic-analyze-client-credit",
+  key: "analyze_client_credit",
+  name: "Analyze Client Credit",
+  description: "Full credit analysis pipeline: sync Drive, ingest documents, and run Credit Guardian analysis",
+  trigger_phrases: ["analyze credit", "credit report", "credit analysis", "run analysis", "pull up credit"],
+  tools: ["drive_sync", "ingest_drive_clients", "query_credit_guardian", "get_client_report", "generate_dispute_letters"],
+};
+
 // ─── Workflow registry fetch ────────────────────────────────────
 interface WorkflowEntry {
   key: string; name: string; description: string;
@@ -1940,6 +1950,11 @@ async function executeAgenticLoop(chatId: string, userMessage: string, opts: { t
   // Synthetic fallback — if registry missing find_playlist_opportunities, use built-in constant
   if (!matchedWorkflow && opts.workflowKey === "find_playlist_opportunities" && IMPLEMENTED_WORKFLOW_KEYS.has("find_playlist_opportunities")) {
     matchedWorkflow = SYNTHETIC_FIND_PLAYLIST_OPPORTUNITIES as any;
+    console.log(JSON.stringify({ ts: Date.now(), event: "workflow_synthetic_fallback", key: opts.workflowKey, taskId: opts.taskId }));
+  }
+  // Synthetic fallback — if registry missing analyze_client_credit, use built-in constant
+  if (!matchedWorkflow && opts.workflowKey === "analyze_client_credit" && IMPLEMENTED_WORKFLOW_KEYS.has("analyze_client_credit")) {
+    matchedWorkflow = SYNTHETIC_ANALYZE_CLIENT_CREDIT as any;
     console.log(JSON.stringify({ ts: Date.now(), event: "workflow_synthetic_fallback", key: opts.workflowKey, taskId: opts.taskId }));
   }
 
