@@ -1175,66 +1175,100 @@ const AGENT_TOOLS: ToolDef[] = [
       return JSON.stringify(await resp.json());
     },
   },
-  {
-    name: "query_credit_guardian" as const,
-    description: "Query or update Credit Guardian client data. Supports reading clients, client details, documents, recent activity, importing timeline events, and updating client records.",
-    destructive: false,
-    parameters: {
-      type: "object" as const,
-      properties: {
-        action: {
-          type: "string",
-          enum: ["get_clients", "get_client_detail", "get_documents", "get_recent_activity", "import_timeline_events", "update_client_record"],
-          description: "Which Credit Guardian API action to call.",
+    {
+      name: "query_credit_guardian" as const,
+      description: "Full Credit Guardian API. Supports: client CRUD, credit scores, bureau responses, credit reports, dispute stats, timelines, accounts, and summaries. Use action param to select operation.",
+      destructive: false,
+      parameters: {
+        type: "object" as const,
+        properties: {
+          action: {
+            type: "string",
+            enum: ["get_clients", "get_client_detail", "get_documents", "get_recent_activity", "import_timeline_events", "update_client_record", "get_client_accounts", "upsert_client_accounts", "get_score_history", "add_score_entry", "get_credit_reports", "save_credit_report", "get_bureau_responses", "save_bureau_response", "get_client_summaries", "save_client_summary", "get_bureau_narrative", "get_dispute_stats"],
+            description: "Which Credit Guardian API action to call.",
+          },
+          client_id: {
+            type: "string",
+            description: "Client UUID. Required for most per-client actions.",
+          },
+          client_name: {
+            type: "string",
+            description: "Client name for import_timeline_events (will match or create client).",
+          },
+          fields: {
+            type: "object",
+            description: "Fields to update for update_client_record (legal_name, preferred_name, email, phone, status, etc).",
+          },
+          events: {
+            type: "array",
+            description: "Array of timeline event objects for import_timeline_events.",
+          },
+          limit: {
+            type: "number",
+            description: "Max results for get_recent_activity (default 25, max 100).",
+          },
+          bureau: {
+            type: "string",
+            description: "Bureau name (equifax, experian, transunion) for get_bureau_responses, get_bureau_narrative, get_score_history.",
+          },
+          report_data: {
+            type: "object",
+            description: "Credit report data object for save_credit_report.",
+          },
+          response_data: {
+            type: "object",
+            description: "Bureau response data for save_bureau_response.",
+          },
+          summary_data: {
+            type: "object",
+            description: "Client summary data for save_client_summary.",
+          },
+          accounts: {
+            type: "array",
+            description: "Array of account objects for upsert_client_accounts.",
+          },
+          score_entry: {
+            type: "object",
+            description: "Score entry object for add_score_entry (bureau, score, source).",
+          },
         },
-        client_id: {
-          type: "string",
-          description: "Client UUID. Required for get_client_detail, get_documents, update_client_record.",
-        },
-        client_name: {
-          type: "string",
-          description: "Client name for import_timeline_events (will match or create client).",
-        },
-        fields: {
-          type: "object",
-          description: "Fields to update for update_client_record (legal_name, preferred_name, email, phone, status, notes).",
-        },
-        events: {
-          type: "array",
-          description: "Array of timeline event objects for import_timeline_events.",
-        },
-        limit: {
-          type: "number",
-          description: "Max results for get_recent_activity (default 25, max 100).",
-        },
+        required: ["action"],
       },
-      required: ["action"],
+      execute: async (args: { action: string; client_id?: string; client_name?: string; fields?: Record<string, unknown>; events?: unknown[]; limit?: number; bureau?: string; report_data?: Record<string, unknown>; response_data?: Record<string, unknown>; summary_data?: Record<string, unknown>; accounts?: unknown[]; score_entry?: Record<string, unknown> }) => {
+        const CG_URL = Deno.env.get("CREDIT_GUARDIAN_URL") || "https://gflvvzkiuleeochqcdeb.supabase.co";
+        const CG_KEY = Deno.env.get("CREDIT_GUARDIAN_KEY")!;
+        const payload: Record<string, unknown> = { action: args.action };
+        // Forward all optional params
+        if (args.client_id) payload.client_id = args.client_id;
+        if (args.client_name) payload.client_name = args.client_name;
+        if (args.fields) payload.fields = args.fields;
+        if (args.events) payload.events = args.events;
+        if (args.limit) payload.limit = args.limit;
+        if (args.bureau) payload.bureau = args.bureau;
+        if (args.report_data) payload.report_data = args.report_data;
+        if (args.response_data) payload.response_data = args.response_data;
+        if (args.summary_data) payload.summary_data = args.summary_data;
+        if (args.accounts) payload.accounts = args.accounts;
+        if (args.score_entry) payload.score_entry = args.score_entry;
+        // Also forward any params sub-object for backward compat
+        const params: Record<string, unknown> = {};
+        if (args.client_id) params.client_id = args.client_id;
+        if (args.fields) params.fields = args.fields;
+        if (args.limit) params.limit = args.limit;
+        if (Object.keys(params).length > 0) payload.params = params;
+        const resp = await fetch(`${CG_URL}/functions/v1/cross-project-api`, {
+          method: "POST",
+          headers: {
+            "Authorization": `Bearer ${CG_KEY}`,
+            "Content-Type": "application/json",
+            "x-api-key": CG_KEY,
+          },
+          body: JSON.stringify(payload),
+        });
+        if (!resp.ok) throw new Error(`Credit Guardian query failed: ${resp.status} ${await resp.text()}`);
+        return JSON.stringify(await resp.json());
+      },
     },
-    execute: async (args: { action: string; client_id?: string; client_name?: string; fields?: Record<string, unknown>; events?: any[]; limit?: number }) => {
-      const CG_URL = Deno.env.get("CREDIT_GUARDIAN_URL") || "https://gflvvzkiuleeochqcdeb.supabase.co";
-      const CG_KEY = Deno.env.get("CREDIT_GUARDIAN_KEY")!;
-      const payload: Record<string, unknown> = { action: args.action };
-      if (args.client_id || args.fields || args.limit) {
-        payload.params = {};
-        if (args.client_id) (payload.params as any).client_id = args.client_id;
-        if (args.fields) (payload.params as any).fields = args.fields;
-        if (args.limit) (payload.params as any).limit = args.limit;
-      }
-      if (args.client_name) payload.client_name = args.client_name;
-      if (args.events) payload.events = args.events;
-      const resp = await fetch(`${CG_URL}/functions/v1/cross-project-api`, {
-        method: "POST",
-        headers: {
-          "Authorization": `Bearer ${CG_KEY}`,
-          "Content-Type": "application/json",
-          "x-api-key": CG_KEY,
-        },
-        body: JSON.stringify(payload),
-      });
-      if (!resp.ok) throw new Error(`Credit Guardian query failed: ${resp.status} ${await resp.text()}`);
-      return JSON.stringify(await resp.json());
-    },
-  },
   {
     name: "scan_drive_overview" as const,
     description: "Read-only scan of Google Drive client folders. Returns client names, file counts, and file types — does NOT read file contents. Call this first in autonomous mode to understand what's in Drive. Safe to call without approval.",
