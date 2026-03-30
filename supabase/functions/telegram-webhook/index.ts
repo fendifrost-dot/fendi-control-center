@@ -3256,7 +3256,7 @@ serve(async (req) => {
       }).eq("id", taskId);
 
       console.log(`[LANE1] Executing workflow '${chosen!.key}' via agentic loop taskId=${taskId}`);
-      const LOOP_TIMEOUT_MS = 35_000;
+      const LOOP_TIMEOUT_MS = 50_000;
       const timeoutPromise = new Promise<never>((_, reject) =>
         setTimeout(() => reject(new Error("TIMEOUT")), LOOP_TIMEOUT_MS)
       );
