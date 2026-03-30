@@ -2207,6 +2207,7 @@ Now provide a clear, concise summary for the user based on the results. Use mark
       result_json: { execution_complete: true, workflow: opts.workflowKey, progress_step: "F_succeeded", summary: summary.slice(0, 2000), toolResults: toolResults.map(r => r.slice(0, 500)), model_used: opts.sessionModel, execution_duration_ms: executionDuration, execution_lock: null, execution_lock_released_ts: Date.now() },
     }).eq("id", opts.taskId);
     logEvent({ event: "task_succeeded", taskId: opts.taskId, workflow: opts.workflowKey, execution_duration_ms: executionDuration });
+      await flushTelegramOutbox(chatId, 10);
     await sendMessage(chatId, `✅ Done: \`${opts.taskId}\``, {}, `task:${opts.taskId}:done`);
 
   } else if (confirmationButtons.length > 0) {
@@ -2242,6 +2243,7 @@ Now provide a clear, concise summary for the user based on the results. Use mark
       selected_tools: executedToolNames,
       result_json: { execution_complete: true, workflow: opts.workflowKey, awaiting_confirmation: true, toolResults: toolResults.map(r => r.slice(0, 500)), model_used: opts.sessionModel, execution_duration_ms: executionDuration, execution_lock: null, execution_lock_released_ts: Date.now() },
     }).eq("id", opts.taskId);
+      await flushTelegramOutbox(chatId, 10);
     await sendMessage(chatId, `✅ Done: \`${opts.taskId}\``, {}, `task:${opts.taskId}:done`);
 
   } else {
@@ -2252,6 +2254,7 @@ Now provide a clear, concise summary for the user based on the results. Use mark
       selected_tools: [],
       result_json: { execution_complete: true, workflow: opts.workflowKey, text_response: (result.text || "").slice(0, 2000), model_used: opts.sessionModel, execution_duration_ms: executionDuration, execution_lock: null, execution_lock_released_ts: Date.now() },
     }).eq("id", opts.taskId);
+      await flushTelegramOutbox(chatId, 10);
     await sendMessage(chatId, `✅ Done: \`${opts.taskId}\``, {}, `task:${opts.taskId}:done`);
   }
 }
@@ -3272,6 +3275,7 @@ serve(async (req) => {
         await supabase.from("tasks").update({ status: "failed", error: errMsg.slice(0, 300), result_json: failResult }).eq("id", taskId);
         await sendMessage(chatId, `❌ Failed: \`${taskId}\` — ${errMsg.slice(0, 200)}`, {}, `task:${taskId}:failed`);
       }
+    await flushTelegramOutbox(chatId, 10);
       _currentTaskId = null;
       return new Response("ok");
     }
