@@ -1543,8 +1543,12 @@ const AGENT_TOOLS: ToolDef[] = [
     name: "get_client_report",
     description: "Get a full credit analysis summary for a client - negative tradelines, hard inquiries, public records, bureaus covered. Use when asked to show, read, or summarize a client's credit data.",
     parameters: {
-      client_name: { type: "string", description: "Client name (e.g. 'Nicholas', 'Corey', 'Lamonze')" },
-      bureau: { type: "string", description: "Optional: filter by bureau - equifax, experian, transunion" },
+      type: "object" as const,
+      properties: {
+        client_name: { type: "string", description: "Client name (e.g. 'Nicholas', 'Corey', 'Lamonze')" },
+        bureau: { type: "string", description: "Optional: filter by bureau - equifax, experian, transunion" },
+      },
+      required: ["client_name"],
     },
     destructive: false,
     execute: async (params: any) => {
