@@ -176,6 +176,9 @@ async function pushEventsToCreditGuardian(clientName: string, events: any[]): Pr
     if (data.error) {
       return { success: false, count: 0, error: String(data.error).slice(0, 200) };
     }
+        if (data.errors && data.errors.length > 0) {
+                return { success: false, count: data.imported_count ?? 0, error: `Batch errors: ${JSON.stringify(data.errors).slice(0, 200)}` };
+        }
     return { success: true, count: data.imported_count ?? events.length };
   } catch (err) {
     return { success: false, count: 0, error: String(err).slice(0, 200) };
