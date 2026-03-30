@@ -25,7 +25,7 @@ const SUPPORTED_MIMES = new Set([
   "application/vnd.google-apps.document",
 ]);
 
-const MAX_RUNTIME_MS = 50000; // Return early at 50s to avoid 60s hard timeout
+const MAX_RUNTIME_MS = 25000; // Return early at 25s to avoid timeout chain
 
 // --- Drive helpers ---
 
@@ -70,6 +70,8 @@ async function downloadFileContent(
   return { base64, fileMime: mimeType };
 }
 
+// --- AI extraction via Gemini (text + multimodal) ---
+
 const EXTRACTION_PROMPT = `You are a forensic credit analyst. Analyze this document and extract ALL timeline events related to credit disputes, account changes, bureau responses, or financial events.\n\nReturn a JSON array of events. Each event should have:\n- "date": ISO date string or "unknown"\n- "event_type": one of ["dispute_filed", "bureau_response", "account_opened", "account_closed", "payment_missed", "collection_added", "collection_removed", "inquiry_added", "inquiry_removed", "score_change", "letter_sent", "letter_received", "other"]\n- "description": brief description\n- "bureau": "equifax" | "experian" | "transunion" | null\n- "account_name": creditor/account name if mentioned, null otherwise\n- "confidence": 0.0-1.0\n\nIf no credit-related events are found, return an empty array [].\nReturn ONLY the JSON array, no markdown or explanation.`;
 
 async function extractTimelineEvents(
@@ -86,6 +88,7 @@ async function extractTimelineEvents(
   } else {
     return [];
   }
+
   const resp = await fetch(
     `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${GEMINI_KEY}`,
     {
@@ -109,6 +112,8 @@ async function extractTimelineEvents(
   }
   return [];
 }
+
+// --- Credit Guardian integration ---
 
 async function pushEventsToCreditGuardian(
   clientName: string,
@@ -137,53 +142,72 @@ async function pushEventsToCreditGuardian(
   }
 }
 
+// --- Main handler ---
+
 serve(async (req) => {
   if (req.method === "OPTIONS") return new Response(null, { headers: corsHeaders });
+
   const startTime = Date.now();
+
   try {
     const body = await req.json().catch(() => ({}));
     const filterClientName = body.client_name?.toLowerCase()?.trim();
-    const maxFiles = body.max_files ?? 5;
-    const skipClients = body.skip_clients ?? 0;
+    const maxFiles = body.max_files ?? 2; // Default: process max 2 files per invocation
+    const skipClients = body.skip_clients ?? 0; // Skip first N clients (for pagination)
+
     console.log("Starting Drive ingestion...");
     console.log(`Root folder: ${DRIVE_FOLDER_ID}`);
     console.log(`CG target: ${CG_URL}/functions/v1/cross-project-api`);
     console.log(`CG key set: ${CG_KEY ? "yes (" + CG_KEY.slice(0, 6) + "...)" : "NO - events will not push!"}`);
     console.log(`Max files: ${maxFiles}, Skip clients: ${skipClients}`);
     if (filterClientName) console.log(`Filtering to client: ${filterClientName}`);
+
     const { files: subfolders } = await listSubfolders(DRIVE_FOLDER_ID);
     console.log(`Found ${subfolders?.length || 0} client folders`);
+
     let totalFilesProcessed = 0;
     let timedOut = false;
     let clientsSkipped = 0;
+
     const results: Array<{
       client: string; folder_id: string; files_processed: number;
       events_extracted: number; events_pushed: number; errors: string[];
     }> = [];
+
     for (const folder of subfolders || []) {
+      // Check time limit
       if (Date.now() - startTime > MAX_RUNTIME_MS) {
-        console.log(`Approaching timeout after ${(Date.now() - startTime) / 1000}s - returning partial results`);
+        console.log(`Approaching timeout after ${(Date.now() - startTime) / 1000}s â returning partial results`);
         timedOut = true;
         break;
       }
+
       if (filterClientName && !folder.name.toLowerCase().includes(filterClientName)) continue;
+
+      // Skip clients for pagination
       if (!filterClientName && clientsSkipped < skipClients) {
         clientsSkipped++;
         continue;
       }
+
+      // Check file limit
       if (totalFilesProcessed >= maxFiles) {
-        console.log(`Hit max_files limit (${maxFiles}) - returning partial results`);
+        console.log(`Hit max_files limit (${maxFiles}) â returning partial results`);
         timedOut = true;
         break;
       }
+
       const clientResult = {
         client: folder.name, folder_id: folder.id, files_processed: 0,
         events_extracted: 0, events_pushed: 0, errors: [] as string[],
       };
+
       try {
         const { files } = await listFilesInFolder(folder.id);
         const supportedFiles = (files || []).filter((f: any) => SUPPORTED_MIMES.has(f.mimeType));
         console.log(`${folder.name}: ${supportedFiles.length} supported files (of ${(files || []).length} total)`);
+
+        // Skip files already tracked in documents table
         const newFiles: any[] = [];
         for (const file of supportedFiles) {
           const { data: existing } = await supabase
@@ -193,27 +217,34 @@ serve(async (req) => {
             .eq("is_deleted", false)
             .maybeSingle();
           if (existing) {
-            console.log(`  Already tracked: ${file.name} - skipping`);
+            console.log(`  Already tracked: ${file.name} â skipping`);
           } else {
             newFiles.push(file);
           }
         }
+
         if (newFiles.length === 0) {
-          console.log(`  All files already tracked for ${folder.name} - skipping`);
+          console.log(`  All files already tracked for ${folder.name} â skipping`);
           results.push(clientResult);
           continue;
         }
+
         console.log(`  ${newFiles.length} new files to process for ${folder.name}`);
+
         let allEvents: any[] = [];
+
         for (const file of newFiles) {
+          // Check limits before each file
           if (totalFilesProcessed >= maxFiles) break;
           if (Date.now() - startTime > MAX_RUNTIME_MS) {
             timedOut = true;
             break;
           }
+
           try {
             console.log(`  Processing: ${file.name} (${file.mimeType})`);
             const content = await downloadFileContent(file.id, file.mimeType);
+
             if (content.text && content.text.trim().length < 50) {
               console.log(`    Skipping ${file.name}: text too short`);
               continue;
@@ -222,15 +253,18 @@ serve(async (req) => {
               console.log(`    Skipping ${file.name}: file too small`);
               continue;
             }
+
             const events = await extractTimelineEvents(file.name, content);
             console.log(`    Extracted ${events.length} events from ${file.name}`);
             allEvents.push(...events.map((e) => ({ ...e, source_file: file.name, drive_file_id: file.id })));
             clientResult.files_processed++;
             totalFilesProcessed++;
+
+            // Track the document immediately after processing
             try {
               const { data: clientRecord } = await supabase
                 .from("clients").select("id").eq("drive_folder_id", folder.id).maybeSingle();
-              let clientId;
+              let clientId: string;
               if (clientRecord) {
                 clientId = clientRecord.id;
               } else {
@@ -257,7 +291,9 @@ serve(async (req) => {
             clientResult.errors.push(errMsg);
           }
         }
+
         clientResult.events_extracted = allEvents.length;
+
         if (allEvents.length > 0) {
           const pushResult = await pushEventsToCreditGuardian(folder.name, allEvents);
           if (pushResult.success) {
@@ -272,8 +308,10 @@ serve(async (req) => {
         clientResult.errors.push(String(folderErr).slice(0, 200));
         console.error(`Error processing folder ${folder.name}:`, folderErr);
       }
+
       results.push(clientResult);
     }
+
     const summary = {
       total_clients: results.length,
       total_files_processed: results.reduce((s, r) => s + r.files_processed, 0),
@@ -284,6 +322,7 @@ serve(async (req) => {
       elapsed_ms: Date.now() - startTime,
       clients: results,
     };
+
     console.log("Ingestion complete:", JSON.stringify(summary, null, 2));
     return new Response(JSON.stringify(summary), {
       headers: { ...corsHeaders, "Content-Type": "application/json" },
