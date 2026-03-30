@@ -1,0 +1,1 @@
+UPDATE bot_settings SET setting_value = 'openai' WHERE setting_key = 'ai_model';
