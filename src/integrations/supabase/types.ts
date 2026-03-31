@@ -160,6 +160,72 @@ export type Database = {
         }
         Relationships: []
       }
+      credit_analyses: {
+        Row: {
+          analysis: Json
+          client_id: string
+          created_at: string | null
+          id: string
+          model: string | null
+          updated_at: string | null
+        }
+        Insert: {
+          analysis: Json
+          client_id: string
+          created_at?: string | null
+          id?: string
+          model?: string | null
+          updated_at?: string | null
+        }
+        Update: {
+          analysis?: Json
+          client_id?: string
+          created_at?: string | null
+          id?: string
+          model?: string | null
+          updated_at?: string | null
+        }
+        Relationships: []
+      }
+      dispute_letters: {
+        Row: {
+          account_name: string | null
+          bureau: string
+          client_id: string
+          created_at: string | null
+          dispute_reason: string | null
+          id: string
+          letter_content: string | null
+          model: string | null
+          status: string | null
+          updated_at: string | null
+        }
+        Insert: {
+          account_name?: string | null
+          bureau: string
+          client_id: string
+          created_at?: string | null
+          dispute_reason?: string | null
+          id?: string
+          letter_content?: string | null
+          model?: string | null
+          status?: string | null
+          updated_at?: string | null
+        }
+        Update: {
+          account_name?: string | null
+          bureau?: string
+          client_id?: string
+          created_at?: string | null
+          dispute_reason?: string | null
+          id?: string
+          letter_content?: string | null
+          model?: string | null
+          status?: string | null
+          updated_at?: string | null
+        }
+        Relationships: []
+      }
       documents: {
         Row: {
           bureau: string | null
@@ -589,6 +655,75 @@ export type Database = {
             referencedColumns: ["id"]
           },
         ]
+      }
+      pitch_drafts: {
+        Row: {
+          created_at: string | null
+          curator_email: string | null
+          curator_name: string | null
+          id: string
+          model: string | null
+          pitch_content: string | null
+          playlist_id: string | null
+          status: string | null
+          updated_at: string | null
+        }
+        Insert: {
+          created_at?: string | null
+          curator_email?: string | null
+          curator_name?: string | null
+          id?: string
+          model?: string | null
+          pitch_content?: string | null
+          playlist_id?: string | null
+          status?: string | null
+          updated_at?: string | null
+        }
+        Update: {
+          created_at?: string | null
+          curator_email?: string | null
+          curator_name?: string | null
+          id?: string
+          model?: string | null
+          pitch_content?: string | null
+          playlist_id?: string | null
+          status?: string | null
+          updated_at?: string | null
+        }
+        Relationships: []
+      }
+      playlist_research: {
+        Row: {
+          artist_name: string
+          created_at: string | null
+          genre: string | null
+          id: string
+          model: string | null
+          research: Json
+          track_name: string
+          updated_at: string | null
+        }
+        Insert: {
+          artist_name: string
+          created_at?: string | null
+          genre?: string | null
+          id?: string
+          model?: string | null
+          research: Json
+          track_name: string
+          updated_at?: string | null
+        }
+        Update: {
+          artist_name?: string
+          created_at?: string | null
+          genre?: string | null
+          id?: string
+          model?: string | null
+          research?: Json
+          track_name?: string
+          updated_at?: string | null
+        }
+        Relationships: []
       }
       sessions: {
         Row: {
