@@ -1,0 +1,7 @@
+CREATE TABLE IF NOT EXISTS credit_analyses (id UUID PRIMARY KEY DEFAULT gen_random_uuid(), client_id TEXT NOT NULL, analysis JSONB NOT NULL, model TEXT DEFAULT 'claude-sonnet-4-20250514', created_at TIMESTAMPTZ DEFAULT now(), updated_at TIMESTAMPTZ DEFAULT now());
+
+CREATE TABLE IF NOT EXISTS dispute_letters (id UUID PRIMARY KEY DEFAULT gen_random_uuid(), client_id TEXT NOT NULL, bureau TEXT NOT NULL, account_name TEXT, dispute_reason TEXT, letter_content TEXT, status TEXT DEFAULT 'draft' CHECK (status IN ('draft','approved','sent','responded')), model TEXT DEFAULT 'claude-sonnet-4-20250514', created_at TIMESTAMPTZ DEFAULT now(), updated_at TIMESTAMPTZ DEFAULT now());
+
+CREATE TABLE IF NOT EXISTS playlist_research (id UUID PRIMARY KEY DEFAULT gen_random_uuid(), track_name TEXT NOT NULL, artist_name TEXT NOT NULL, genre TEXT, research JSONB NOT NULL, model TEXT DEFAULT 'gpt-4o-mini', created_at TIMESTAMPTZ DEFAULT now(), updated_at TIMESTAMPTZ DEFAULT now());
+
+CREATE TABLE IF NOT EXISTS pitch_drafts (id UUID PRIMARY KEY DEFAULT gen_random_uuid(), playlist_id TEXT, curator_name TEXT, curator_email TEXT, pitch_content TEXT, status TEXT DEFAULT 'draft' CHECK (status IN ('draft','approved','sent','responded')), model TEXT DEFAULT 'gpt-4o-mini', created_at TIMESTAMPTZ DEFAULT now(), updated_at TIMESTAMPTZ DEFAULT now());
