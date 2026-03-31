@@ -90,18 +90,18 @@ async function downloadFile(fileId: string, mimeType: string): Promise<{ text: s
 const EXTRACTION_PROMPT = `You are a forensic credit analyst. Analyze this document and extract ALL timeline events related to credit disputes, account changes, bureau responses, or financial events.
 
 Return a JSON array of events. Each event MUST have:
-- "date": YYYY-MM-DD format date string. If the exact date is unknown, use the first day of the month (e.g., "2024-03-01"). If no date can be determined at all, use "unknown". NEVER return dates before year 2000. If you see a date that seems like 1969 or 1970, it is an error — use "unknown" instead.
+- "date": YYYY-MM-DD format date string. If the exact date is unknown, use the first day of the month (e.g., "2024-03-01"). If no date can be determined at all, use "unknown". NEVER return dates before year 2000. If you see a date that seems like 1969 or 1970, it is an error â use "unknown" instead.
 - "event_type": one of ["dispute_filed", "bureau_response", "account_opened", "account_closed", "payment_missed", "collection_added", "collection_removed", "inquiry_added", "inquiry_removed", "score_change", "letter_sent", "letter_received", "other"]
 - "description": detailed description of the event including any account numbers, amounts, or reference numbers mentioned
 - "bureau": "equifax" | "experian" | "transunion" | null
 - "account_name": creditor/account name if mentioned, null otherwise
 - "confidence": 0.0-1.0
 
-IMPORTANT: Extract EVERY piece of information. Include account names, dates, dispute reasons, response details, amounts, and any other relevant data. Be thorough — this data is used for legal credit repair tracking.
+IMPORTANT: Extract EVERY piece of information. Include account names, dates, dispute reasons, response details, amounts, and any other relevant data. Be thorough â this data is used for legal credit repair tracking.
 
 Return ONLY the JSON array, no markdown or explanation.`;
 
-// Use Gemini multimodal API — can read PDFs and images natively
+// Use Gemini multimodal API â can read PDFs and images natively
 async function extractWithGeminiMultimodal(fileName: string, base64Data: string, mimeType: string): Promise<any[]> {
   console.log(`  Gemini multimodal extraction for ${fileName} (${mimeType})`);
   const parts: any[] = [
@@ -202,7 +202,7 @@ async function extractWithGrok(fileName: string, textContent: string): Promise<a
   return [];
 }
 
-// Validate and fix dates — reject 1969/1970 epoch dates
+// Validate and fix dates â reject 1969/1970 epoch dates
 function validateEvents(events: any[]): any[] {
   return events.map(e => {
     let date = e.date;
@@ -210,7 +210,7 @@ function validateEvents(events: any[]): any[] {
       // Check for epoch dates (1969, 1970) or dates before 2000
       const year = parseInt(date.substring(0, 4), 10);
       if (isNaN(year) || year < 2000 || year > 2030) {
-        console.log(`  Fixed invalid date ${date} → "unknown"`);
+        console.log(`  Fixed invalid date ${date} â "unknown"`);
         date = "unknown";
       }
     }
@@ -320,7 +320,7 @@ async function trackDocument(file: any, folder: any): Promise<void> {
       .map((b) => b.toString(16).padStart(2, "0"))
       .join("");
 
-    await supabase.from("documents").insert({
+    const { error: insertErr } = await supabase.from("documents").insert({
       client_id: clientId,
       drive_file_id: file.id,
       drive_modified_time: file.modifiedTime,
@@ -333,6 +333,11 @@ async function trackDocument(file: any, folder: any): Promise<void> {
       status: "ingested",
       is_deleted: false,
     });
+    if (insertErr) {
+      console.error(`  Doc insert FAILED for ${file.name}: ${JSON.stringify(insertErr)}`);
+      throw insertErr;
+    }
+    console.log(`  Doc tracked successfully: ${file.name}`);
   } catch (docErr) {
     console.error(`  Doc tracking error for ${file.name}:`, docErr);
   }
