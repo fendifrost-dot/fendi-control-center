@@ -13,6 +13,7 @@ const RAW_DRIVE_FOLDER = Deno.env.get("DRIVE_FOLDER_ID")!;
 const DRIVE_FOLDER_ID = RAW_DRIVE_FOLDER.includes("/folders/")
   ? RAW_DRIVE_FOLDER.split("/folders/").pop()!.split("?")[0]
   : RAW_DRIVE_FOLDER;
+
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
 const SUPABASE_SERVICE_ROLE_KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
 const GROK_KEY = Deno.env.get("Frost_Grok")!;
@@ -58,6 +59,7 @@ async function downloadFile(fileId: string, mimeType: string): Promise<{ text: s
     if (!resp.ok) throw new Error(`Download failed: ${resp.status}`);
     const arrayBuf = await resp.arrayBuffer();
     const bytes = new Uint8Array(arrayBuf);
+
     // Convert to base64
     let binary = "";
     const chunkSize = 8192;
@@ -66,6 +68,7 @@ async function downloadFile(fileId: string, mimeType: string): Promise<{ text: s
       binary += String.fromCharCode(...chunk);
     }
     const base64 = btoa(binary);
+
     // Also try to extract text (works for some DOCX, not for PDF)
     let text = "";
     try {
@@ -79,6 +82,7 @@ async function downloadFile(fileId: string, mimeType: string): Promise<{ text: s
     } catch {
       text = "";
     }
+
     return { text, base64, rawMime: mimeType };
   }
 }
@@ -86,25 +90,24 @@ async function downloadFile(fileId: string, mimeType: string): Promise<{ text: s
 const EXTRACTION_PROMPT = `You are a forensic credit analyst. Analyze this document and extract ALL timeline events related to credit disputes, account changes, bureau responses, or financial events.
 
 Return a JSON array of events. Each event MUST have:
-- "date": YYYY-MM-DD format date string. If the exact date is unknown, use the first day of the month (e.g., "2024-03-01"). If no date can be determined at all, use "unknown". NEVER return dates before year 2000. If you see a date that seems like 1969 or 1970, it is an error â use "unknown" instead.
+- "date": YYYY-MM-DD format date string. If the exact date is unknown, use the first day of the month (e.g., "2024-03-01"). If no date can be determined at all, use "unknown". NEVER return dates before year 2000. If you see a date that seems like 1969 or 1970, it is an error — use "unknown" instead.
 - "event_type": one of ["dispute_filed", "bureau_response", "account_opened", "account_closed", "payment_missed", "collection_added", "collection_removed", "inquiry_added", "inquiry_removed", "score_change", "letter_sent", "letter_received", "other"]
 - "description": detailed description of the event including any account numbers, amounts, or reference numbers mentioned
 - "bureau": "equifax" | "experian" | "transunion" | null
 - "account_name": creditor/account name if mentioned, null otherwise
 - "confidence": 0.0-1.0
 
-IMPORTANT: Extract EVERY piece of information. Include account names, dates, dispute reasons, response details, amounts, and any other relevant data. Be thorough â this data is used for legal credit repair tracking.
+IMPORTANT: Extract EVERY piece of information. Include account names, dates, dispute reasons, response details, amounts, and any other relevant data. Be thorough — this data is used for legal credit repair tracking.
 
 Return ONLY the JSON array, no markdown or explanation.`;
 
-// Use Gemini multimodal API â can read PDFs and images natively
+// Use Gemini multimodal API — can read PDFs and images natively
 async function extractWithGeminiMultimodal(fileName: string, base64Data: string, mimeType: string): Promise<any[]> {
   console.log(`  Gemini multimodal extraction for ${fileName} (${mimeType})`);
   const parts: any[] = [
     { inline_data: { mime_type: mimeType, data: base64Data } },
     { text: `${EXTRACTION_PROMPT}\n\nDocument filename: "${fileName}"` },
   ];
-
   const resp = await fetch(
     `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${GEMINI_KEY}`,
     {
@@ -116,20 +119,16 @@ async function extractWithGeminiMultimodal(fileName: string, base64Data: string,
       }),
     }
   );
-
   if (!resp.ok) {
     const errText = await resp.text();
     console.error(`Gemini multimodal failed: ${resp.status} ${errText.slice(0, 200)}`);
     return [];
   }
-
   const result = await resp.json();
   const text = result?.candidates?.[0]?.content?.parts?.[0]?.text || "";
   try {
     const jsonMatch = text.match(/\[[\s\S]*\]/);
-    if (jsonMatch) {
-      return JSON.parse(jsonMatch[0]);
-    }
+    if (jsonMatch) { return JSON.parse(jsonMatch[0]); }
   } catch (e) {
     console.error(`Failed to parse Gemini multimodal response for ${fileName}:`, e);
   }
@@ -140,7 +139,6 @@ async function extractWithGeminiMultimodal(fileName: string, base64Data: string,
 async function extractWithGeminiText(fileName: string, textContent: string): Promise<any[]> {
   console.log(`  Gemini text extraction for ${fileName}`);
   const prompt = `${EXTRACTION_PROMPT}\n\nDocument: "${fileName}"\nContent (first 12000 chars):\n${textContent.slice(0, 12000)}`;
-
   const resp = await fetch(
     `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${GEMINI_KEY}`,
     {
@@ -152,20 +150,16 @@ async function extractWithGeminiText(fileName: string, textContent: string): Pro
       }),
     }
   );
-
   if (!resp.ok) {
     const errText = await resp.text();
     console.error(`Gemini text extraction failed: ${resp.status} ${errText.slice(0, 200)}`);
     return [];
   }
-
   const result = await resp.json();
   const text = result?.candidates?.[0]?.content?.parts?.[0]?.text || "";
   try {
     const jsonMatch = text.match(/\[[\s\S]*\]/);
-    if (jsonMatch) {
-      return JSON.parse(jsonMatch[0]);
-    }
+    if (jsonMatch) { return JSON.parse(jsonMatch[0]); }
   } catch (e) {
     console.error(`Failed to parse Gemini text response for ${fileName}:`, e);
   }
@@ -176,7 +170,6 @@ async function extractWithGeminiText(fileName: string, textContent: string): Pro
 async function extractWithGrok(fileName: string, textContent: string): Promise<any[]> {
   console.log(`  Grok fallback extraction for ${fileName}`);
   const userMessage = `Document: "${fileName}"\nContent (first 8000 chars):\n${textContent.slice(0, 8000)}`;
-
   const resp = await fetch("https://api.x.ai/v1/chat/completions", {
     method: "POST",
     headers: {
@@ -193,27 +186,23 @@ async function extractWithGrok(fileName: string, textContent: string): Promise<a
       max_tokens: 4096,
     }),
   });
-
   if (!resp.ok) {
     const errText = await resp.text();
     console.error(`Grok extraction failed: ${resp.status} ${errText.slice(0, 200)}`);
     return [];
   }
-
   const result = await resp.json();
   const text = result?.choices?.[0]?.message?.content || "";
   try {
     const jsonMatch = text.match(/\[[\s\S]*\]/);
-    if (jsonMatch) {
-      return JSON.parse(jsonMatch[0]);
-    }
+    if (jsonMatch) { return JSON.parse(jsonMatch[0]); }
   } catch (e) {
     console.error(`Failed to parse Grok response for ${fileName}:`, e);
   }
   return [];
 }
 
-// Validate and fix dates â reject 1969/1970 epoch dates
+// Validate and fix dates — reject 1969/1970 epoch dates
 function validateEvents(events: any[]): any[] {
   return events.map(e => {
     let date = e.date;
@@ -221,7 +210,7 @@ function validateEvents(events: any[]): any[] {
       // Check for epoch dates (1969, 1970) or dates before 2000
       const year = parseInt(date.substring(0, 4), 10);
       if (isNaN(year) || year < 2000 || year > 2030) {
-        console.log(`  Fixed invalid date ${date} â "unknown"`);
+        console.log(`  Fixed invalid date ${date} → "unknown"`);
         date = "unknown";
       }
     }
@@ -277,12 +266,10 @@ async function pushEventsToCreditGuardian(clientName: string, events: any[]): Pr
       client_name: clientName,
       events,
     });
-
     if (!resp.ok) {
       const errText = await resp.text();
       return { success: false, count: 0, error: `CG API ${resp.status}: ${errText.slice(0, 200)}` };
     }
-
     const data = await resp.json();
     if (data.error) {
       return { success: false, count: 0, error: String(data.error).slice(0, 200) };
@@ -296,6 +283,72 @@ async function pushEventsToCreditGuardian(clientName: string, events: any[]): Pr
   }
 }
 
+// Track a single file in the documents table (per-file dedup)
+async function trackDocument(file: any, folder: any): Promise<void> {
+  try {
+    const { data: existing } = await supabase
+      .from("documents")
+      .select("id")
+      .eq("drive_file_id", file.id)
+      .eq("is_deleted", false)
+      .maybeSingle();
+
+    if (existing) return; // Already tracked
+
+    const { data: clientRecord } = await supabase
+      .from("clients")
+      .select("id")
+      .eq("drive_folder_id", folder.id)
+      .maybeSingle();
+
+    let clientId: string;
+    if (clientRecord) {
+      clientId = clientRecord.id;
+    } else {
+      const { data: newClient, error: clientErr } = await supabase
+        .from("clients")
+        .insert({ name: folder.name, drive_folder_id: folder.id })
+        .select("id")
+        .single();
+      if (clientErr) throw clientErr;
+      clientId = newClient.id;
+    }
+
+    const sha256Input = new TextEncoder().encode(`${file.id}:${file.modifiedTime}`);
+    const hashBuffer = await crypto.subtle.digest("SHA-256", sha256Input);
+    const sha256 = Array.from(new Uint8Array(hashBuffer))
+      .map((b) => b.toString(16).padStart(2, "0"))
+      .join("");
+
+    await supabase.from("documents").insert({
+      client_id: clientId,
+      drive_file_id: file.id,
+      drive_modified_time: file.modifiedTime,
+      drive_parent_folder_id: folder.id,
+      file_name: file.name,
+      mime_type: file.mimeType,
+      original_mime_type: file.mimeType,
+      processed_mime_type: "application/pdf",
+      sha256,
+      status: "ingested",
+      is_deleted: false,
+    });
+  } catch (docErr) {
+    console.error(`  Doc tracking error for ${file.name}:`, docErr);
+  }
+}
+
+// Check if a file has already been processed (dedup check)
+async function isFileAlreadyProcessed(fileId: string): Promise<boolean> {
+  const { data } = await supabase
+    .from("documents")
+    .select("id")
+    .eq("drive_file_id", fileId)
+    .eq("is_deleted", false)
+    .maybeSingle();
+  return !!data;
+}
+
 serve(async (req) => {
   if (req.method === "OPTIONS") {
     return new Response(null, { headers: corsHeaders });
@@ -304,10 +357,12 @@ serve(async (req) => {
   try {
     const body = await req.json().catch(() => ({}));
     const filterClientName = body.client_name?.toLowerCase()?.trim();
+    const maxFiles = parseInt(body.max_files) || 0; // 0 = no limit
 
-    console.log("Starting Drive ingestion (Gemini multimodal v2)...");
+    console.log("Starting Drive ingestion (Gemini multimodal v3 - per-file dedup)...");
     console.log(`Root folder: ${DRIVE_FOLDER_ID}`);
     if (filterClientName) console.log(`Filtering to client: ${filterClientName}`);
+    if (maxFiles > 0) console.log(`Max files per client: ${maxFiles}`);
 
     const { files: subfolders } = await listSubfolders(DRIVE_FOLDER_ID);
     console.log(`Found ${subfolders?.length || 0} client folders`);
@@ -341,8 +396,22 @@ serve(async (req) => {
         console.log(`${folder.name}: ${supportedFiles.length} supported files`);
 
         let allEvents: any[] = [];
+        let filesProcessedCount = 0;
 
         for (const file of supportedFiles) {
+          // Per-file deduplication check BEFORE processing
+          const alreadyDone = await isFileAlreadyProcessed(file.id);
+          if (alreadyDone) {
+            console.log(`  Skipping ${file.name}: already processed (dedup)`);
+            continue;
+          }
+
+          // max_files limit check
+          if (maxFiles > 0 && filesProcessedCount >= maxFiles) {
+            console.log(`  Reached max_files limit (${maxFiles}), stopping`);
+            break;
+          }
+
           try {
             console.log(`  Processing: ${file.name} (${file.mimeType})`);
             const fileData = await downloadFile(file.id, file.mimeType);
@@ -350,19 +419,32 @@ serve(async (req) => {
             // Skip if no data at all
             if (!fileData.text && !fileData.base64) {
               console.log(`  Skipping ${file.name}: no data`);
+              // Track it anyway so we don't retry
+              await trackDocument(file, folder);
               continue;
             }
 
             // For text-only files, check minimum length
             if (!fileData.base64 && fileData.text.trim().length < 50) {
               console.log(`  Skipping ${file.name}: text too short`);
+              await trackDocument(file, folder);
               continue;
             }
 
             const events = await extractTimelineEvents(file.name, fileData);
             console.log(`  Extracted ${events.length} validated events from ${file.name}`);
-            allEvents.push(...events.map(e => ({ ...e, source_file: file.name, drive_file_id: file.id })));
+
+            allEvents.push(...events.map(e => ({
+              ...e,
+              source_file: file.name,
+              drive_file_id: file.id
+            })));
             clientResult.files_processed++;
+            filesProcessedCount++;
+
+            // Track document IMMEDIATELY after processing (per-file dedup)
+            await trackDocument(file, folder);
+
           } catch (fileErr) {
             const errMsg = `${file.name}: ${String(fileErr).slice(0, 100)}`;
             console.error(`  Error: ${errMsg}`);
@@ -383,59 +465,6 @@ serve(async (req) => {
           }
         }
 
-        // Track documents in local Supabase
-        for (const file of supportedFiles) {
-          try {
-            const { data: existing } = await supabase
-              .from("documents")
-              .select("id")
-              .eq("drive_file_id", file.id)
-              .eq("is_deleted", false)
-              .maybeSingle();
-            if (existing) continue;
-
-            const { data: clientRecord } = await supabase
-              .from("clients")
-              .select("id")
-              .eq("drive_folder_id", folder.id)
-              .maybeSingle();
-
-            let clientId: string;
-            if (clientRecord) {
-              clientId = clientRecord.id;
-            } else {
-              const { data: newClient, error: clientErr } = await supabase
-                .from("clients")
-                .insert({ name: folder.name, drive_folder_id: folder.id })
-                .select("id")
-                .single();
-              if (clientErr) throw clientErr;
-              clientId = newClient.id;
-            }
-
-            const sha256Input = new TextEncoder().encode(`${file.id}:${file.modifiedTime}`);
-            const hashBuffer = await crypto.subtle.digest("SHA-256", sha256Input);
-            const sha256 = Array.from(new Uint8Array(hashBuffer))
-              .map((b) => b.toString(16).padStart(2, "0"))
-              .join("");
-
-            await supabase.from("documents").insert({
-              client_id: clientId,
-              drive_file_id: file.id,
-              drive_modified_time: file.modifiedTime,
-              drive_parent_folder_id: folder.id,
-              file_name: file.name,
-              mime_type: file.mimeType,
-              original_mime_type: file.mimeType,
-              processed_mime_type: "application/pdf",
-              sha256,
-              status: "ingested",
-              is_deleted: false,
-            });
-          } catch (docErr) {
-            console.error(`  Doc tracking error for ${file.name}:`, docErr);
-          }
-        }
       } catch (folderErr) {
         clientResult.errors.push(String(folderErr).slice(0, 200));
         console.error(`Error processing folder ${folder.name}:`, folderErr);
@@ -454,6 +483,7 @@ serve(async (req) => {
     };
 
     console.log("Ingestion complete:", JSON.stringify(summary, null, 2));
+
     return new Response(JSON.stringify(summary), {
       headers: { ...corsHeaders, "Content-Type": "application/json" },
     });
