@@ -650,47 +650,6 @@ interface ToolDef {
   execute: (args: any, context?: ToolExecuteContext) => Promise<string>;
 }
 
-/** Infer track title from /do text + recent chat. */
-async function runPlaylistHubResearch(trackName: string, userVibe: string, chatId?: string): Promise<string> {
-  const body = { track_name: trackName, user_vibe: userVibe };
-  const edgeName = (Deno.env.get("FANFUEL_HUB_PLAYLIST_FN") || "playlist-research").trim();
-  let result: any;
-  try {
-    result = await callFanFuelHub(edgeName, body);
-  } catch (e1) {
-    const m = e1 instanceof Error ? e1.message : String(e1);
-    if (/404|not found|Unknown action|FunctionsHttpError|502|503/i.test(m)) {
-      try {
-        result = await callFanFuelHub("control-center-api", {
-          action: "playlist_research",
-          track_name: trackName,
-          user_vibe: userVibe,
-        });
-      } catch {
-        console.error("[runPlaylistHubResearch] primary failed:", m);
-        throw e1;
-      }
-    } else {
-      throw e1;
-    }
-  }
-  if (result && result.playlists && Array.isArray(result.playlists) && result.playlists.length > 0) {
-    const lines = result.playlists
-      .slice(0, 20)
-      .map((p: any, i: number) =>
-        (i + 1) + ". " + (p.name || p.playlist_name) + " â " +
-        (typeof p.followers === "number" ? p.followers.toLocaleString() : (p.followers || "?")) + " followers"
-      )
-      .join("\n");
-  if (chatId && result?.playlists) {
-    const rankedIds = result.playlists.slice(0, 20).map((p: any) => p.playlist_id || p.id);
-    await saveLastPlaylistResearch(chatId, { track_name: trackName, user_vibe: userVibe, ranked_playlist_ids: rankedIds, ts: new Date().toISOString() });
-  }
-
-    return 'Found ' + result.playlists.length + ' playlist opportunities for "' + trackName + '":\n\n' + lines;
-  }
-  return 'Playlist research complete for "' + trackName + '" (vibe: ' + userVibe + '). Results stored. Check back with "show pitch report".';
-}
 
 const AGENT_TOOLS: ToolDef[] = [
   {
