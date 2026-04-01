@@ -185,6 +185,25 @@ async function flushTelegramOutbox(chatId: string, max = 5): Promise<{ sent: num
         if (result.ok) {
           await supabase.from("telegram_outbox").update({ status: "sent", sent_at: new Date().toISOString(), last_error: null }).eq("id", row.id);
           sent++;
+        } else if (
+          result.description && result.description.includes("can't parse entities") &&
+          (row.payload as any)?.parse_mode
+        ) {
+          // Retry without parse_mode
+          const fallbackPayload = { ...(row.payload as Record<string, any>) };
+          delete fallbackPayload.parse_mode;
+          const retry = await _rawTelegramSend(row.kind || "sendMessage", fallbackPayload);
+          if (retry.ok) {
+            await supabase.from("telegram_outbox").update({ status: "sent", sent_at: new Date().toISOString(), last_error: "parse_mode_fallback" }).eq("id", row.id);
+            sent++;
+          } else {
+            const backoff = Math.min(Math.pow(row.attempt_count + 1, 2) * 5, 120);
+            await supabase.from("telegram_outbox").update({
+              status: "failed", last_error: retry.description || JSON.stringify(retry).slice(0, 500),
+              next_attempt_at: new Date(Date.now() + backoff * 1000).toISOString(),
+            }).eq("id", row.id);
+            failed++;
+          }
         } else {
           const backoff = Math.min(Math.pow(row.attempt_count + 1, 2) * 5, 120);
           await supabase.from("telegram_outbox").update({
