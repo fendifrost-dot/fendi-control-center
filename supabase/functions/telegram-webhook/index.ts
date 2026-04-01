@@ -31,6 +31,14 @@ const IMPLEMENTED_WORKFLOW_KEYS = new Set([
   "get_tax_documents",
   "get_tax_discrepancies",
   "query_cc_tax",
+  "analyze_credit_strategy",
+  "generate_dispute_letter",
+  "send_dispute_letter",
+  "research_playlists",
+  "generate_pitch",
+  "send_pitch",
+  "credit_analysis_and_disputes",
+  "playlist_pitch_workflow",
 ]);
 
 // ─── Workflow registry fetch ────────────────────────────────────
@@ -46,6 +54,22 @@ const SYNTHETIC_FIND_PLAYLIST_OPPORTUNITIES: WorkflowEntry = {
   description: "Research playlist opportunities for a track on Spotify and SoundCloud.",
   trigger_phrases: ["find playlist opportunities", "playlist opportunities for"],
   tools: ["find_playlist_opportunities"],
+};
+
+const SYNTHETIC_ANALYZE_CREDIT_STRATEGY: WorkflowEntry = {
+  key: "analyze_credit_strategy",
+  name: "Analyze Credit Strategy",
+  description: "Analyze a client's credit profile and return prioritized dispute strategy.",
+  trigger_phrases: ["analyze credit strategy", "analyze client credit", "credit strategy"],
+  tools: ["analyze_credit_strategy"],
+};
+
+const SYNTHETIC_PLAYLIST_PITCH_WORKFLOW: WorkflowEntry = {
+  key: "playlist_pitch_workflow",
+  name: "Playlist Pitch Workflow",
+  description: "Research playlist opportunities, draft a pitch, and send after approval.",
+  trigger_phrases: ["research playlists", "playlist pitch workflow", "generate pitch"],
+  tools: ["research_playlists", "generate_pitch", "send_pitch"],
 };
 
 function _normalizeText(s: string): string {
@@ -173,6 +197,22 @@ async function flushTelegramOutbox(chatId: string, max = 5): Promise<{ sent: num
         if (result.ok) {
           await supabase.from("telegram_outbox").update({ status: "sent", sent_at: new Date().toISOString(), last_error: null }).eq("id", row.id);
           sent++;
+        } else if (result.description?.includes("can't parse entities") && (row.payload as any)?.parse_mode) {
+          console.warn("[OUTBOX] Parse error, retrying without parse_mode:", result.description);
+          const plainPayload = { ...(row.payload as Record<string, any>) };
+          delete plainPayload.parse_mode;
+          const retry = await _rawTelegramSend(row.kind || "sendMessage", plainPayload);
+          if (retry.ok) {
+            await supabase.from("telegram_outbox").update({ status: "sent", sent_at: new Date().toISOString(), last_error: "parse_mode_fallback" }).eq("id", row.id);
+            sent++;
+          } else {
+            const backoff = Math.min(Math.pow(row.attempt_count + 1, 2) * 5, 120);
+            await supabase.from("telegram_outbox").update({
+              status: "failed", last_error: retry.description || JSON.stringify(retry).slice(0, 500),
+              next_attempt_at: new Date(Date.now() + backoff * 1000).toISOString(),
+            }).eq("id", row.id);
+            failed++;
+          }
         } else {
           const backoff = Math.min(Math.pow(row.attempt_count + 1, 2) * 5, 120);
           await supabase.from("telegram_outbox").update({
@@ -1477,6 +1517,153 @@ const AGENT_TOOLS: ToolDef[] = [
         notes: args.notes,
       });
       return typeof res?.message_to_user === "string" ? res.message_to_user : JSON.stringify(res ?? {});
+    },
+  },
+  {
+    name: "analyze_credit_strategy",
+    description: "Analyze a client's credit timeline and generate prioritized dispute strategy via Claude.",
+    parameters: {
+      type: "object",
+      properties: {
+        client_id: { type: "string" },
+        client_name: { type: "string" },
+      },
+      required: [],
+    },
+    destructive: false,
+    execute: async (args: any) => {
+      const ANON_KEY = Deno.env.get("SUPABASE_PUBLISHABLE_KEY") || SUPABASE_SERVICE_ROLE_KEY;
+      const resp = await fetch(`${SUPABASE_URL}/functions/v1/analyze-credit-strategy`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${ANON_KEY}` },
+        body: JSON.stringify({ client_id: args.client_id, client_name: args.client_name }),
+      });
+      const raw = await resp.text();
+      if (!resp.ok) throw new Error(`analyze-credit-strategy failed (${resp.status}): ${raw.slice(0, 400)}`);
+      return raw;
+    },
+  },
+  {
+    name: "generate_dispute_letter",
+    description: "Generate an FCRA-aligned dispute letter draft for one dispute item via Claude.",
+    parameters: {
+      type: "object",
+      properties: {
+        client_id: { type: "string" },
+        dispute_item: { type: "object" },
+        analysis_id: { type: "string" },
+      },
+      required: ["client_id", "dispute_item"],
+    },
+    destructive: true,
+    execute: async (args: any) => {
+      const ANON_KEY = Deno.env.get("SUPABASE_PUBLISHABLE_KEY") || SUPABASE_SERVICE_ROLE_KEY;
+      const resp = await fetch(`${SUPABASE_URL}/functions/v1/generate-dispute-letters`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${ANON_KEY}` },
+        body: JSON.stringify({ action: "generate", client_id: args.client_id, dispute_item: args.dispute_item, analysis_id: args.analysis_id }),
+      });
+      const raw = await resp.text();
+      if (!resp.ok) throw new Error(`generate-dispute-letters failed (${resp.status}): ${raw.slice(0, 400)}`);
+      return raw;
+    },
+  },
+  {
+    name: "send_dispute_letter",
+    description: "Mark a generated dispute letter approved for send.",
+    parameters: {
+      type: "object",
+      properties: {
+        letter_id: { type: "string" },
+      },
+      required: ["letter_id"],
+    },
+    destructive: true,
+    execute: async (args: any) => {
+      const ANON_KEY = Deno.env.get("SUPABASE_PUBLISHABLE_KEY") || SUPABASE_SERVICE_ROLE_KEY;
+      const resp = await fetch(`${SUPABASE_URL}/functions/v1/generate-dispute-letters`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${ANON_KEY}` },
+        body: JSON.stringify({ action: "send", letter_id: args.letter_id }),
+      });
+      const raw = await resp.text();
+      if (!resp.ok) throw new Error(`send_dispute_letter failed (${resp.status}): ${raw.slice(0, 400)}`);
+      return raw;
+    },
+  },
+  {
+    name: "research_playlists",
+    description: "Research playlist opportunities for a track via ChatGPT and FanFuel context.",
+    parameters: {
+      type: "object",
+      properties: {
+        track_name: { type: "string" },
+        genre: { type: "string" },
+        mood: { type: "string" },
+        bpm: { type: "number" },
+        similar_artists: { type: "array", items: { type: "string" } },
+      },
+      required: ["track_name"],
+    },
+    destructive: false,
+    execute: async (args: any) => {
+      const ANON_KEY = Deno.env.get("SUPABASE_PUBLISHABLE_KEY") || SUPABASE_SERVICE_ROLE_KEY;
+      const resp = await fetch(`${SUPABASE_URL}/functions/v1/playlist-research`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${ANON_KEY}` },
+        body: JSON.stringify(args),
+      });
+      const raw = await resp.text();
+      if (!resp.ok) throw new Error(`playlist-research failed (${resp.status}): ${raw.slice(0, 400)}`);
+      return raw;
+    },
+  },
+  {
+    name: "generate_pitch",
+    description: "Generate a personalized playlist pitch email draft via ChatGPT.",
+    parameters: {
+      type: "object",
+      properties: {
+        playlist_id: { type: "string" },
+        track_id: { type: "string" },
+        research_id: { type: "string" },
+      },
+      required: ["playlist_id", "track_id"],
+    },
+    destructive: false,
+    execute: async (args: any) => {
+      const ANON_KEY = Deno.env.get("SUPABASE_PUBLISHABLE_KEY") || SUPABASE_SERVICE_ROLE_KEY;
+      const resp = await fetch(`${SUPABASE_URL}/functions/v1/generate-pitch-email`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${ANON_KEY}` },
+        body: JSON.stringify({ action: "generate", ...args }),
+      });
+      const raw = await resp.text();
+      if (!resp.ok) throw new Error(`generate-pitch-email failed (${resp.status}): ${raw.slice(0, 400)}`);
+      return raw;
+    },
+  },
+  {
+    name: "send_pitch",
+    description: "Mark a generated pitch draft approved for send.",
+    parameters: {
+      type: "object",
+      properties: {
+        pitch_id: { type: "string" },
+      },
+      required: ["pitch_id"],
+    },
+    destructive: true,
+    execute: async (args: any) => {
+      const ANON_KEY = Deno.env.get("SUPABASE_PUBLISHABLE_KEY") || SUPABASE_SERVICE_ROLE_KEY;
+      const resp = await fetch(`${SUPABASE_URL}/functions/v1/generate-pitch-email`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${ANON_KEY}` },
+        body: JSON.stringify({ action: "send", pitch_id: args.pitch_id }),
+      });
+      const raw = await resp.text();
+      if (!resp.ok) throw new Error(`send_pitch failed (${resp.status}): ${raw.slice(0, 400)}`);
+      return raw;
     },
   },
 ];
@@ -3078,12 +3265,31 @@ serve(async (req) => {
     const hasExecutionIntent = EXECUTION_INTENT_PREFIXES.some(p => lowerText.startsWith(p));
 
     let autoPromotedWorkflow: WorkflowEntry | undefined;
+    const creditIntent =
+      /\banalyze\b.*\bcredit\b/i.test(lowerText) ||
+      /\bcredit strategy\b/i.test(lowerText) ||
+      /\bdispute strategy\b/i.test(lowerText);
+    const playlistPitchIntent =
+      /\bresearch playlists?\b/i.test(lowerText) ||
+      /\bgenerate pitch\b/i.test(lowerText) ||
+      /\bplaylist pitch workflow\b/i.test(lowerText);
+    if (creditIntent && IMPLEMENTED_WORKFLOW_KEYS.has("analyze_credit_strategy")) {
+      autoPromotedWorkflow = SYNTHETIC_ANALYZE_CREDIT_STRATEGY;
+    } else if (playlistPitchIntent && IMPLEMENTED_WORKFLOW_KEYS.has("playlist_pitch_workflow")) {
+      autoPromotedWorkflow = SYNTHETIC_PLAYLIST_PITCH_WORKFLOW;
+    }
+
     if (hasExecutionIntent) {
       const intentArg = lowerText.replace(/^(run|execute|trigger|start)\s+/, "").trim();
       const intentWorkflows = await fetchWorkflowRegistry();
       const { chosen: intentChosen } = _matchWorkflows(intentArg, intentWorkflows);
       if (intentChosen && IMPLEMENTED_WORKFLOW_KEYS.has(intentChosen.key)) {
         autoPromotedWorkflow = intentChosen;
+      }
+      if (!intentChosen && creditIntent && IMPLEMENTED_WORKFLOW_KEYS.has("analyze_credit_strategy")) {
+        autoPromotedWorkflow = SYNTHETIC_ANALYZE_CREDIT_STRATEGY;
+      } else if (!intentChosen && playlistPitchIntent && IMPLEMENTED_WORKFLOW_KEYS.has("playlist_pitch_workflow")) {
+        autoPromotedWorkflow = SYNTHETIC_PLAYLIST_PITCH_WORKFLOW;
       }
     }
 
