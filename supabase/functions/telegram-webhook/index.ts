@@ -3541,6 +3541,55 @@ serve(async (req) => {
       return new Response("ok");
     }
 
+    // ══════════════════════════════════════════════════════════
+    // NL INTENT CLASSIFICATION — auto-promote to Lane 1 if Gemini detects execution intent
+    // ══════════════════════════════════════════════════════════
+    if (!text.startsWith("/") && !hasExecutionIntent && !isAutonomousRequest) {
+      const nlWorkflows = await fetchWorkflowRegistry();
+      const nlMatch = await classifyNaturalLanguageIntent(text, nlWorkflows);
+      if (nlMatch) {
+        console.log(`[NL_CLASSIFY] Auto-promoting to Lane 1: workflow=${nlMatch.key} taskId=${taskId}`);
+        await supabase.from("tasks").update({
+          status: "running",
+          selected_workflow: nlMatch.key,
+          result_json: {
+            execution_lane: "lane1_do",
+            nl_classified: true,
+            selected_workflow: nlMatch.key,
+          },
+        }).eq("id", taskId);
+
+        try {
+          await Promise.race([
+            executeAgenticLoop(chatId, text, {
+              taskId,
+              lane: "lane1_do",
+              allowTools: true,
+              workflowKey: nlMatch.key,
+              sessionModel: session.active_model as "grok" | "gemini" | "chatgpt",
+            }),
+            new Promise<never>((_, reject) =>
+              setTimeout(() => reject(new Error("TIMEOUT")), 55000)
+            ),
+          ]);
+        } catch (nlErr) {
+          const errMsg = nlErr instanceof Error ? nlErr.message : String(nlErr);
+          const failResult = buildFailureResultJson(
+            { execution_lane: "lane1_do", nl_classified: true },
+            errMsg
+          );
+          await supabase.from("tasks").update({
+            status: "failed",
+            error: errMsg.slice(0, 300),
+            result_json: failResult,
+          }).eq("id", taskId);
+          await sendMessage(chatId, `\u274c Failed: \`${taskId}\` \u2014 ${errMsg.slice(0, 200)}`, {}, `task:${taskId}:failed`);
+        }
+        _currentTaskId = null;
+        return new Response("ok");
+      }
+    }
+
     // ââââââââââââââââââââââââââââââââââââââââââââââââââââââââââ
     // LANE 2 â ASSISTANT MODE (default, no tool execution)
     // ââââââââââââââââââââââââââââââââââââââââââââââââââââââââââ
