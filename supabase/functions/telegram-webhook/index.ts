@@ -13,7 +13,7 @@ const GROK_KEY = Deno.env.get("Frost_Grok")!;
 const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
 const TELEGRAM_API = `https://api.telegram.org/bot${BOT_TOKEN}`;
 const SYSTEM_IDENTITY = "Fendi Control Center AI";
-// ─── Implemented workflow keys → handler names (deterministic routing) ───
+// âââ Implemented workflow keys â handler names (deterministic routing) âââ
 const IMPLEMENTED_WORKFLOW_KEYS = new Set([
   "ping", "system_status", "resend_failed", "list_workflows", "help",
     "model_switch", "document_approval", "document_rejection",
@@ -22,7 +22,14 @@ const IMPLEMENTED_WORKFLOW_KEYS = new Set([
     "active_jobs_summary", "document_ingestion_processing",
     "drive_ingest", "free_agent",
     "find_playlist_opportunities", "get_pitch_report", "send_playlist_pitch", "update_pitch_status"
-, "analyze_client_credit", "get_client_report", "generate_dispute_letters"]);
+, "analyze_client_credit", "get_client_report", "generate_dispute_letters",
+  "analyze_credit_strategy",
+  "send_dispute_letter",
+  "research_playlists",
+  "generate_pitch",
+  "send_pitch",
+  "credit_analysis_and_disputes",
+  "playlist_pitch_workflow"]);
 
 // Synthetic workflow entry for find_playlist_opportunities (fallback when registry is empty)
 const SYNTHETIC_FIND_PLAYLIST_OPPORTUNITIES = {
@@ -44,11 +51,19 @@ const SYNTHETIC_ANALYZE_CLIENT_CREDIT = {
   tools: ["drive_sync", "ingest_drive_clients", "query_credit_guardian", "get_client_report", "generate_dispute_letters"],
 };
 
-// ─── Workflow registry fetch ────────────────────────────────────
+// âââ Workflow registry fetch ââââââââââââââââââââââââââââââââââââ
 interface WorkflowEntry {
   key: string; name: string; description: string;
   trigger_phrases: string[]; tools: string[];
 }
+
+const SYNTHETIC_PLAYLIST_PITCH_WORKFLOW: WorkflowEntry = {
+  key: "playlist_pitch_workflow",
+  name: "Playlist Pitch Workflow",
+  description: "Research playlist opportunities, draft a pitch, and send after approval.",
+  trigger_phrases: ["research playlists", "playlist pitch workflow", "generate pitch"],
+  tools: ["research_playlists", "generate_pitch", "send_pitch"],
+};
 
 function _normalizeText(s: string): string {
   return (s ?? "").trim().toLowerCase();
@@ -75,19 +90,19 @@ function _matchWorkflows(input: string, workflows: WorkflowEntry[]): { matches: 
 function _formatWorkflowList(workflows: WorkflowEntry[]): string {
   if (!workflows.length) return "No workflows registered.";
   const lines = workflows.map((wf) => {
-    const status = IMPLEMENTED_WORKFLOW_KEYS.has(wf.key) ? "✅ Implemented" : "⚠️ Not Implemented";
+    const status = IMPLEMENTED_WORKFLOW_KEYS.has(wf.key) ? "â Implemented" : "â ï¸ Not Implemented";
     const triggers = (wf.trigger_phrases || []).slice(0, 4).join(", ");
-    const tools = (wf.tools || []).join(", ") || "—";
-    return `*${wf.name}* — \`${wf.key}\`\n  ${wf.description}\n  Triggers: ${triggers}\n  Tools: ${tools}\n  Status: ${status}`;
+    const tools = (wf.tools || []).join(", ") || "â";
+    return `*${wf.name}* â \`${wf.key}\`\n  ${wf.description}\n  Triggers: ${triggers}\n  Tools: ${tools}\n  Status: ${status}`;
   });
-  return `📋 *Workflow Registry*\n\n${lines.join("\n\n")}`;
+  return `ð *Workflow Registry*\n\n${lines.join("\n\n")}`;
 }
 
 function _formatNoMatch(workflows: WorkflowEntry[]): string {
   const suggestions = workflows.slice(0, 6)
-    .map((wf) => `• *${wf.name}* — try: \`${wf.trigger_phrases[0] || wf.key}\``)
+    .map((wf) => `â¢ *${wf.name}* â try: \`${wf.trigger_phrases[0] || wf.key}\``)
     .join("\n");
-  return `❓ No matching workflow for that request.\n\nRun /workflows to see everything available.\n\nSuggestions:\n${suggestions}`;
+  return `â No matching workflow for that request.\n\nRun /workflows to see everything available.\n\nSuggestions:\n${suggestions}`;
 }
 
 async function fetchWorkflowRegistry(): Promise<WorkflowEntry[]> {
@@ -113,14 +128,14 @@ async function fetchWorkflowRegistry(): Promise<WorkflowEntry[]> {
 }
 
 async function sendHeaderOnce(taskId: string, chatId: string, model: "gemini" | "grok") {
-  const headerText = `🤖 *${SYSTEM_IDENTITY}* _(Model: ${getModelLabel(model)})_`;
+  const headerText = `ð¤ *${SYSTEM_IDENTITY}* _(Model: ${getModelLabel(model)})_`;
   await enqueueTelegram(taskId, chatId, "sendMessage", {
     chat_id: chatId, text: headerText, parse_mode: "Markdown",
   }, `task:${taskId}:header`);
   await flushTelegramOutbox(chatId, 1);
 }
 
-// ─── Outbox-aware Telegram delivery ─────────────────────────────
+// âââ Outbox-aware Telegram delivery âââââââââââââââââââââââââââââ
 let _currentTaskId: string | null = null;
 
 async function _rawTelegramSend(method: string, payload: Record<string, any>) {
@@ -217,7 +232,7 @@ async function editMessageReplyMarkup(chatId: string, messageId: number) {
   }
 }
 
-// ─── Model & conversation state helpers ─────────────────────────
+// âââ Model & conversation state helpers âââââââââââââââââââââââââ
 async function getActiveModel(chatId?: string): Promise<{ model: "gemini" | "grok"; session_created?: boolean }> {
   // Try chat-scoped session first
   if (chatId) {
@@ -242,7 +257,7 @@ async function getActiveModel(chatId?: string): Promise<{ model: "gemini" | "gro
     return { model: data.setting_value === "grok" ? "grok" : "gemini" };
   }
 
-  // No session exists — default to grok
+  // No session exists â default to grok
   return { model: "grok", session_created: true };
 }
 
@@ -251,7 +266,7 @@ function getModelLabel(model: "gemini" | "grok"): string {
 }
 
 function formatAssistantMessage(model: "gemini" | "grok", text: string): string {
-  return `🤖 *${SYSTEM_IDENTITY}* _(Model: ${getModelLabel(model)})_\n\n${text}`;
+  return `ð¤ *${SYSTEM_IDENTITY}* _(Model: ${getModelLabel(model)})_\n\n${text}`;
 }
 
 function isExplicitModelSwitchRequest(userMessage: string, targetModel?: string): boolean {
@@ -318,7 +333,7 @@ async function buildConversationContext(chatId: string): Promise<string> {
     .join("\n\n");
 }
 
-// ─── Fetch last 3 processed documents for context ───────────────
+// âââ Fetch last 3 processed documents for context âââââââââââââââ
 async function getRecentDocContext(): Promise<string> {
   const { data: docs } = await supabase
     .from("documents")
@@ -335,7 +350,7 @@ async function getRecentDocContext(): Promise<string> {
   }).join("\n");
 }
 
-// ─── Session & Task helpers (deterministic spine) ───────────────
+// âââ Session & Task helpers (deterministic spine) âââââââââââââââ
 
 async function resolveSession(chatId: string): Promise<{ id: string; active_model: string }> {
   // Try to find existing session
@@ -373,7 +388,7 @@ async function createTaskRow(sessionId: string, requestText: string, requestedMo
   return data.id;
 }
 
-// ─── Error code classifier ─────────────────────────────────────
+// âââ Error code classifier âââââââââââââââââââââââââââââââââââââ
 function classifyErrorCode(errMsg: string): { error_code: string; error_hint: string } {
   const msg = (errMsg || "").toLowerCase();
   if (msg.includes("timeout")) return { error_code: "TIMEOUT", error_hint: "Execution exceeded time limit" };
@@ -406,7 +421,7 @@ async function setShortcutAttribution(taskId: string, command: string) {
   }).eq("id", taskId);
 }
 
-// ─── Cross-project helpers ──────────────────────────────────────
+// âââ Cross-project helpers ââââââââââââââââââââââââââââââââââââââ
 async function getConnectedProjects() {
   const { data } = await supabase
     .from("connected_projects")
@@ -460,7 +475,7 @@ async function fetchProjectStats(project: any): Promise<{ name: string; tables: 
   }
 }
 
-// ─── System health check ────────────────────────────────────────
+// âââ System health check ââââââââââââââââââââââââââââââââââââââââ
 function systemHealthCheck() {
   return {
     timestamp_ms: Date.now(),
@@ -470,9 +485,9 @@ function systemHealthCheck() {
   };
 }
 
-// ═══════════════════════════════════════════════════════════════
-// ─── AGENTIC TOOL DEFINITIONS ─────────────────────────────────
-// ═══════════════════════════════════════════════════════════════
+// âââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââ
+// âââ AGENTIC TOOL DEFINITIONS âââââââââââââââââââââââââââââââââ
+// âââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââ
 
 // Each tool: { name, description, parameters, destructive, execute }
 // destructive tools require confirmation before execution
@@ -662,7 +677,7 @@ async function runPlaylistHubResearch(trackName: string, userVibe: string, chatI
     const lines = result.playlists
       .slice(0, 20)
       .map((p: any, i: number) =>
-        (i + 1) + ". " + (p.name || p.playlist_name) + " — " +
+        (i + 1) + ". " + (p.name || p.playlist_name) + " â " +
         (typeof p.followers === "number" ? p.followers.toLocaleString() : (p.followers || "?")) + " followers"
       )
       .join("\n");
@@ -768,7 +783,7 @@ const AGENT_TOOLS: ToolDef[] = [
         .select("*, documents(file_name)")
         .eq("id", args.job_id)
         .single();
-      if (error || !job) return "❌ Job not found.";
+      if (error || !job) return "â Job not found.";
       if (job.status !== "failed") return `Job is currently ${job.status}, can only retry failed jobs.`;
       await supabase.from("ingestion_jobs").update({ status: "queued", last_error: null, started_at: null, completed_at: null }).eq("id", args.job_id);
       if (job.document_id) await supabase.from("documents").update({ status: "pending" }).eq("id", job.document_id);
@@ -791,7 +806,7 @@ const AGENT_TOOLS: ToolDef[] = [
     destructive: true,
     execute: async (args: any) => {
       const { data: job, error } = await supabase.from("ingestion_jobs").select("*, documents(file_name)").eq("id", args.job_id).single();
-      if (error || !job) return "❌ Job not found.";
+      if (error || !job) return "â Job not found.";
       await supabase.from("ingestion_jobs").update({ status: "archived", completed_at: new Date().toISOString() }).eq("id", args.job_id);
       return `Archived "${(job.documents as any)?.file_name || "Unknown"}".`;
     },
@@ -803,7 +818,7 @@ const AGENT_TOOLS: ToolDef[] = [
     destructive: true,
     execute: async (args: any) => {
       const { data: queue, error } = await supabase.from("telegram_approval_queue").select("*").eq("id", args.queue_id).single();
-      if (error || !queue) return "❌ Approval record not found.";
+      if (error || !queue) return "â Approval record not found.";
       if (queue.status !== "pending") return "Already processed.";
       const now = new Date().toISOString();
       await supabase.from("observations").update({ is_verified: true, verified_at: now, verified_via: "telegram" }).eq("document_id", queue.document_id).eq("client_id", queue.client_id);
@@ -818,7 +833,7 @@ const AGENT_TOOLS: ToolDef[] = [
     destructive: true,
     execute: async (args: any) => {
       const { data: queue, error } = await supabase.from("telegram_approval_queue").select("*").eq("id", args.queue_id).single();
-      if (error || !queue) return "❌ Approval record not found.";
+      if (error || !queue) return "â Approval record not found.";
       if (queue.status !== "pending") return "Already processed.";
       await supabase.from("telegram_approval_queue").update({ status: "rejected", resolved_at: new Date().toISOString() }).eq("id", args.queue_id);
       return `Rejected. Observations remain unverified for manual review.`;
@@ -898,12 +913,12 @@ const AGENT_TOOLS: ToolDef[] = [
         });
         if (!resp.ok) {
           const errText = await resp.text();
-          return `❌ Drive sync failed (${resp.status}): ${errText}`;
+          return `â Drive sync failed (${resp.status}): ${errText}`;
         }
         const result = await resp.json();
-        return `✅ Drive sync complete! Scanned ${result.folders_scanned || 0} folders, processed ${result.total_processed || 0} files, ${result.total_errors || 0} errors. Run ID: ${result.run_id}`;
+        return `â Drive sync complete! Scanned ${result.folders_scanned || 0} folders, processed ${result.total_processed || 0} files, ${result.total_errors || 0} errors. Run ID: ${result.run_id}`;
       } catch (e) {
-        return `❌ Drive sync error: ${String(e)}`;
+        return `â Drive sync error: ${String(e)}`;
       }
     },
   },
@@ -975,7 +990,7 @@ const AGENT_TOOLS: ToolDef[] = [
         ? [args.status_filter]
         : ["processing", "queued"];
 
-      // Main query — fetch rows (capped at limit)
+      // Main query â fetch rows (capped at limit)
       const { data: jobs, error } = await supabase
         .from("ingestion_jobs")
         .select("id, job_type, status, attempt_count, started_at, heartbeat_at, completed_at, created_at, drive_file_id, document_id, last_error")
@@ -985,7 +1000,7 @@ const AGENT_TOOLS: ToolDef[] = [
         .limit(limit);
 
       if (error) {
-        const errMsg = `HARD ERROR: ingestion_jobs query failed — ${error.message}`;
+        const errMsg = `HARD ERROR: ingestion_jobs query failed â ${error.message}`;
         console.error("get_active_jobs_summary:", errMsg);
         return JSON.stringify({ error: errMsg });
       }
@@ -1061,7 +1076,7 @@ const AGENT_TOOLS: ToolDef[] = [
     },
   },
 
-  // ─── Instagram Messaging Tools ────────────────────────────────
+  // âââ Instagram Messaging Tools ââââââââââââââââââââââââââââââââ
   {
     name: "instagram_send_dm",
     description: "Send an Instagram Direct Message to a user. Requires recipient_id (Instagram-scoped user ID) and message text. [DESTRUCTIVE - requires user confirmation]",
@@ -1075,8 +1090,8 @@ const AGENT_TOOLS: ToolDef[] = [
         body: JSON.stringify({ action: "send_dm", recipient_id: args.recipient_id, message: args.message }),
       });
       const data = await resp.json();
-      if (!resp.ok || !data.success) return `❌ DM failed: ${data.error || "Unknown error"}`;
-      return `✅ Instagram DM sent to ${args.recipient_id}.`;
+      if (!resp.ok || !data.success) return `â DM failed: ${data.error || "Unknown error"}`;
+      return `â Instagram DM sent to ${args.recipient_id}.`;
     },
   },
   {
@@ -1092,8 +1107,8 @@ const AGENT_TOOLS: ToolDef[] = [
         body: JSON.stringify({ action: "reply_comment", comment_id: args.comment_id, reply_text: args.reply_text }),
       });
       const data = await resp.json();
-      if (!resp.ok || !data.success) return `❌ Comment reply failed: ${data.error || "Unknown error"}`;
-      return `✅ Replied to Instagram comment ${args.comment_id}.`;
+      if (!resp.ok || !data.success) return `â Comment reply failed: ${data.error || "Unknown error"}`;
+      return `â Replied to Instagram comment ${args.comment_id}.`;
     },
   },
   {
@@ -1109,8 +1124,8 @@ const AGENT_TOOLS: ToolDef[] = [
         body: JSON.stringify({ action: "reply_story_mention", recipient_id: args.recipient_id, message: args.message }),
       });
       const data = await resp.json();
-      if (!resp.ok || !data.success) return `❌ Story mention reply failed: ${data.error || "Unknown error"}`;
-      return `✅ Replied to story mention from ${args.recipient_id}.`;
+      if (!resp.ok || !data.success) return `â Story mention reply failed: ${data.error || "Unknown error"}`;
+      return `â Replied to story mention from ${args.recipient_id}.`;
     },
   },
   {
@@ -1126,7 +1141,7 @@ const AGENT_TOOLS: ToolDef[] = [
         body: JSON.stringify({ action: "get_recent_comments" }),
       });
       const data = await resp.json();
-      if (!resp.ok || !data.success) return `❌ Could not fetch comments: ${data.error || "Unknown error"}`;
+      if (!resp.ok || !data.success) return `â Could not fetch comments: ${data.error || "Unknown error"}`;
       return JSON.stringify(data.data);
     },
   },
@@ -1143,13 +1158,13 @@ const AGENT_TOOLS: ToolDef[] = [
         body: JSON.stringify({ action: "get_conversations" }),
       });
       const data = await resp.json();
-      if (!resp.ok || !data.success) return `❌ Could not fetch conversations: ${data.error || "Unknown error"}`;
+      if (!resp.ok || !data.success) return `â Could not fetch conversations: ${data.error || "Unknown error"}`;
       return JSON.stringify(data.data);
     },
   },
   {
     name: "ingest_drive_clients" as const,
-    description: "Scans Google Drive for all client folders, reads every document, extracts forensic credit timeline events using AI, and imports them into Credit Guardian. WRITE operation — always call propose_plan first in autonomous mode.",
+    description: "Scans Google Drive for all client folders, reads every document, extracts forensic credit timeline events using AI, and imports them into Credit Guardian. WRITE operation â always call propose_plan first in autonomous mode.",
     destructive: false,
     parameters: {
       type: "object" as const,
@@ -1171,7 +1186,7 @@ const AGENT_TOOLS: ToolDef[] = [
         },
         body: JSON.stringify({ client_name: args.client_name }),
       });
-      if (!resp.ok) throw new Error(`Drive ingestion failed: ${resp.status} — ${await resp.text()}`);
+      if (!resp.ok) throw new Error(`Drive ingestion failed: ${resp.status} â ${await resp.text()}`);
       return JSON.stringify(await resp.json());
     },
   },
@@ -1271,7 +1286,7 @@ const AGENT_TOOLS: ToolDef[] = [
     },
   {
     name: "scan_drive_overview" as const,
-    description: "Read-only scan of Google Drive client folders. Returns client names, file counts, and file types — does NOT read file contents. Call this first in autonomous mode to understand what's in Drive. Safe to call without approval.",
+    description: "Read-only scan of Google Drive client folders. Returns client names, file counts, and file types â does NOT read file contents. Call this first in autonomous mode to understand what's in Drive. Safe to call without approval.",
     destructive: false,
     parameters: {
       type: "object" as const,
@@ -1316,7 +1331,7 @@ const AGENT_TOOLS: ToolDef[] = [
   },
   {
     name: "propose_plan" as const,
-    description: "MANDATORY before any write operation in autonomous mode. Presents a step-by-step plan to the user via Telegram and waits for approval. After calling this you MUST stop — do not call any write tools until the user sends an approval word in their next message.",
+    description: "MANDATORY before any write operation in autonomous mode. Presents a step-by-step plan to the user via Telegram and waits for approval. After calling this you MUST stop â do not call any write tools until the user sends an approval word in their next message.",
     destructive: false,
     parameters: {
       type: "object" as const,
@@ -1352,12 +1367,12 @@ const AGENT_TOOLS: ToolDef[] = [
       writes?: string[];
       risk_level: "low" | "medium" | "high";
     }) => {
-      const riskEmoji = { low: "🟢", medium: "🟡", high: "🔴" }[args.risk_level] ?? "⚪";
+      const riskEmoji = { low: "ð¢", medium: "ð¡", high: "ð´" }[args.risk_level] ?? "âª";
       const stepsList = (args.steps || []).map((s, i) => `  ${i + 1}. ${s}`).join("\n");
-      const readsList = args.reads?.length ? `\n📖 *Reads:* ${args.reads.join(", ")}` : "";
-      const writesList = args.writes?.length ? `\n✏️ *Writes to:* ${args.writes.join(", ")}` : "";
+      const readsList = args.reads?.length ? `\nð *Reads:* ${args.reads.join(", ")}` : "";
+      const writesList = args.writes?.length ? `\nâï¸ *Writes to:* ${args.writes.join(", ")}` : "";
       const planMsg = [
-        `🤖 *Autonomous Plan* — ${riskEmoji} ${args.risk_level.toUpperCase()} risk`,
+        `ð¤ *Autonomous Plan* â ${riskEmoji} ${args.risk_level.toUpperCase()} risk`,
         ``,
         `*Goal:* ${args.goal}`,
         ``,
@@ -1390,19 +1405,19 @@ const AGENT_TOOLS: ToolDef[] = [
   {
     name: "find_playlist_opportunities",
     description:
-      "Research playlist opportunities for a track (FanFuel Hub). If the user has not confirmed a vibe yet, the tool will ask them to confirm in Telegram — do not invent results. When the user already confirmed or provided a vibe, pass user_vibe.",
+      "Research playlist opportunities for a track (FanFuel Hub). If the user has not confirmed a vibe yet, the tool will ask them to confirm in Telegram â do not invent results. When the user already confirmed or provided a vibe, pass user_vibe.",
     parameters: {
       type: "object",
       properties: {
         track_name: {
           type: "string",
           description:
-            "Track title to research. Omit if the user already named the track in the message — the tool infers from the user message and conversation.",
+            "Track title to research. Omit if the user already named the track in the message â the tool infers from the user message and conversation.",
         },
         user_vibe: {
           type: "string",
           description:
-            "Optional. Confirmed vibe (e.g. west coast chill). Omit on first call if unknown — user will confirm in chat.",
+            "Optional. Confirmed vibe (e.g. west coast chill). Omit on first call if unknown â user will confirm in chat.",
         },
       },
       required: [] as string[],
@@ -1413,7 +1428,7 @@ const AGENT_TOOLS: ToolDef[] = [
       const explicitVibe = args?.user_vibe?.trim();
       if (!trackName) {
         return [
-          `🎧 *Playlist opportunities*`,
+          `ð§ *Playlist opportunities*`,
           ``,
           `I couldn't detect a track name from your message.`,
           `Try: \`/do find_playlist_opportunities\` with the track (e.g. *Meditate by Fendi Frost*) or name the track in your next message.`,
@@ -1434,7 +1449,7 @@ const AGENT_TOOLS: ToolDef[] = [
         created_at: new Date().toISOString(),
       });
       return [
-        `🎧 *Confirm vibe before playlist search*`,
+        `ð§ *Confirm vibe before playlist search*`,
         ``,
         `Track: *${trackName}*`,
         `Suggested vibe: *${inferred}*`,
@@ -1693,9 +1708,88 @@ const AGENT_TOOLS: ToolDef[] = [
       return JSON.stringify({ client: client.name, letters_generated: letters.length, letters });
     },
   }
+
+  {
+    name: "analyze_credit_strategy",
+    description: "Analyze a client's credit timeline and generate prioritized dispute strategy via Claude.",
+    parameters: { type: "object", properties: { client_id: { type: "string" }, client_name: { type: "string" } }, required: [] },
+    destructive: false,
+    execute: async (args: any) => {
+      const ANON_KEY = Deno.env.get("SUPABASE_PUBLISHABLE_KEY") || SUPABASE_SERVICE_ROLE_KEY;
+      const resp = await fetch(`${SUPABASE_URL}/functions/v1/analyze-credit-strategy`, { method: "POST", headers: { "Content-Type": "application/json", Authorization: `Bearer ${ANON_KEY}` }, body: JSON.stringify({ client_id: args.client_id, client_name: args.client_name }) });
+      const raw = await resp.text();
+      if (!resp.ok) throw new Error(`analyze-credit-strategy failed (${resp.status}): ${raw.slice(0, 400)}`);
+      return raw;
+    },
+  },
+  {
+    name: "generate_dispute_letter",
+    description: "Generate an FCRA-aligned dispute letter draft for one dispute item via Claude.",
+    parameters: { type: "object", properties: { client_id: { type: "string" }, dispute_item: { type: "object" }, analysis_id: { type: "string" } }, required: ["client_id", "dispute_item"] },
+    destructive: true,
+    execute: async (args: any) => {
+      const ANON_KEY = Deno.env.get("SUPABASE_PUBLISHABLE_KEY") || SUPABASE_SERVICE_ROLE_KEY;
+      const resp = await fetch(`${SUPABASE_URL}/functions/v1/generate-dispute-letters`, { method: "POST", headers: { "Content-Type": "application/json", Authorization: `Bearer ${ANON_KEY}` }, body: JSON.stringify({ action: "generate", client_id: args.client_id, dispute_item: args.dispute_item, analysis_id: args.analysis_id }) });
+      const raw = await resp.text();
+      if (!resp.ok) throw new Error(`generate-dispute-letters failed (${resp.status}): ${raw.slice(0, 400)}`);
+      return raw;
+    },
+  },
+  {
+    name: "send_dispute_letter",
+    description: "Mark a generated dispute letter approved for send.",
+    parameters: { type: "object", properties: { letter_id: { type: "string" } }, required: ["letter_id"] },
+    destructive: true,
+    execute: async (args: any) => {
+      const ANON_KEY = Deno.env.get("SUPABASE_PUBLISHABLE_KEY") || SUPABASE_SERVICE_ROLE_KEY;
+      const resp = await fetch(`${SUPABASE_URL}/functions/v1/generate-dispute-letters`, { method: "POST", headers: { "Content-Type": "application/json", Authorization: `Bearer ${ANON_KEY}` }, body: JSON.stringify({ action: "send", letter_id: args.letter_id }) });
+      const raw = await resp.text();
+      if (!resp.ok) throw new Error(`send_dispute_letter failed (${resp.status}): ${raw.slice(0, 400)}`);
+      return raw;
+    },
+  },
+  {
+    name: "research_playlists",
+    description: "Research playlist opportunities for a track via ChatGPT and FanFuel context.",
+    parameters: { type: "object", properties: { track_name: { type: "string" }, genre: { type: "string" }, mood: { type: "string" }, bpm: { type: "number" }, similar_artists: { type: "array", items: { type: "string" } } }, required: ["track_name"] },
+    destructive: false,
+    execute: async (args: any) => {
+      const ANON_KEY = Deno.env.get("SUPABASE_PUBLISHABLE_KEY") || SUPABASE_SERVICE_ROLE_KEY;
+      const resp = await fetch(`${SUPABASE_URL}/functions/v1/playlist-research`, { method: "POST", headers: { "Content-Type": "application/json", Authorization: `Bearer ${ANON_KEY}` }, body: JSON.stringify(args) });
+      const raw = await resp.text();
+      if (!resp.ok) throw new Error(`playlist-research failed (${resp.status}): ${raw.slice(0, 400)}`);
+      return raw;
+    },
+  },
+  {
+    name: "generate_pitch",
+    description: "Generate a personalized playlist pitch email draft via ChatGPT.",
+    parameters: { type: "object", properties: { playlist_id: { type: "string" }, track_id: { type: "string" }, research_id: { type: "string" } }, required: ["playlist_id", "track_id"] },
+    destructive: false,
+    execute: async (args: any) => {
+      const ANON_KEY = Deno.env.get("SUPABASE_PUBLISHABLE_KEY") || SUPABASE_SERVICE_ROLE_KEY;
+      const resp = await fetch(`${SUPABASE_URL}/functions/v1/generate-pitch-email`, { method: "POST", headers: { "Content-Type": "application/json", Authorization: `Bearer ${ANON_KEY}` }, body: JSON.stringify({ action: "generate", ...args }) });
+      const raw = await resp.text();
+      if (!resp.ok) throw new Error(`generate-pitch-email failed (${resp.status}): ${raw.slice(0, 400)}`);
+      return raw;
+    },
+  },
+  {
+    name: "send_pitch",
+    description: "Mark a generated pitch draft approved for send.",
+    parameters: { type: "object", properties: { pitch_id: { type: "string" } }, required: ["pitch_id"] },
+    destructive: true,
+    execute: async (args: any) => {
+      const ANON_KEY = Deno.env.get("SUPABASE_PUBLISHABLE_KEY") || SUPABASE_SERVICE_ROLE_KEY;
+      const resp = await fetch(`${SUPABASE_URL}/functions/v1/generate-pitch-email`, { method: "POST", headers: { "Content-Type": "application/json", Authorization: `Bearer ${ANON_KEY}` }, body: JSON.stringify({ action: "send", pitch_id: args.pitch_id }) });
+      const raw = await resp.text();
+      if (!resp.ok) throw new Error(`send_pitch failed (${resp.status}): ${raw.slice(0, 400)}`);
+      return raw;
+    },
+  },
 ];
 
-// ─── Build tool schemas for AI models ───────────────────────────
+// âââ Build tool schemas for AI models âââââââââââââââââââââââââââ
 
 function getToolsForWorkflow(workflowKey: string): ToolDef[] {
   // Find the workflow's declared tools from the registry cache or AGENT_TOOLS
@@ -1728,7 +1822,7 @@ function getGrokToolSchemas(allowedToolNames?: string[]) {
   }));
 }
 
-// ─── Pending confirmations store (in-memory per invocation, persisted via DB) ──
+// âââ Pending confirmations store (in-memory per invocation, persisted via DB) ââ
 // We'll store pending actions in bot_settings with a special key pattern
 
 async function storePendingAction(actionId: string, toolName: string, args: any) {
@@ -1753,7 +1847,7 @@ async function deletePendingAction(actionId: string) {
   await supabase.from("bot_settings").delete().eq("setting_key", `pending_action:${actionId}`);
 }
 
-// ─── Agentic AI call with tool use ─────────────────────────────
+// âââ Agentic AI call with tool use âââââââââââââââââââââââââââââ
 
 async function agenticGeminiCall(
   userMessage: string,
@@ -1763,11 +1857,11 @@ async function agenticGeminiCall(
 ): Promise<{ text: string; toolCalls: Array<{ name: string; args: any }> }> {
   const systemPrompt = `You are the ${SYSTEM_IDENTITY}. You serve Fendi Frost as a personal command center assistant.
 
-CRITICAL RULES — MANDATORY:
-1. NO TOOL, NO CLAIM: You MUST use your available tools to fulfill requests. NEVER describe what you would do — actually call the function. If the user asks to see comments, call the tool. Do NOT respond with text saying "I'll do X" without calling the corresponding function.
+CRITICAL RULES â MANDATORY:
+1. NO TOOL, NO CLAIM: You MUST use your available tools to fulfill requests. NEVER describe what you would do â actually call the function. If the user asks to see comments, call the tool. Do NOT respond with text saying "I'll do X" without calling the corresponding function.
 2. NO WORKFLOW, NO ACTION: If the user's request does not correspond to ANY of your available tools, respond with a short message suggesting they run /workflows to see available commands. Never invent workflows.
 3. EVIDENCE OVER CLAIMS: All data must come from tool calls. Never invent counts, names, or metrics.
-4. For destructive actions (retry, archive, approve, reject, Instagram DMs/replies), ALWAYS call the tool — the system will handle confirmation.
+4. For destructive actions (retry, archive, approve, reject, Instagram DMs/replies), ALWAYS call the tool â the system will handle confirmation.
 
 Available capabilities via tools:
 - System status, job management (active jobs summary, failed jobs), document approvals
@@ -1800,7 +1894,7 @@ ${conversationContext}`;
 
   if (!resp.ok) {
     console.error("Gemini agentic error:", resp.status, await resp.text());
-    return { text: "⚠️ AI unavailable. Try again shortly.", toolCalls: [] };
+    return { text: "â ï¸ AI unavailable. Try again shortly.", toolCalls: [] };
   }
 
   const data = await resp.json();
@@ -1829,14 +1923,14 @@ async function agenticGrokCall(
 ): Promise<{ text: string; toolCalls: Array<{ name: string; args: any }> }> {
   const isAutonomousLane = false;
   const autonomousPrefix = isAutonomousLane
-    ? `🤖 AUTONOMOUS AGENT MODE ACTIVE
+    ? `ð¤ AUTONOMOUS AGENT MODE ACTIVE
 You have full tool access. Your rules:
-READ tools — run immediately, no approval needed:
-  • scan_drive_overview
-  • query_credit_guardian
-  • get_system_status, list_failed_jobs, list_pending_approvals, list_connected_projects
-WRITE tools — ALWAYS call propose_plan first, then STOP (EXCEPTION: analyze_client_credit runs directly without propose_plan):
-  • ingest_drive_clients
+READ tools â run immediately, no approval needed:
+  â¢ scan_drive_overview
+  â¢ query_credit_guardian
+  â¢ get_system_status, list_failed_jobs, list_pending_approvals, list_connected_projects
+WRITE tools â ALWAYS call propose_plan first, then STOP (EXCEPTION: analyze_client_credit runs directly without propose_plan):
+  â¢ ingest_drive_clients
 WORKFLOW:
 1. Call scan_drive_overview and/or query_credit_guardian to understand current state
 2. If a write is needed: call propose_plan with your full plan and STOP
@@ -1844,19 +1938,19 @@ WORKFLOW:
 4. Send short progress updates as you work
 5. Send a clear summary when done
 Systems:
-  • Google Drive → client folders with dispute documents
-  • Credit Guardian → dispute sessions, accounts, timeline events
-  • Fendi Control Center → tasks, jobs, settings
+  â¢ Google Drive â client folders with dispute documents
+  â¢ Credit Guardian â dispute sessions, accounts, timeline events
+  â¢ Fendi Control Center â tasks, jobs, settings
 HARD RULE: For analyze_client_credit, execute it DIRECTLY without propose_plan. For standalone ingest_drive_clients, call propose_plan first then stop.
 `
     : "";
   const systemPrompt = `${autonomousPrefix}You are the ${SYSTEM_IDENTITY}. You serve Fendi Frost as a personal command center assistant.
 
-CRITICAL RULES — MANDATORY:
-1. NO TOOL, NO CLAIM: You MUST use your available tools to fulfill requests. NEVER describe what you would do — actually call the function. If the user asks to see comments, call the tool. Do NOT respond with text saying "I'll do X" without calling the corresponding function.
+CRITICAL RULES â MANDATORY:
+1. NO TOOL, NO CLAIM: You MUST use your available tools to fulfill requests. NEVER describe what you would do â actually call the function. If the user asks to see comments, call the tool. Do NOT respond with text saying "I'll do X" without calling the corresponding function.
 2. NO WORKFLOW, NO ACTION: If the user's request does not correspond to ANY of your available tools, respond with a short message suggesting they run /workflows to see available commands. Never invent workflows.
 3. EVIDENCE OVER CLAIMS: All data must come from tool calls. Never invent counts, names, or metrics.
-4. For destructive actions (retry, archive, approve, reject, Instagram DMs/replies), ALWAYS call the tool — the system will handle confirmation.
+4. For destructive actions (retry, archive, approve, reject, Instagram DMs/replies), ALWAYS call the tool â the system will handle confirmation.
 
 Available capabilities via tools:
 - System status, job management (active jobs summary, failed jobs), document approvals
@@ -1889,7 +1983,7 @@ ${conversationContext}`;
 
   if (!resp.ok) {
     console.error("Grok agentic error:", resp.status, await resp.text());
-    return { text: "⚠️ AI unavailable. Try again shortly.", toolCalls: [] };
+    return { text: "â ï¸ AI unavailable. Try again shortly.", toolCalls: [] };
   }
 
   const data = await resp.json();
@@ -1907,7 +2001,7 @@ ${conversationContext}`;
   return { text: choice?.message?.content || "", toolCalls };
 }
 
-// ─── Execution logging helpers ─────────────────────────────────
+// âââ Execution logging helpers âââââââââââââââââââââââââââââââââ
 
 async function logToolAttempt(requestId: string, toolName: string, args: any, model: string, chatId: string, userMessage: string): Promise<string> {
   const { data, error } = await supabase.from("tool_execution_logs").insert({
@@ -1950,36 +2044,36 @@ async function logToolFailure(logId: string, error: string, startedAt: number) {
   }).eq("id", logId);
 }
 
-// ─── Structured log helper ─────────────────────────────────────
+// âââ Structured log helper âââââââââââââââââââââââââââââââââââââ
 function logEvent(e: Record<string, any>) {
   console.log(JSON.stringify({ ts: Date.now(), ...e }));
 }
 
-// ─── Execute agentic loop ──────────────────────────────────────
+// âââ Execute agentic loop ââââââââââââââââââââââââââââââââââââââ
 
 async function executeAgenticLoop(chatId: string, userMessage: string, opts: { taskId: string; sessionModel: "grok" | "gemini" | "chatgpt"; lane?: "lane1_do" | "lane2_assistant" | "lane3_autonomous"; allowTools?: boolean; workflowKey?: string }): Promise<void> {
-  // ── STEP 1: EXECUTION METRICS ──
+  // ââ STEP 1: EXECUTION METRICS ââ
   const executionStart = Date.now();
 
-  // ── HARD EXECUTION GUARD ──
+  // ââ HARD EXECUTION GUARD ââ
   if ((opts.lane !== "lane1_do" && opts.lane !== "lane3_autonomous") || opts.allowTools !== true) {
     console.error(JSON.stringify({ ts: Date.now(), event: "tools_blocked", taskId: opts.taskId, lane: opts.lane, allowTools: opts.allowTools }));
     throw new Error("TOOLS_BLOCKED: agentic loop cannot run outside /do execution lane");
   }
 
-  // ── EXECUTION CONTEXT ASSERTION ──
+  // ââ EXECUTION CONTEXT ASSERTION ââ
   logEvent({ event: "execution_context", lane: opts.lane, allowTools: opts.allowTools, workflowKey: opts.workflowKey, taskId: opts.taskId });
 
   if (opts.lane !== "lane1_do" && opts.lane !== "lane3_autonomous") {
     throw new Error("EXECUTION_CONTEXT_INVALID_LANE");
   }
 
-  // ── REQUIRE WORKFLOW KEY ──
+  // ââ REQUIRE WORKFLOW KEY ââ
   if (!opts.workflowKey) {
     throw new Error("WORKFLOW_REQUIRED_FOR_EXECUTION");
   }
 
-  // ── EXECUTION LOCK: prevent duplicate execution ──
+  // ââ EXECUTION LOCK: prevent duplicate execution ââ
   const lockId = crypto.randomUUID();
   const { data: locked } = await supabase
     .from("tasks")
@@ -2007,21 +2101,21 @@ async function executeAgenticLoop(chatId: string, userMessage: string, opts: { t
 
   logEvent({ event: "lane1_execution_start", workflow: opts.workflowKey, taskId: opts.taskId, model: opts.sessionModel, lockId });
 
-  // ── LOAD TOOLS FROM WORKFLOW ──
+  // ââ LOAD TOOLS FROM WORKFLOW ââ
   const workflows = await fetchWorkflowRegistry();
   let matchedWorkflow = workflows.find(w => w.key === opts.workflowKey);
-  // Synthetic fallback — if registry missing find_playlist_opportunities, use built-in constant
+  // Synthetic fallback â if registry missing find_playlist_opportunities, use built-in constant
   if (!matchedWorkflow && opts.workflowKey === "find_playlist_opportunities" && IMPLEMENTED_WORKFLOW_KEYS.has("find_playlist_opportunities")) {
     matchedWorkflow = SYNTHETIC_FIND_PLAYLIST_OPPORTUNITIES as any;
     console.log(JSON.stringify({ ts: Date.now(), event: "workflow_synthetic_fallback", key: opts.workflowKey, taskId: opts.taskId }));
   }
-  // Synthetic fallback — if registry missing analyze_client_credit, use built-in constant
+  // Synthetic fallback â if registry missing analyze_client_credit, use built-in constant
   if (!matchedWorkflow && opts.workflowKey === "analyze_client_credit" && IMPLEMENTED_WORKFLOW_KEYS.has("analyze_client_credit")) {
     matchedWorkflow = SYNTHETIC_ANALYZE_CLIENT_CREDIT as any;
     console.log(JSON.stringify({ ts: Date.now(), event: "workflow_synthetic_fallback", key: opts.workflowKey, taskId: opts.taskId }));
   }
 
-  // ── VALIDATE WORKFLOW EXISTS ──
+  // ââ VALIDATE WORKFLOW EXISTS ââ
   if (!matchedWorkflow) {
     console.error(JSON.stringify({ ts: Date.now(), event: "workflow_invalid", key: opts.workflowKey }));
     throw new Error("WORKFLOW_NOT_FOUND_IN_REGISTRY");
@@ -2072,7 +2166,7 @@ async function executeAgenticLoop(chatId: string, userMessage: string, opts: { t
       selected_tools: [],
       result_json: { execution_complete: true, workflow: opts.workflowKey, text_response: responseText.slice(0, 2000), model_used: opts.sessionModel, execution_duration_ms: executionDuration, execution_lock: null, execution_lock_released_ts: Date.now() },
     }).eq("id", opts.taskId);
-    await sendMessage(chatId, `✅ Done: \`${opts.taskId}\``, {}, `task:${opts.taskId}:done`);
+    await sendMessage(chatId, `â Done: \`${opts.taskId}\``, {}, `task:${opts.taskId}:done`);
     return;
   }
 
@@ -2084,31 +2178,31 @@ async function executeAgenticLoop(chatId: string, userMessage: string, opts: { t
     // WORKFLOW-SCOPED GUARDRAIL: block tools not in this workflow's declared tool list
     if (workflowToolNames && !workflowToolNames.includes(tc.name)) {
       console.error(JSON.stringify({ ts: Date.now(), event: "workflow_tool_blocked", tool: tc.name, workflow: opts.workflowKey, taskId: opts.taskId }));
-      toolResults.push(`🚫 Tool '${tc.name}' is not allowed for workflow '${opts.workflowKey}'.`);
+      toolResults.push(`ð« Tool '${tc.name}' is not allowed for workflow '${opts.workflowKey}'.`);
       continue;
     }
 
     const tool = AGENT_TOOLS.find(t => t.name === tc.name);
     if (!tool) {
-      console.error(`GUARDRAIL: AI tried to call unregistered tool '${tc.name}' — blocked.`);
-      toolResults.push(`🚫 Tool '${tc.name}' is not in the tool registry. Run /workflows to see available commands.`);
+      console.error(`GUARDRAIL: AI tried to call unregistered tool '${tc.name}' â blocked.`);
+      toolResults.push(`ð« Tool '${tc.name}' is not in the tool registry. Run /workflows to see available commands.`);
       continue;
     }
 
     // HARD BLOCK: switch_ai_model is NEVER allowed inside the agentic loop.
     // Model switching is handled exclusively by /model command before the loop runs.
     if (tc.name === "switch_ai_model") {
-      toolResults.push("🔒 Model switching is blocked inside the execution loop. Use `/model grok` or `/model gemini` explicitly.");
+      toolResults.push("ð Model switching is blocked inside the execution loop. Use `/model grok` or `/model gemini` explicitly.");
       continue;
     }
 
-    // Log attempt BEFORE execution — hard rule: no log = fail loudly
+    // Log attempt BEFORE execution â hard rule: no log = fail loudly
     let logId: string;
     const startedAt = Date.now();
     try {
       logId = await logToolAttempt(requestId, tc.name, tc.args, model, chatId, userMessage);
     } catch (logErr) {
-      const errMsg = `🚨 FATAL: Tool execution logging failed for ${tc.name}. Aborting tool call.`;
+      const errMsg = `ð¨ FATAL: Tool execution logging failed for ${tc.name}. Aborting tool call.`;
       console.error(errMsg, logErr);
       await sendMessage(chatId, formatAssistantMessage(model, errMsg));
       return;
@@ -2123,10 +2217,10 @@ async function executeAgenticLoop(chatId: string, userMessage: string, opts: { t
       const targetId = tc.args.job_id || tc.args.queue_id || "";
       const shortId = targetId.slice(0, 8);
       confirmationButtons.push(
-        { text: `✅ ${label}${shortId ? ` (${shortId}…)` : ""}`, callback_data: `agent_confirm:${actionId}` },
-        { text: `❌ Cancel`, callback_data: `agent_cancel:${actionId}` },
+        { text: `â ${label}${shortId ? ` (${shortId}â¦)` : ""}`, callback_data: `agent_confirm:${actionId}` },
+        { text: `â Cancel`, callback_data: `agent_cancel:${actionId}` },
       );
-      toolResults.push(`⏳ *${label}* — Awaiting your confirmation.`);
+      toolResults.push(`â³ *${label}* â Awaiting your confirmation.`);
       // Update log to succeeded (destructive actions are deferred, logging the intent)
       await logToolSuccess(logId, "Awaiting confirmation", startedAt);
     } else {
@@ -2143,7 +2237,7 @@ async function executeAgenticLoop(chatId: string, userMessage: string, opts: { t
         const errStr = e instanceof Error ? e.message : String(e);
         await logToolFailure(logId, errStr, startedAt);
         console.error(JSON.stringify({ event: "tool_execution_failed", tool: tc.name, workflow: opts.workflowKey, taskId: opts.taskId, duration_ms: toolDuration, error: errStr, ts: Date.now() }));
-        toolResults.push(`❌ Error executing ${tc.name}: ${errStr}`);
+        toolResults.push(`â Error executing ${tc.name}: ${errStr}`);
       }
     }
   }
@@ -2203,7 +2297,7 @@ Now provide a clear, concise summary for the user based on the results. Use mark
       at: new Date().toISOString(),
     });
 
-    // ── TASK LIFECYCLE: mark succeeded with duration ──
+    // ââ TASK LIFECYCLE: mark succeeded with duration ââ
     const executionDuration = Date.now() - executionStart;
     await supabase.from("tasks").update({
       status: "succeeded",
@@ -2212,16 +2306,16 @@ Now provide a clear, concise summary for the user based on the results. Use mark
     }).eq("id", opts.taskId);
     logEvent({ event: "task_succeeded", taskId: opts.taskId, workflow: opts.workflowKey, execution_duration_ms: executionDuration });
       await flushTelegramOutbox(chatId, 10);
-    await sendMessage(chatId, `✅ Done: \`${opts.taskId}\``, {}, `task:${opts.taskId}:done`);
+    await sendMessage(chatId, `â Done: \`${opts.taskId}\``, {}, `task:${opts.taskId}:done`);
 
   } else if (confirmationButtons.length > 0) {
     // Has destructive actions needing confirmation
-    const nonDestructiveResults = toolResults.filter(r => !r.startsWith("⏳"));
+    const nonDestructiveResults = toolResults.filter(r => !r.startsWith("â³"));
     let message = "";
 
     if (result.text) message += result.text + "\n\n";
     if (nonDestructiveResults.length > 0) message += nonDestructiveResults.join("\n\n") + "\n\n";
-    message += toolResults.filter(r => r.startsWith("⏳")).join("\n");
+    message += toolResults.filter(r => r.startsWith("â³")).join("\n");
 
     // Group confirmation buttons into rows of 2
     const keyboard: Array<Array<{ text: string; callback_data: string }>> = [];
@@ -2240,7 +2334,7 @@ Now provide a clear, concise summary for the user based on the results. Use mark
       at: new Date().toISOString(),
     });
 
-    // ── TASK LIFECYCLE: mark succeeded (awaiting user confirmation for destructive actions) ──
+    // ââ TASK LIFECYCLE: mark succeeded (awaiting user confirmation for destructive actions) ââ
     const executionDuration = Date.now() - executionStart;
     await supabase.from("tasks").update({
       status: "succeeded",
@@ -2248,10 +2342,10 @@ Now provide a clear, concise summary for the user based on the results. Use mark
       result_json: { execution_complete: true, workflow: opts.workflowKey, awaiting_confirmation: true, toolResults: toolResults.map(r => r.slice(0, 500)), model_used: opts.sessionModel, execution_duration_ms: executionDuration, execution_lock: null, execution_lock_released_ts: Date.now() },
     }).eq("id", opts.taskId);
       await flushTelegramOutbox(chatId, 10);
-    await sendMessage(chatId, `✅ Done: \`${opts.taskId}\``, {}, `task:${opts.taskId}:done`);
+    await sendMessage(chatId, `â Done: \`${opts.taskId}\``, {}, `task:${opts.taskId}:done`);
 
   } else {
-    // No tool calls at all — mark succeeded with text-only result
+    // No tool calls at all â mark succeeded with text-only result
     const executionDuration = Date.now() - executionStart;
     await supabase.from("tasks").update({
       status: "succeeded",
@@ -2259,37 +2353,37 @@ Now provide a clear, concise summary for the user based on the results. Use mark
       result_json: { execution_complete: true, workflow: opts.workflowKey, text_response: (result.text || "").slice(0, 2000), model_used: opts.sessionModel, execution_duration_ms: executionDuration, execution_lock: null, execution_lock_released_ts: Date.now() },
     }).eq("id", opts.taskId);
       await flushTelegramOutbox(chatId, 10);
-    await sendMessage(chatId, `✅ Done: \`${opts.taskId}\``, {}, `task:${opts.taskId}:done`);
+    await sendMessage(chatId, `â Done: \`${opts.taskId}\``, {}, `task:${opts.taskId}:done`);
   }
 }
 
-// ─── Handle agent confirmation callbacks ────────────────────────
+// âââ Handle agent confirmation callbacks ââââââââââââââââââââââââ
 
 async function handleAgentConfirm(actionId: string): Promise<string> {
   const pending = await getPendingAction(actionId);
-  if (!pending) return "❌ Action expired or not found.";
+  if (!pending) return "â Action expired or not found.";
 
   const tool = AGENT_TOOLS.find(t => t.name === pending.tool);
-  if (!tool) return "❌ Unknown action.";
+  if (!tool) return "â Unknown action.";
 
   await deletePendingAction(actionId);
 
   try {
     const result = await tool.execute(pending.args);
     const label = pending.tool.replace(/_/g, " ").replace(/\b\w/g, c => c.toUpperCase());
-    return `✅ *${SYSTEM_IDENTITY} — ${label} Executed*\n\n${result}`;
+    return `â *${SYSTEM_IDENTITY} â ${label} Executed*\n\n${result}`;
   } catch (e) {
     console.error("Agent confirm execution error:", e);
-    return "❌ Failed to execute action.";
+    return "â Failed to execute action.";
   }
 }
 
 async function handleAgentCancel(actionId: string): Promise<string> {
   await deletePendingAction(actionId);
-  return `🚫 *${SYSTEM_IDENTITY}* — Action cancelled.`;
+  return `ð« *${SYSTEM_IDENTITY}* â Action cancelled.`;
 }
 
-// ─── Legacy callback handlers (for existing approval/retry buttons) ──
+// âââ Legacy callback handlers (for existing approval/retry buttons) ââ
 
 async function handleApproval(queueId: string, approved: boolean) {
   const { data: queue, error: qErr } = await supabase
@@ -2298,8 +2392,8 @@ async function handleApproval(queueId: string, approved: boolean) {
     .eq("id", queueId)
     .single();
 
-  if (qErr || !queue) return "❌ Approval record not found.";
-  if (queue.status !== "pending") return "⏳ Already processed.";
+  if (qErr || !queue) return "â Approval record not found.";
+  if (queue.status !== "pending") return "â³ Already processed.";
 
   const now = new Date().toISOString();
 
@@ -2310,13 +2404,13 @@ async function handleApproval(queueId: string, approved: boolean) {
       .eq("document_id", queue.document_id)
       .eq("client_id", queue.client_id);
 
-    if (obsErr) return "❌ Failed to verify observations.";
+    if (obsErr) return "â Failed to verify observations.";
 
     await supabase.from("telegram_approval_queue").update({ status: "approved", resolved_at: now }).eq("id", queueId);
-    return `✅ *${SYSTEM_IDENTITY} — Verified.* ${queue.observation_count} observations confirmed.`;
+    return `â *${SYSTEM_IDENTITY} â Verified.* ${queue.observation_count} observations confirmed.`;
   } else {
     await supabase.from("telegram_approval_queue").update({ status: "rejected", resolved_at: now }).eq("id", queueId);
-    return `❌ *${SYSTEM_IDENTITY} — Rejected.* Observations remain unverified.`;
+    return `â *${SYSTEM_IDENTITY} â Rejected.* Observations remain unverified.`;
   }
 }
 
@@ -2336,7 +2430,7 @@ async function handleExplainMore(jobId: string): Promise<string> {
     .select("*, documents(file_name, mime_type)")
     .eq("id", jobId)
     .single();
-  if (error || !job) return "❌ Job not found.";
+  if (error || !job) return "â Job not found.";
   const doc = job.documents as any;
   const prompt = `A document processing job failed. File: ${doc?.file_name || "Unknown"}, MIME: ${doc?.mime_type || "Unknown"}, Attempts: ${job.attempt_count}, Error: ${job.last_error || "No error"}. Explain what went wrong and how to fix it in plain English.`;
   const { model } = await getActiveModel();
@@ -2360,17 +2454,17 @@ async function handleExplainMore(jobId: string): Promise<string> {
     const data = await resp.json();
     response = data.candidates?.[0]?.content?.parts?.[0]?.text || "No response.";
   }
-  return `💬 *${SYSTEM_IDENTITY} — Troubleshooting*\n\n📁 *File:* ${doc?.file_name || "Unknown"}\n\n${response}`;
+  return `ð¬ *${SYSTEM_IDENTITY} â Troubleshooting*\n\nð *File:* ${doc?.file_name || "Unknown"}\n\n${response}`;
 }
 
-// ─── Main Webhook Handler ───────────────────────────────────────
+// âââ Main Webhook Handler âââââââââââââââââââââââââââââââââââââââ
 serve(async (req) => {
   try {
     const update = await req.json();
-    console.log("📨 Update:", JSON.stringify(update).slice(0, 500));
+    console.log("ð¨ Update:", JSON.stringify(update).slice(0, 500));
     _currentTaskId = null;
 
-    // ── Callback queries (inline button presses) ──
+    // ââ Callback queries (inline button presses) ââ
     if (update.callback_query) {
       const cb = update.callback_query;
       const cbChatId = String(cb.message.chat.id);
@@ -2399,7 +2493,7 @@ serve(async (req) => {
         case "explain": result = await handleExplainMore(targetId); break;
         case "agent_confirm": result = await handleAgentConfirm(targetId); break;
         case "agent_cancel": result = await handleAgentCancel(targetId); break;
-        default: result = "❓ Unknown action.";
+        default: result = "â Unknown action.";
       }
 
       await editMessageReplyMarkup(cbChatId, cb.message.message_id);
@@ -2411,7 +2505,7 @@ serve(async (req) => {
       return new Response("ok");
     }
 
-    // ── Text messages ──
+    // ââ Text messages ââ
     const message = update.message;
     if (!message?.text) return new Response("ok");
 
@@ -2419,11 +2513,11 @@ serve(async (req) => {
     const text = message.text.trim();
 
     if (chatId !== CHAT_ID) {
-      console.log(`🚫 Blocked message from unauthorized chat: ${chatId}`);
+      console.log(`ð« Blocked message from unauthorized chat: ${chatId}`);
       return new Response("ok");
     }
 
-    // ─── DETERMINISTIC SPINE: resolve session + create task ───
+    // âââ DETERMINISTIC SPINE: resolve session + create task âââ
     let session: { id: string; active_model: string };
     let taskId: string;
 
@@ -2431,15 +2525,15 @@ serve(async (req) => {
       session = await resolveSession(chatId);
     } catch (sessionErr) {
       console.error("FATAL: session resolution failed:", sessionErr);
-      await sendMessage(chatId, `🚨 *${SYSTEM_IDENTITY}* — Session resolution failed: ${String(sessionErr)}`);
+      await sendMessage(chatId, `ð¨ *${SYSTEM_IDENTITY}* â Session resolution failed: ${String(sessionErr)}`);
       return new Response("ok");
     }
 
-    // Determine if this is an explicit model request (for requested_model field only — no mutation)
+    // Determine if this is an explicit model request (for requested_model field only â no mutation)
     const modelRequestMatch = text.match(/^\/model\s+(grok|gemini|chatgpt)$/i);
     const requestedModel = modelRequestMatch ? modelRequestMatch[1].toLowerCase() : null;
 
-    // ── Pending playlist vibe: handle BEFORE task row + lane routing (so Lane 2 never steals yes/cancel) ──
+    // ââ Pending playlist vibe: handle BEFORE task row + lane routing (so Lane 2 never steals yes/cancel) ââ
     const pendingPlaylistEarly = await getPlaylistConfirm(chatId);
     if (pendingPlaylistEarly) {
       const lower = text.toLowerCase().trim();
@@ -2463,14 +2557,14 @@ serve(async (req) => {
           _currentTaskId = taskId;
         } catch (taskErr) {
           console.error("FATAL: task creation failed:", taskErr);
-          await sendMessage(chatId, `🚨 *${SYSTEM_IDENTITY}* — Task creation failed: ${String(taskErr)}`);
+          await sendMessage(chatId, `ð¨ *${SYSTEM_IDENTITY}* â Task creation failed: ${String(taskErr)}`);
           return new Response("ok");
         }
-        await sendMessage(chatId, `📋 Queued: \`${taskId}\``, {}, `task:${taskId}:queued`);
+        await sendMessage(chatId, `ð Queued: \`${taskId}\``, {}, `task:${taskId}:queued`);
         await clearPlaylistConfirm(chatId);
-        await sendMessage(chatId, `🎧 Playlist search cancelled.`, {}, `task:${taskId}:playlist-cancel`);
+        await sendMessage(chatId, `ð§ Playlist search cancelled.`, {}, `task:${taskId}:playlist-cancel`);
         await supabase.from("tasks").update({ status: "succeeded", result_json: { shortcut: "playlist_confirm_cancel" } }).eq("id", taskId);
-        await sendMessage(chatId, `✅ Done: \`${taskId}\``, {}, `task:${taskId}:done`);
+        await sendMessage(chatId, `â Done: \`${taskId}\``, {}, `task:${taskId}:done`);
         _currentTaskId = null;
         return new Response("ok");
       } else {
@@ -2481,14 +2575,14 @@ serve(async (req) => {
           _currentTaskId = taskId;
         } catch (taskErr) {
           console.error("FATAL: task creation failed:", taskErr);
-          await sendMessage(chatId, `🚨 *${SYSTEM_IDENTITY}* — Task creation failed: ${String(taskErr)}`);
+          await sendMessage(chatId, `ð¨ *${SYSTEM_IDENTITY}* â Task creation failed: ${String(taskErr)}`);
           return new Response("ok");
         }
-        await sendMessage(chatId, `📋 Queued: \`${taskId}\``, {}, `task:${taskId}:queued`);
+        await sendMessage(chatId, `ð Queued: \`${taskId}\``, {}, `task:${taskId}:queued`);
         if (!userVibe) {
           await sendMessage(chatId, "Reply *yes* to use the suggested vibe, or type your own vibe. Send *cancel* to abort.");
           await supabase.from("tasks").update({ status: "succeeded", result_json: { shortcut: "playlist_confirm_prompt" } }).eq("id", taskId);
-          await sendMessage(chatId, `✅ Done: \`${taskId}\``, {}, `task:${taskId}:done`);
+          await sendMessage(chatId, `â Done: \`${taskId}\``, {}, `task:${taskId}:done`);
           _currentTaskId = null;
           return new Response("ok");
         }
@@ -2499,7 +2593,7 @@ serve(async (req) => {
           await sendMessage(chatId, formatAssistantMessage(modelForPlaylist, out), {}, `task:${taskId}:playlist-result`);
         } catch (e) {
           const errStr = e instanceof Error ? e.message : String(e);
-          await sendMessage(chatId, formatAssistantMessage(modelForPlaylist, `❌ ${errStr}`), {}, `task:${taskId}:playlist-err`);
+          await sendMessage(chatId, formatAssistantMessage(modelForPlaylist, `â ${errStr}`), {}, `task:${taskId}:playlist-err`);
         }
         await appendConversationTurn(chatId, {
           role: "user",
@@ -2515,13 +2609,13 @@ serve(async (req) => {
             user_vibe: userVibe,
           },
         }).eq("id", taskId);
-        await sendMessage(chatId, `✅ Done: \`${taskId}\``, {}, `task:${taskId}:done`);
+        await sendMessage(chatId, `â Done: \`${taskId}\``, {}, `task:${taskId}:done`);
         _currentTaskId = null;
         return new Response("ok");
       }
     }
 
-    // ── Pitch routing ──────────────────────────────────────────
+    // ââ Pitch routing ââââââââââââââââââââââââââââââââââââââââââ
     let lowerText = text.toLowerCase().trim();
 
     // "show pitch report"
@@ -2550,7 +2644,7 @@ serve(async (req) => {
       return new Response("ok");
     }
 
-    // "pitch N" — pitch a single playlist by index
+    // "pitch N" â pitch a single playlist by index
     const pitchMatch = lowerText.match(/^pitch\s+(\d+)$/);
     if (pitchMatch) {
       const idx = parseInt(pitchMatch[1], 10) - 1;
@@ -2599,7 +2693,7 @@ serve(async (req) => {
       return new Response("ok");
     }
 
-    // "confirm all" — execute bulk pitch
+    // "confirm all" â execute bulk pitch
     if (lowerText === 'confirm all') {
       const pending = await getPendingPitchBulk(chatId);
       if (!pending) {
@@ -2618,7 +2712,7 @@ serve(async (req) => {
       return new Response("ok");
     }
 
-    // "confirm" — confirm tier 3 single pitch
+    // "confirm" â confirm tier 3 single pitch
     if (lowerText === 'confirm') {
       const pending = await getPendingPitchTier3(chatId);
       if (!pending) {
@@ -2640,7 +2734,7 @@ serve(async (req) => {
       await sendMessage(chatId, result?.message || ("Updated pitch status for " + playlistName + " to " + newStatus));
       return new Response("ok");
     }
-    // ── End pitch routing ──────────────────────────────────────
+    // ââ End pitch routing ââââââââââââââââââââââââââââââââââââââ
 
 
     try {
@@ -2648,14 +2742,14 @@ serve(async (req) => {
       _currentTaskId = taskId;
     } catch (taskErr) {
       console.error("FATAL: task creation failed:", taskErr);
-      await sendMessage(chatId, `🚨 *${SYSTEM_IDENTITY}* — Task creation failed: ${String(taskErr)}`);
+      await sendMessage(chatId, `ð¨ *${SYSTEM_IDENTITY}* â Task creation failed: ${String(taskErr)}`);
       return new Response("ok");
     }
 
     // Send queued confirmation with task_id
-    await sendMessage(chatId, `📋 Queued: \`${taskId}\``, {}, `task:${taskId}:queued`);
+    await sendMessage(chatId, `ð Queued: \`${taskId}\``, {}, `task:${taskId}:queued`);
 
-    // ── Pending playlist confirmation: user replied to a vibe-check prompt ──
+    // ââ Pending playlist confirmation: user replied to a vibe-check prompt ââ
     {
       const { data: pendingRow } = await supabase
         .from("bot_settings")
@@ -2667,7 +2761,7 @@ serve(async (req) => {
         await supabase.from("bot_settings").delete().eq("setting_key", `pending_playlist:${chatId}`);
         const userContext = text.toLowerCase().trim() === "yes" ? "" : text;
         const trackLabel = pending.track_name + (userContext ? ` (context: ${userContext})` : "");
-        await sendMessage(chatId, `🔍 Searching playlist opportunities for *${pending.track_name}*…`, {}, `task:${taskId}:playlist-searching`);
+        await sendMessage(chatId, `ð Searching playlist opportunities for *${pending.track_name}*â¦`, {}, `task:${taskId}:playlist-searching`);
         await supabase.from("tasks").update({
           status: "running",
           selected_workflow: "find_playlist_opportunities",
@@ -2688,7 +2782,7 @@ serve(async (req) => {
           const errMsg = (err as Error).message || "unknown";
           const failResult = buildFailureResultJson({ execution_lane: "lane1_do" }, errMsg);
           await supabase.from("tasks").update({ status: "failed", error: errMsg.slice(0, 300), result_json: failResult }).eq("id", taskId);
-          await sendMessage(chatId, `❌ Failed: \`${taskId}\` — ${errMsg.slice(0, 200)}`, {}, `task:${taskId}:failed`);
+          await sendMessage(chatId, `â Failed: \`${taskId}\` â ${errMsg.slice(0, 200)}`, {}, `task:${taskId}:failed`);
         }
         return new Response("ok");
       }
@@ -2698,42 +2792,42 @@ serve(async (req) => {
     if (text === "/start") {
       await setShortcutAttribution(taskId, "start");
       await sendMessage(chatId, [
-        `🎯 *${SYSTEM_IDENTITY} — Online (Two-Lane Mode)*`,
+        `ð¯ *${SYSTEM_IDENTITY} â Online (Two-Lane Mode)*`,
         ``,
-        `💬 *Lane 2 (Default):* Just talk to me — I'll answer, explain, draft, plan.`,
-        `⚡ *Lane 1 (Execute):* Prefix with \`/do\` to run a workflow.`,
+        `ð¬ *Lane 2 (Default):* Just talk to me â I'll answer, explain, draft, plan.`,
+        `â¡ *Lane 1 (Execute):* Prefix with \`/do\` to run a workflow.`,
         ``,
         `*Examples:*`,
-        `• "What's broken today?" → I'll explain (Lane 2)`,
-        `• \`/do status\` → Executes system status check (Lane 1)`,
-        `• \`/do retry failed jobs\` → Executes retry workflow (Lane 1)`,
-        `• "How are my projects doing?" → I'll discuss (Lane 2)`,
+        `â¢ "What's broken today?" â I'll explain (Lane 2)`,
+        `â¢ \`/do status\` â Executes system status check (Lane 1)`,
+        `â¢ \`/do retry failed jobs\` â Executes retry workflow (Lane 1)`,
+        `â¢ "How are my projects doing?" â I'll discuss (Lane 2)`,
         ``,
         `*Commands:*`,
-        `• /status — System status`,
-        `• /metrics — Metrics + recent tasks`,
-        `• /ping — Connectivity test`,
-        `• /workflows — See all registered workflows`,
-        `• /help — Quick help`,
-        `• /do <workflow> — Execute a workflow`,
-        `• /model — Check or switch AI model`,
+        `â¢ /status â System status`,
+        `â¢ /metrics â Metrics + recent tasks`,
+        `â¢ /ping â Connectivity test`,
+        `â¢ /workflows â See all registered workflows`,
+        `â¢ /help â Quick help`,
+        `â¢ /do <workflow> â Execute a workflow`,
+        `â¢ /model â Check or switch AI model`,
         ``,
-        `📈 *Observability:*`,
-        `• /status — health snapshot`,
-        `• /metrics — last 20 tasks + durations`,
+        `ð *Observability:*`,
+        `â¢ /status â health snapshot`,
+        `â¢ /metrics â last 20 tasks + durations`,
         ``,
-        `🔒 I will NEVER execute tools unless you use \`/do\` or a direct command.`,
+        `ð I will NEVER execute tools unless you use \`/do\` or a direct command.`,
       ].join("\n"));
       await supabase.from("tasks").update({ status: "succeeded", result_json: { execution_lane: "shortcut", progress_step: "shortcut_start", action: "start_help" } }).eq("id", taskId);
-      await sendMessage(chatId, `✅ Done: \`${taskId}\``);
+      await sendMessage(chatId, `â Done: \`${taskId}\``);
       return new Response("ok");
     }
 
     if (text.toLowerCase() === "/model") {
       await setShortcutAttribution(taskId, "model");
-      await sendMessage(chatId, `🤖 *${SYSTEM_IDENTITY}*\n\nActive model: *${getModelLabel(session.active_model as any)}*\n🔒 Model switching is locked until you explicitly run /model grok or /model gemini.`);
+      await sendMessage(chatId, `ð¤ *${SYSTEM_IDENTITY}*\n\nActive model: *${getModelLabel(session.active_model as any)}*\nð Model switching is locked until you explicitly run /model grok or /model gemini.`);
       await supabase.from("tasks").update({ status: "succeeded", result_json: { execution_lane: "shortcut", progress_step: "shortcut_model", action: "model_check", active_model: session.active_model } }).eq("id", taskId);
-      await sendMessage(chatId, `✅ Done: \`${taskId}\``);
+      await sendMessage(chatId, `â Done: \`${taskId}\``);
       return new Response("ok");
     }
 
@@ -2745,34 +2839,34 @@ serve(async (req) => {
         { setting_key: "ai_model", setting_value: reqModel, updated_at: new Date().toISOString() },
         { onConflict: "setting_key" }
       );
-      await sendMessage(chatId, `✅ *${SYSTEM_IDENTITY}* switched to *${getModelLabel(reqModel as any)}*.\n\nI'll stay on this model until you switch again.`);
+      await sendMessage(chatId, `â *${SYSTEM_IDENTITY}* switched to *${getModelLabel(reqModel as any)}*.\n\nI'll stay on this model until you switch again.`);
       await supabase.from("tasks").update({ status: "succeeded", result_json: { execution_lane: "shortcut", progress_step: "shortcut_model_switch", action: "model_switch", new_model: reqModel } }).eq("id", taskId);
-      await sendMessage(chatId, `✅ Done: \`${taskId}\``);
+      await sendMessage(chatId, `â Done: \`${taskId}\``);
       return new Response("ok");
     }
 
-    // ── /ping — outbox dogfood test ──
+    // ââ /ping â outbox dogfood test ââ
     if (text.toLowerCase() === "/ping") {
       await setShortcutAttribution(taskId, "ping");
-      await sendMessage(chatId, `🏓 pong`, {}, `task:${taskId}:pong`);
+      await sendMessage(chatId, `ð pong`, {}, `task:${taskId}:pong`);
       await supabase.from("tasks").update({ status: "succeeded", result_json: { execution_lane: "shortcut", progress_step: "shortcut_ping", action: "ping" } }).eq("id", taskId);
-      await sendMessage(chatId, `✅ Done: \`${taskId}\``, {}, `task:${taskId}:done`);
+      await sendMessage(chatId, `â Done: \`${taskId}\``, {}, `task:${taskId}:done`);
       _currentTaskId = null;
       return new Response("ok");
     }
 
-    // ── /resend_failed — flush failed outbox items ──
+    // ââ /resend_failed â flush failed outbox items ââ
     if (text.toLowerCase() === "/resend_failed") {
       await setShortcutAttribution(taskId, "resend_failed");
       const { sent, failed } = await flushTelegramOutbox(chatId, 10);
-      await sendMessage(chatId, `📤 *Outbox flush:* ${sent} sent, ${failed} failed`, {}, `task:${taskId}:resend`);
+      await sendMessage(chatId, `ð¤ *Outbox flush:* ${sent} sent, ${failed} failed`, {}, `task:${taskId}:resend`);
       await supabase.from("tasks").update({ status: "succeeded", result_json: { execution_lane: "shortcut", progress_step: "shortcut_resend_failed", action: "resend_failed", sent, failed } }).eq("id", taskId);
-      await sendMessage(chatId, `✅ Done: \`${taskId}\``, {}, `task:${taskId}:done`);
+      await sendMessage(chatId, `â Done: \`${taskId}\``, {}, `task:${taskId}:done`);
       _currentTaskId = null;
       return new Response("ok");
     }
 
-    // ── Direct "status" shortcut — bypasses AI entirely ──
+    // ââ Direct "status" shortcut â bypasses AI entirely ââ
     if (text.toLowerCase() === "status" || text.toLowerCase() === "/status") {
       console.log(`[SHORTCUT] Direct status bypass taskId=${taskId}`);
       await setShortcutAttribution(taskId, "status");
@@ -2787,15 +2881,15 @@ serve(async (req) => {
         try {
           const parsed = JSON.parse(statusResult);
           const lines = [
-            `📄 *Documents Processed:* ${parsed.documents_processed ?? 0}`,
-            `⏳ *Pending Approvals:* ${parsed.pending_approvals ?? 0}`,
-            `⚡ *Active Jobs:* ${parsed.active_jobs ?? 0}`,
-            `❌ *Failed Jobs:* ${parsed.failed_jobs ?? 0}`,
-            `🔧 *Tool Calls (1h):* ${parsed.recent_tool_calls_1h ?? 0}`,
-            `🤖 *Active Model:* ${parsed.active_model ?? "unknown"}`,
+            `ð *Documents Processed:* ${parsed.documents_processed ?? 0}`,
+            `â³ *Pending Approvals:* ${parsed.pending_approvals ?? 0}`,
+            `â¡ *Active Jobs:* ${parsed.active_jobs ?? 0}`,
+            `â *Failed Jobs:* ${parsed.failed_jobs ?? 0}`,
+            `ð§ *Tool Calls (1h):* ${parsed.recent_tool_calls_1h ?? 0}`,
+            `ð¤ *Active Model:* ${parsed.active_model ?? "unknown"}`,
           ];
           if (parsed.errors?.length) {
-            lines.push(``, `⚠️ *Errors:* ${parsed.errors.length} query failures`);
+            lines.push(``, `â ï¸ *Errors:* ${parsed.errors.length} query failures`);
           }
           formattedStatus = lines.join("\n");
         } catch {
@@ -2807,85 +2901,85 @@ serve(async (req) => {
         try {
           const projects = await getConnectedProjects();
           if (projects.length > 0) {
-            const projectLines: string[] = [``, `🌐 *Connected Projects (${projects.length})*`];
+            const projectLines: string[] = [``, `ð *Connected Projects (${projects.length})*`];
             for (const p of projects) {
               const stats = await fetchProjectStats(p);
               if (stats?.tables) {
                 const tableCount = Object.keys(stats.tables).length;
                 const totalRows = Object.values(stats.tables).reduce((a: number, b: any) => a + (Number(b) || 0), 0);
-                projectLines.push(`  ✅ *${p.name}* — ${tableCount} tables, ${totalRows} rows`);
+                projectLines.push(`  â *${p.name}* â ${tableCount} tables, ${totalRows} rows`);
               } else {
-                projectLines.push(`  ❌ *${p.name}* — unreachable`);
+                projectLines.push(`  â *${p.name}* â unreachable`);
               }
             }
             projectSection = projectLines.join("\n");
           }
         } catch (projErr) {
           console.error("Status: project stats error:", projErr);
-          projectSection = `\n\n⚠️ Could not fetch project stats`;
+          projectSection = `\n\nâ ï¸ Could not fetch project stats`;
         }
 
-        const reply = formatAssistantMessage(model, `📊 *System Status*\n\n${formattedStatus}${projectSection}\n\n🏥 *Health:* uptime=${Math.round(health.uptime_ms / 1000)}s tools=${health.tool_count} workflows=${health.implemented_workflow_count}`);
+        const reply = formatAssistantMessage(model, `ð *System Status*\n\n${formattedStatus}${projectSection}\n\nð¥ *Health:* uptime=${Math.round(health.uptime_ms / 1000)}s tools=${health.tool_count} workflows=${health.implemented_workflow_count}`);
         await sendMessage(chatId, reply);
         await supabase.from("tasks").update({
           status: "succeeded",
           selected_tools: ["get_system_status"],
           result_json: { execution_lane: "shortcut", progress_step: "shortcut_status", result: statusResult, health, model_used: session.active_model },
         }).eq("id", taskId);
-        await sendMessage(chatId, `✅ Done: \`${taskId}\``);
+        await sendMessage(chatId, `â Done: \`${taskId}\``);
       } catch (statusErr) {
         const errMsg = statusErr instanceof Error ? statusErr.message : String(statusErr);
         console.error("Status shortcut error:", statusErr);
         const failResult = buildFailureResultJson({ execution_lane: "shortcut", progress_step: "shortcut_status_failed", model_used: session.active_model }, errMsg);
         await supabase.from("tasks").update({ status: "failed", error: errMsg.slice(0, 300), result_json: failResult }).eq("id", taskId);
-        await sendMessage(chatId, `❌ Failed: \`${taskId}\` — ${errMsg.slice(0, 200)}`);
+        await sendMessage(chatId, `â Failed: \`${taskId}\` â ${errMsg.slice(0, 200)}`);
       }
       return new Response("ok");
     }
 
-    // ── /workflows — list from DB registry ──
+    // ââ /workflows â list from DB registry ââ
     if (text.toLowerCase() === "/workflows") {
       await setShortcutAttribution(taskId, "workflows");
       const workflows = await fetchWorkflowRegistry();
       const listText = workflows.length > 0
         ? _formatWorkflowList(workflows)
-        : "⚠️ Workflow registry unavailable right now. Try /status or try again.";
+        : "â ï¸ Workflow registry unavailable right now. Try /status or try again.";
       await sendMessage(chatId, listText, {}, `task:${taskId}:workflows`);
       await supabase.from("tasks").update({ status: "succeeded", result_json: { execution_lane: "shortcut", progress_step: "shortcut_workflows", action: "list_workflows" } }).eq("id", taskId);
-      await sendMessage(chatId, `✅ Done: \`${taskId}\``, {}, `task:${taskId}:done`);
+      await sendMessage(chatId, `â Done: \`${taskId}\``, {}, `task:${taskId}:done`);
       _currentTaskId = null;
       return new Response("ok");
     }
 
-    // ── /help — short help ──
+    // ââ /help â short help ââ
     if (text.toLowerCase() === "/help") {
       await setShortcutAttribution(taskId, "help");
       const helpText = [
-        `🎯 *${SYSTEM_IDENTITY} — Quick Help*`,
+        `ð¯ *${SYSTEM_IDENTITY} â Quick Help*`,
         ``,
         `*Two-Lane System:*`,
-        `💬 Just type normally → Assistant mode (Lane 2)`,
-        `⚡ \`/do <workflow>\` → Execution mode (Lane 1)`,
+        `ð¬ Just type normally â Assistant mode (Lane 2)`,
+        `â¡ \`/do <workflow>\` â Execution mode (Lane 1)`,
         ``,
         `*Commands:*`,
-        `• /status — System status`,
-        `• /metrics — Metrics + recent tasks`,
-        `• /ping — Connectivity test`,
-        `• /resend\\_failed — Retry failed outbox items`,
-        `• /workflows — See all available workflows`,
-        `• /do <workflow> — Execute a specific workflow`,
-        `• /model — Check or switch AI model`,
+        `â¢ /status â System status`,
+        `â¢ /metrics â Metrics + recent tasks`,
+        `â¢ /ping â Connectivity test`,
+        `â¢ /resend\\_failed â Retry failed outbox items`,
+        `â¢ /workflows â See all available workflows`,
+        `â¢ /do <workflow> â Execute a specific workflow`,
+        `â¢ /model â Check or switch AI model`,
         ``,
-        `💡 Tip: run \`/metrics\` to inspect recent task runs and durations.`,
+        `ð¡ Tip: run \`/metrics\` to inspect recent task runs and durations.`,
       ].join("\n");
       await sendMessage(chatId, helpText, {}, `task:${taskId}:help`);
       await supabase.from("tasks").update({ status: "succeeded", result_json: { execution_lane: "shortcut", progress_step: "shortcut_help", action: "help" } }).eq("id", taskId);
-      await sendMessage(chatId, `✅ Done: \`${taskId}\``, {}, `task:${taskId}:done`);
+      await sendMessage(chatId, `â Done: \`${taskId}\``, {}, `task:${taskId}:done`);
       _currentTaskId = null;
       return new Response("ok");
     }
 
-    // ── /metrics — execution metrics ──
+    // ââ /metrics â execution metrics ââ
     if (text.toLowerCase().startsWith("/metrics")) {
       await setShortcutAttribution(taskId, "metrics");
       try {
@@ -2913,11 +3007,11 @@ serve(async (req) => {
 
         function statusIcon(status: string): string {
           switch (status) {
-            case "succeeded": return "✅";
-            case "running": return "⏳";
-            case "failed": return "❌";
-            case "queued": return "🕒";
-            default: return "•";
+            case "succeeded": return "â";
+            case "running": return "â³";
+            case "failed": return "â";
+            case "queued": return "ð";
+            default: return "â¢";
           }
         }
 
@@ -2934,7 +3028,7 @@ serve(async (req) => {
 
         function countLine(counts: Record<string, number>): string {
           const s = (k: string) => counts[k] || 0;
-          return `📌 *Summary:* ✅ ${s("succeeded")}  ⏳ ${s("running")}  ❌ ${s("failed")}  🕒 ${s("queued")}`;
+          return `ð *Summary:* â ${s("succeeded")}  â³ ${s("running")}  â ${s("failed")}  ð ${s("queued")}`;
         }
 
         const taskSummaries = safeTasks.map((t: any) => {
@@ -2943,7 +3037,7 @@ serve(async (req) => {
           const dur = fmtDuration(t.result_json?.execution_duration_ms);
           const ts = fmtTs(t.created_at);
           const icon = statusIcon(t.status);
-          const wf = t.selected_workflow || "—";
+          const wf = t.selected_workflow || "â";
           const errCode = t.status === "failed" ? ` | code=${t.result_json?.error_code || "UNKNOWN"}` : "";
           return `${icon} \`${shortId}\` ${t.status} | ${wf} | lock=${lockHeld}${dur} | ${ts}${errCode}`;
         });
@@ -2957,13 +3051,13 @@ serve(async (req) => {
           ? fmtTs(safeTasks[safeTasks.length - 1].created_at)
           : "";
         const rangeLine = newestTs && oldestTs
-          ? `🕰️ *Range:* ${oldestTs} → ${newestTs}`
-          : `🕰️ *Range:* —`;
+          ? `ð°ï¸ *Range:* ${oldestTs} â ${newestTs}`
+          : `ð°ï¸ *Range:* â`;
 
         const lines = [
-          `📊 *${SYSTEM_IDENTITY} — Metrics*`,
+          `ð *${SYSTEM_IDENTITY} â Metrics*`,
           ``,
-          `🏥 *Health:* uptime=${Math.round(health.uptime_ms / 1000)}s tools=${health.tool_count} workflows=${health.implemented_workflow_count}`,
+          `ð¥ *Health:* uptime=${Math.round(health.uptime_ms / 1000)}s tools=${health.tool_count} workflows=${health.implemented_workflow_count}`,
           ``,
           countLine(statusCounts),
           ``,
@@ -2978,18 +3072,18 @@ serve(async (req) => {
           status: "succeeded",
           result_json: { progress_step: "shortcut_metrics", health, task_count: safeTasks.length, requested_limit: requestedLimit, effective_limit: metricsLimit, status_counts: statusCounts, range: { oldest: oldestTs || null, newest: newestTs || null } },
         }).eq("id", taskId);
-        await sendMessage(chatId, `✅ Done: \`${taskId}\``, {}, `task:${taskId}:done`);
+        await sendMessage(chatId, `â Done: \`${taskId}\``, {}, `task:${taskId}:done`);
       } catch (metricsErr) {
         const errMsg = metricsErr instanceof Error ? metricsErr.message : String(metricsErr);
         const failResult = buildFailureResultJson({ execution_lane: "shortcut", progress_step: "shortcut_metrics_failed" }, errMsg);
         await supabase.from("tasks").update({ status: "failed", error: errMsg.slice(0, 300), result_json: failResult }).eq("id", taskId);
-        await sendMessage(chatId, `❌ Failed: \`${taskId}\` — ${errMsg.slice(0, 200)}`);
+        await sendMessage(chatId, `â Failed: \`${taskId}\` â ${errMsg.slice(0, 200)}`);
       }
       _currentTaskId = null;
       return new Response("ok");
     }
 
-    // ── /triage — failure root-cause summary ──
+    // ââ /triage â failure root-cause summary ââ
     if (text.toLowerCase() === "/triage") {
       await setShortcutAttribution(taskId, "triage");
       try {
@@ -3030,8 +3124,8 @@ serve(async (req) => {
         const newestTs = safe[0]?.created_at ? fmtTs(safe[0].created_at) : "";
         const oldestTs = safe[safe.length - 1]?.created_at ? fmtTs(safe[safe.length - 1].created_at) : "";
         const rangeLine = newestTs && oldestTs
-          ? `🕰️ *Range:* ${oldestTs} → ${newestTs}`
-          : `🕰️ *Range:* —`;
+          ? `ð°ï¸ *Range:* ${oldestTs} â ${newestTs}`
+          : `ð°ï¸ *Range:* â`;
 
         const codeLines = Object.entries(countsByCode)
           .sort(([, a], [, b]) => b - a)
@@ -3039,13 +3133,13 @@ serve(async (req) => {
             const topWfs = (topWorkflowsByCode[code] || [])
               .map(w => `\`${w.workflow}\` (${w.count})`)
               .join(", ");
-            return `*${code}*: ${count} failures\n  Top: ${topWfs || "—"}`;
+            return `*${code}*: ${count} failures\n  Top: ${topWfs || "â"}`;
           });
 
         const lines = [
-          `🔍 *${SYSTEM_IDENTITY} — Triage*`,
+          `ð *${SYSTEM_IDENTITY} â Triage*`,
           ``,
-          `📊 *${failedTasks.length} failures* in last ${safe.length} tasks`,
+          `ð *${failedTasks.length} failures* in last ${safe.length} tasks`,
           ``,
           ...(codeLines.length > 0 ? codeLines : ["_No failures found._"]),
           ``,
@@ -3057,21 +3151,21 @@ serve(async (req) => {
           status: "succeeded",
           result_json: { execution_lane: "shortcut", progress_step: "shortcut_triage", summary: { countsByCode, topWorkflowsByCode, range: { oldest: oldestTs || null, newest: newestTs || null } } },
         }).eq("id", taskId);
-        await sendMessage(chatId, `✅ Done: \`${taskId}\``, {}, `task:${taskId}:done`);
+        await sendMessage(chatId, `â Done: \`${taskId}\``, {}, `task:${taskId}:done`);
       } catch (triageErr) {
         const errMsg = triageErr instanceof Error ? triageErr.message : String(triageErr);
         const failResult = buildFailureResultJson({ execution_lane: "shortcut", progress_step: "shortcut_triage_failed" }, errMsg);
         await supabase.from("tasks").update({ status: "failed", error: errMsg.slice(0, 300), result_json: failResult }).eq("id", taskId);
-        await sendMessage(chatId, `❌ Failed: \`${taskId}\` — ${errMsg.slice(0, 200)}`);
+        await sendMessage(chatId, `â Failed: \`${taskId}\` â ${errMsg.slice(0, 200)}`);
       }
       _currentTaskId = null;
       return new Response("ok");
     }
 
-    // ══════════════════════════════════════════════════════════
+    // ââââââââââââââââââââââââââââââââââââââââââââââââââââââââââ
     // INTENT-BASED LANE 1 AUTO-PROMOTION
     // Natural language like "run system status" auto-routes to Lane 1
-    // ══════════════════════════════════════════════════════════
+    // ââââââââââââââââââââââââââââââââââââââââââââââââââââââââââ
     const EXECUTION_INTENT_PREFIXES = ["run ", "execute ", "trigger ", "start ", "pull up ", "check ", "analyze ", "get me ", "show me ", "do "];
     lowerText = text.toLowerCase().trim();
     const hasExecutionIntent = EXECUTION_INTENT_PREFIXES.some(p => lowerText.startsWith(p));
@@ -3081,7 +3175,7 @@ serve(async (req) => {
       /\bplaylist\s+opportunities\s+for\s+/i.test(lowerText) ||
       (/\bplaylist\s+opportunities\b/i.test(lowerText) && /\bfor\s+\S+/i.test(lowerText)) ||
       /\bfind\s+playlists?\s+for\s+/i.test(lowerText);
-    // ── Credit analysis intent matching ──
+    // ââ Credit analysis intent matching ââ
     const creditAnalysisMatch =
       /\b(credit\s*report|credit\s*analysis|analyze\s*credit|check\s*credit|run\s*(the\s+)?(full\s+)?analysis|pull\s*up.*credit|credit.*analyz)\b/i.test(lowerText);
     const clientNameMatch = text.match(/\b([A-Z][a-z]+\s+[A-Z][a-z]+)(?:'s)?\b/);
@@ -3089,7 +3183,7 @@ serve(async (req) => {
 
     let autoPromotedWorkflow: WorkflowEntry | undefined;
     if (creditAnalysisMatch && IMPLEMENTED_WORKFLOW_KEYS.has("analyze_client_credit")) {
-      // ── AUTO-PROMOTE: Credit analysis → lane_do ──
+      // ââ AUTO-PROMOTE: Credit analysis â lane_do ââ
       const creditWorkflowKey = "analyze_client_credit";
       const creditUserMsg = creditClientName
         ? `Analyze credit for ${creditClientName}. Run the full pipeline: sync Drive, ingest documents, and run Credit Guardian analysis.`
@@ -3114,14 +3208,14 @@ serve(async (req) => {
         const errMsg = err instanceof Error ? err.message : "unknown";
         const failResult = buildFailureResultJson({ execution_lane: "lane1_do" }, errMsg);
         await supabase.from("tasks").update({ status: "failed", error: errMsg.slice(0, 500), result_json: failResult }).eq("id", taskId);
-        await sendMessage(chatId, `\u274C Failed: ${taskId} — ${errMsg.slice(0, 200)}`, `task|${taskId}|failed`);
+        await sendMessage(chatId, `\u274C Failed: ${taskId} â ${errMsg.slice(0, 200)}`, `task|${taskId}|failed`);
       }
       _currentTaskId = null;
       return new Response("ok");
     }
 
     if (findPlaylistMatch) {
-      // ── TWO-STEP CONVERSATIONAL CONFIRMATION ──
+      // ââ TWO-STEP CONVERSATIONAL CONFIRMATION ââ
       // Instead of auto-executing, store pending + send vibe-check message
       const forMatch = text.match(/\bfor\s+(.+)/i);
       const trackName = (forMatch ? forMatch[1] : "").trim() || "your track";
@@ -3138,13 +3232,13 @@ serve(async (req) => {
       }, { onConflict: "setting_key" });
 
       await sendMessage(chatId, [
-        `🎵 Got it — searching playlist opportunities for *${trackName}*.`,
+        `ðµ Got it â searching playlist opportunities for *${trackName}*.`,
         ``,
-        `🎵 To find the right playlists for *${trackName}*, tell me:`,
+        `ðµ To find the right playlists for *${trackName}*, tell me:`,
         ``,
-        `1️⃣ *Genre/subgenre* — e.g. chill trap, drill, conscious rap, west coast`,
-        `2️⃣ *Similar artists or features* — e.g. Larry June, FBG Duck`,
-        `3️⃣ *Mood/theme* — e.g. spiritual, street, introspective, healing`,
+        `1ï¸â£ *Genre/subgenre* â e.g. chill trap, drill, conscious rap, west coast`,
+        `2ï¸â£ *Similar artists or features* â e.g. Larry June, FBG Duck`,
+        `3ï¸â£ *Mood/theme* â e.g. spiritual, street, introspective, healing`,
         ``,
         `Just reply with whatever fits. More detail = better results.`,
       ].join("\n"), {}, `task:${taskId}:playlist-vibe-check`);
@@ -3154,7 +3248,7 @@ serve(async (req) => {
         selected_workflow: "find_playlist_opportunities",
         result_json: { execution_lane: "lane1_do", progress_step: "playlist_vibe_check_sent", track_name: trackName, vibe }
       }).eq("id", taskId);
-      await sendMessage(chatId, `✅ Done: \`${taskId}\``, {}, `task:${taskId}:done`);
+      await sendMessage(chatId, `â Done: \`${taskId}\``, {}, `task:${taskId}:done`);
       return new Response("ok");
     }
     if (!autoPromotedWorkflow && hasExecutionIntent) {
@@ -3186,7 +3280,7 @@ serve(async (req) => {
         const errMsg = (err as Error).message || "unknown";
         const failResult = buildFailureResultJson({ execution_lane: "lane1_do" }, errMsg);
         await supabase.from("tasks").update({ status: "failed", error: errMsg.slice(0, 300), result_json: failResult }).eq("id", taskId);
-        await sendMessage(chatId, `❌ Failed: \`${taskId}\` — ${errMsg.slice(0, 200)}`, {}, `task:${taskId}:failed`);
+        await sendMessage(chatId, `â Failed: \`${taskId}\` â ${errMsg.slice(0, 200)}`, {}, `task:${taskId}:failed`);
       }
       return new Response("ok");
     }
@@ -3194,16 +3288,16 @@ serve(async (req) => {
     // Auto-route FanFuel playlist phrases to Lane 1
 
 
-    // ══════════════════════════════════════════════════════════
-    // LANE 1 — EXECUTION MODE (triggered by /do <workflow>)
-    // ══════════════════════════════════════════════════════════
+    // ââââââââââââââââââââââââââââââââââââââââââââââââââââââââââ
+    // LANE 1 â EXECUTION MODE (triggered by /do <workflow>)
+    // ââââââââââââââââââââââââââââââââââââââââââââââââââââââââââ
 
     if (text.toLowerCase().startsWith("/do")) {
       const doArg = text.slice(3).trim(); // everything after "/do"
       if (!doArg) {
-        await sendMessage(chatId, `⚠️ Usage: \`/do <workflow>\`\nRun /workflows to see available commands.`, {}, `task:${taskId}:do-usage`);
+        await sendMessage(chatId, `â ï¸ Usage: \`/do <workflow>\`\nRun /workflows to see available commands.`, {}, `task:${taskId}:do-usage`);
         await supabase.from("tasks").update({ status: "succeeded", result_json: { action: "do_usage" } }).eq("id", taskId);
-        await sendMessage(chatId, `✅ Done: \`${taskId}\``, {}, `task:${taskId}:done`);
+        await sendMessage(chatId, `â Done: \`${taskId}\``, {}, `task:${taskId}:done`);
         _currentTaskId = null;
         return new Response("ok");
       }
@@ -3212,7 +3306,7 @@ serve(async (req) => {
       const workflows = await fetchWorkflowRegistry();
 
       if (workflows.length === 0) {
-        await sendMessage(chatId, `⚠️ Workflow registry unavailable right now. Try /status or try again.`, {}, `task:${taskId}:registry-down`);
+        await sendMessage(chatId, `â ï¸ Workflow registry unavailable right now. Try /status or try again.`, {}, `task:${taskId}:registry-down`);
         const failResult = buildFailureResultJson({ execution_lane: "lane1_do", progress_step: "lane1_registry_unavailable" }, "registry_unavailable");
         await supabase.from("tasks").update({ status: "failed", error: "registry_unavailable", result_json: failResult }).eq("id", taskId);
         _currentTaskId = null;
@@ -3223,18 +3317,18 @@ serve(async (req) => {
 
       if (matches.length === 0) {
         const noMatch = _formatNoMatch(workflows);
-        await sendMessage(chatId, `🚫 No executable workflow found for: \`${doArg}\`\n\n${noMatch}`, {}, `task:${taskId}:no-match`);
+        await sendMessage(chatId, `ð« No executable workflow found for: \`${doArg}\`\n\n${noMatch}`, {}, `task:${taskId}:no-match`);
             await supabase.from("tasks").update({ status: "succeeded", result_json: { action: "do_no_match", input: doArg } }).eq("id", taskId);
-        await sendMessage(chatId, `✅ Done: \`${taskId}\``, {}, `task:${taskId}:done`);
+        await sendMessage(chatId, `â Done: \`${taskId}\``, {}, `task:${taskId}:done`);
         _currentTaskId = null;
         return new Response("ok");
       }
 
       if (matches.length > 1) {
-        const ambiguous = matches.map((m, i) => `${i + 1}. *${m.name}* (\`${m.key}\`) — try: \`/do ${m.trigger_phrases[0] || m.key}\``).join("\n");
-        await sendMessage(chatId, `🔀 Multiple workflows match. Be more specific:\n\n${ambiguous}`, {}, `task:${taskId}:ambiguous`);
+        const ambiguous = matches.map((m, i) => `${i + 1}. *${m.name}* (\`${m.key}\`) â try: \`/do ${m.trigger_phrases[0] || m.key}\``).join("\n");
+        await sendMessage(chatId, `ð Multiple workflows match. Be more specific:\n\n${ambiguous}`, {}, `task:${taskId}:ambiguous`);
         await supabase.from("tasks").update({ status: "succeeded", result_json: { action: "do_ambiguous", matches: matches.map(m => m.key) } }).eq("id", taskId);
-        await sendMessage(chatId, `✅ Done: \`${taskId}\``, {}, `task:${taskId}:done`);
+        await sendMessage(chatId, `â Done: \`${taskId}\``, {}, `task:${taskId}:done`);
         _currentTaskId = null;
         return new Response("ok");
       }
@@ -3242,20 +3336,20 @@ serve(async (req) => {
       // Exactly 1 match
       if (!IMPLEMENTED_WORKFLOW_KEYS.has(chosen!.key)) {
         const notImpl = [
-          `✅ Registered in workflow registry, but not implemented in this bot yet.`,
+          `â Registered in workflow registry, but not implemented in this bot yet.`,
           ``,
           `*Workflow:* \`${chosen!.key}\``,
-          `*Tools:* ${(chosen!.tools || []).join(", ") || "—"}`,
+          `*Tools:* ${(chosen!.tools || []).join(", ") || "â"}`,
           `*Try:* ${(chosen!.trigger_phrases || []).slice(0, 2).map(t => `\`/do ${t}\``).join(", ")}`,
         ].join("\n");
         await sendMessage(chatId, notImpl, {}, `task:${taskId}:not-impl`);
         await supabase.from("tasks").update({ status: "succeeded", result_json: { action: "not_implemented", workflow: chosen!.key } }).eq("id", taskId);
-        await sendMessage(chatId, `✅ Done: \`${taskId}\``, {}, `task:${taskId}:done`);
+        await sendMessage(chatId, `â Done: \`${taskId}\``, {}, `task:${taskId}:done`);
         _currentTaskId = null;
         return new Response("ok");
       }
 
-      // Implemented — execute via agentic loop with tools
+      // Implemented â execute via agentic loop with tools
       // Set workflow attribution BEFORE the loop (so it's always stored even if loop fails)
       await supabase.from("tasks").update({
         selected_workflow: chosen!.key,
@@ -3277,17 +3371,17 @@ serve(async (req) => {
         console.error(`[LANE1] Execution error taskId=${taskId}: ${errMsg}`);
         const failResult = buildFailureResultJson({ execution_lane: "lane1_do", progress_step: "lane1_failed", model_used: session.active_model, selected_workflow: chosen!.key }, errMsg);
         await supabase.from("tasks").update({ status: "failed", error: errMsg.slice(0, 300), result_json: failResult }).eq("id", taskId);
-        await sendMessage(chatId, `❌ Failed: \`${taskId}\` — ${errMsg.slice(0, 200)}`, {}, `task:${taskId}:failed`);
+        await sendMessage(chatId, `â Failed: \`${taskId}\` â ${errMsg.slice(0, 200)}`, {}, `task:${taskId}:failed`);
       }
     await flushTelegramOutbox(chatId, 10);
       _currentTaskId = null;
       return new Response("ok");
     }
 
-    // ════════════════════════════════════════════════════════════
-    // LANE 3 — AUTONOMOUS AGENT MODE
-    // Open-ended requests → bot reasons, plans, awaits approval, acts
-    // ════════════════════════════════════════════════════════════
+    // ââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââ
+    // LANE 3 â AUTONOMOUS AGENT MODE
+    // Open-ended requests â bot reasons, plans, awaits approval, acts
+    // ââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââ
     const AUTONOMOUS_TRIGGERS = [
       "figure out", "figure this out", "handle ",
       "take care of", "what should i do",
@@ -3346,15 +3440,15 @@ serve(async (req) => {
           .from("tasks")
           .update({ status: "failed", error: errMsg.slice(0, 300), result_json: failResult })
           .eq("id", autonomousTaskId);
-        await sendMessage(chatId, `❌ Autonomous error: ${errMsg.slice(0, 200)}`);
+        await sendMessage(chatId, `â Autonomous error: ${errMsg.slice(0, 200)}`);
       }
       _currentTaskId = null;
       return new Response("ok");
     }
 
-    // ══════════════════════════════════════════════════════════
-    // LANE 2 — ASSISTANT MODE (default, no tool execution)
-    // ══════════════════════════════════════════════════════════
+    // ââââââââââââââââââââââââââââââââââââââââââââââââââââââââââ
+    // LANE 2 â ASSISTANT MODE (default, no tool execution)
+    // ââââââââââââââââââââââââââââââââââââââââââââââââââââââââââ
     console.log(`[LANE2] Assistant mode taskId=${taskId} ts=${Date.now()}`);
     const lane2Start = Date.now();
     await supabase.from("tasks").update({ status: "running", selected_workflow: "lane2_assistant", result_json: { execution_lane: "lane2_assistant", progress_step: "lane2_start" } }).eq("id", taskId);
@@ -3382,7 +3476,7 @@ serve(async (req) => {
 
       const assistantSystemPrompt = `You are the ${SYSTEM_IDENTITY}. You serve Fendi Frost as a personal command center assistant.
 
-TWO-LANE RULE — You are in ASSISTANT MODE (Lane 2).
+TWO-LANE RULE â You are in ASSISTANT MODE (Lane 2).
 - Answer questions, explain, draft, brainstorm, plan.
 - Suggest workflows when useful.
 - DO NOT output tool calls. DO NOT claim a tool was used. DO NOT simulate execution.
@@ -3390,14 +3484,14 @@ TWO-LANE RULE — You are in ASSISTANT MODE (Lane 2).
   "This can be executed. Reply with \`/do <workflow>\` to run it."
   and suggest the matching workflow key.
 
-CREDIT ANALYSIS ROUTING: When the user asks about credit reports, credit analysis, credit disputes, or anything related to analyzing a client's credit — suggest /do analyze_client_credit. This is the full pipeline that syncs Drive, ingests documents, and runs Credit Guardian analysis. Do NOT suggest /do client_overview for credit analysis requests..
+CREDIT ANALYSIS ROUTING: When the user asks about credit reports, credit analysis, credit disputes, or anything related to analyzing a client's credit â suggest /do analyze_client_credit. This is the full pipeline that syncs Drive, ingests documents, and runs Credit Guardian analysis. Do NOT suggest /do client_overview for credit analysis requests..
 
 Available commands:
-- /do <workflow> — Execute a workflow (Lane 1)
-- /status — System status
-- /ping — Connectivity test
-- /workflows — See all registered workflows
-- /help — Quick help
+- /do <workflow> â Execute a workflow (Lane 1)
+- /status â System status
+- /ping â Connectivity test
+- /workflows â See all registered workflows
+- /help â Quick help
 ${workflowContext}
 
 Conversation Context:
@@ -3457,7 +3551,7 @@ Be concise, professional, and use emoji sparingly.`;
       console.error(`[LANE2] AI error taskId=${taskId}: ${errMsg}`);
       lane2Status = "failed";
       lane2Error = errMsg;
-      assistantReply = formatAssistantMessage(model, "⚠️ AI unavailable right now. Try /status or /workflows.");
+      assistantReply = formatAssistantMessage(model, "â ï¸ AI unavailable right now. Try /status or /workflows.");
       await sendMessage(chatId, assistantReply, {}, `task:${taskId}:assistant`);
     } finally {
       // HARD GUARANTEE: Lane 2 task always reaches terminal state
@@ -3467,7 +3561,7 @@ Be concise, professional, and use emoji sparingly.`;
           status: "succeeded",
           result_json: { execution_lane: "lane2_assistant", progress_step: "lane2_done", model_used: model, text_response: assistantReply.slice(0, 2000), execution_duration_ms: lane2Duration },
         }).eq("id", taskId);
-        await sendMessage(chatId, `✅ Done: \`${taskId}\``, {}, `task:${taskId}:done`);
+        await sendMessage(chatId, `â Done: \`${taskId}\``, {}, `task:${taskId}:done`);
       } else {
         const failResult = buildFailureResultJson({ execution_lane: "lane2_assistant", progress_step: "lane2_failed", model_used: model }, lane2Error || "unknown", lane2Start);
         await supabase.from("tasks").update({
@@ -3475,7 +3569,7 @@ Be concise, professional, and use emoji sparingly.`;
           error: (lane2Error || "unknown").slice(0, 300),
           result_json: failResult,
         }).eq("id", taskId);
-        await sendMessage(chatId, `❌ Failed: \`${taskId}\` — ${(lane2Error || "unknown").slice(0, 200)}`, {}, `task:${taskId}:failed`);
+        await sendMessage(chatId, `â Failed: \`${taskId}\` â ${(lane2Error || "unknown").slice(0, 200)}`, {}, `task:${taskId}:failed`);
       }
       _currentTaskId = null;
     }
