@@ -841,7 +841,6 @@ async function runPlaylistHubResearch(trackName: string, userVibe: string, chatI
   }
   return 'Playlist research complete for "' + trackName + '" (vibe: ' + userVibe + '). Results stored. Check back with "show pitch report".';
 }
-}
 
 const AGENT_TOOLS: ToolDef[] = [
   {
