@@ -1707,7 +1707,7 @@ const AGENT_TOOLS: ToolDef[] = [
       }
       return JSON.stringify({ client: client.name, letters_generated: letters.length, letters });
     },
-  }
+  },
 
   {
     name: "analyze_credit_strategy",
