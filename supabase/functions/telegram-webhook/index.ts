@@ -841,7 +841,6 @@ async function runPlaylistHubResearch(trackName: string, userVibe: string, chatI
   }
   return 'Playlist research complete for "' + trackName + '" (vibe: ' + userVibe + '). Results stored. Check back with "show pitch report".';
 }
-}
 
 const AGENT_TOOLS: ToolDef[] = [
   {
@@ -1596,6 +1595,7 @@ const AGENT_TOOLS: ToolDef[] = [
         return JSON.stringify({ error: `Failed to reach CC Tax: ${msg}` });
       }
     },
+  },
   {
     name: "scan_drive_overview" as const,
     description: "Read-only scan of Google Drive client folders. Returns client names, file counts, and file types â does NOT read file contents. Call this first in autonomous mode to understand what's in Drive. Safe to call without approval.",
