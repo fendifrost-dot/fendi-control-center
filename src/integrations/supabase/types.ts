@@ -62,6 +62,38 @@ export type Database = {
         }
         Relationships: []
       }
+      client_aliases: {
+        Row: {
+          alias: string
+          client_id: string | null
+          client_name: string | null
+          created_at: string | null
+          id: string
+        }
+        Insert: {
+          alias: string
+          client_id?: string | null
+          client_name?: string | null
+          created_at?: string | null
+          id?: string
+        }
+        Update: {
+          alias?: string
+          client_id?: string | null
+          client_name?: string | null
+          created_at?: string | null
+          id?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "client_aliases_client_id_fkey"
+            columns: ["client_id"]
+            isOneToOne: false
+            referencedRelation: "clients"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
       clients: {
         Row: {
           created_at: string | null
@@ -157,6 +189,72 @@ export type Database = {
           secret_key_name?: string
           supabase_url?: string
           updated_at?: string
+        }
+        Relationships: []
+      }
+      credit_analyses: {
+        Row: {
+          analysis: Json
+          client_id: string
+          created_at: string | null
+          id: string
+          model: string | null
+          updated_at: string | null
+        }
+        Insert: {
+          analysis: Json
+          client_id: string
+          created_at?: string | null
+          id?: string
+          model?: string | null
+          updated_at?: string | null
+        }
+        Update: {
+          analysis?: Json
+          client_id?: string
+          created_at?: string | null
+          id?: string
+          model?: string | null
+          updated_at?: string | null
+        }
+        Relationships: []
+      }
+      dispute_letters: {
+        Row: {
+          account_name: string | null
+          bureau: string
+          client_id: string
+          created_at: string | null
+          dispute_reason: string | null
+          id: string
+          letter_content: string | null
+          model: string | null
+          status: string | null
+          updated_at: string | null
+        }
+        Insert: {
+          account_name?: string | null
+          bureau: string
+          client_id: string
+          created_at?: string | null
+          dispute_reason?: string | null
+          id?: string
+          letter_content?: string | null
+          model?: string | null
+          status?: string | null
+          updated_at?: string | null
+        }
+        Update: {
+          account_name?: string | null
+          bureau?: string
+          client_id?: string
+          created_at?: string | null
+          dispute_reason?: string | null
+          id?: string
+          letter_content?: string | null
+          model?: string | null
+          status?: string | null
+          updated_at?: string | null
         }
         Relationships: []
       }
@@ -589,6 +687,75 @@ export type Database = {
             referencedColumns: ["id"]
           },
         ]
+      }
+      pitch_drafts: {
+        Row: {
+          created_at: string | null
+          curator_email: string | null
+          curator_name: string | null
+          id: string
+          model: string | null
+          pitch_content: string | null
+          playlist_id: string | null
+          status: string | null
+          updated_at: string | null
+        }
+        Insert: {
+          created_at?: string | null
+          curator_email?: string | null
+          curator_name?: string | null
+          id?: string
+          model?: string | null
+          pitch_content?: string | null
+          playlist_id?: string | null
+          status?: string | null
+          updated_at?: string | null
+        }
+        Update: {
+          created_at?: string | null
+          curator_email?: string | null
+          curator_name?: string | null
+          id?: string
+          model?: string | null
+          pitch_content?: string | null
+          playlist_id?: string | null
+          status?: string | null
+          updated_at?: string | null
+        }
+        Relationships: []
+      }
+      playlist_research: {
+        Row: {
+          artist_name: string
+          created_at: string | null
+          genre: string | null
+          id: string
+          model: string | null
+          research: Json
+          track_name: string
+          updated_at: string | null
+        }
+        Insert: {
+          artist_name: string
+          created_at?: string | null
+          genre?: string | null
+          id?: string
+          model?: string | null
+          research: Json
+          track_name: string
+          updated_at?: string | null
+        }
+        Update: {
+          artist_name?: string
+          created_at?: string | null
+          genre?: string | null
+          id?: string
+          model?: string | null
+          research?: Json
+          track_name?: string
+          updated_at?: string | null
+        }
+        Relationships: []
       }
       sessions: {
         Row: {
