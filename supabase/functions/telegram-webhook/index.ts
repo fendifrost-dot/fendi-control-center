@@ -1,4 +1,7 @@
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
+
+
+
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.49.1";
 import { fetchCreditGuardian } from "../_shared/creditGuardian.ts";
 
@@ -8,7 +11,6 @@ const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
 const SUPABASE_SERVICE_ROLE_KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
 const GEMINI_KEY = Deno.env.get("Frost_Gemini")!;
 const GROK_KEY = Deno.env.get("Frost_Grok")!;
-
 const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
 const TELEGRAM_API = `https://api.telegram.org/bot${BOT_TOKEN}`;
 const SYSTEM_IDENTITY = "Fendi Control Center AI";
@@ -16,12 +18,12 @@ const SYSTEM_IDENTITY = "Fendi Control Center AI";
 // Cardinality is IMPLEMENTED_WORKFLOW_KEYS.size (also exposed in /status health); do not hardcode counts in docs.
 const IMPLEMENTED_WORKFLOW_KEYS = new Set([
   "ping", "system_status", "resend_failed", "list_workflows", "help",
-    "model_switch", "document_approval", "document_rejection",
-    "failed_job_management", "drive_sync", "client_overview",
-    "file_browsing", "connected_project_stats", "error_explanation",
-    "active_jobs_summary", "document_ingestion_processing",
-    "drive_ingest", "free_agent",
-    "find_playlist_opportunities", "get_pitch_report", "send_playlist_pitch", "update_pitch_status",
+  "model_switch", "document_approval", "document_rejection",
+  "failed_job_management", "drive_sync", "client_overview",
+  "file_browsing", "connected_project_stats", "error_explanation",
+  "active_jobs_summary", "document_ingestion_processing",
+  "drive_ingest", "free_agent",
+  "find_playlist_opportunities", "get_pitch_report", "send_playlist_pitch", "update_pitch_status",
   "analyze_client_credit",
   "get_client_report",
   "generate_dispute_letters",
@@ -87,6 +89,16 @@ const SYNTHETIC_QUERY_CC_TAX: WorkflowEntry = {
   trigger_phrases: ["tax status", "tax generator", "tax discrepancies", "tax documents", "tax transactions"],
   tools: ["query_cc_tax"],
 };
+
+// ─── Workflow key aliases (deprecated → canonical) ──────────
+// Routes old keys to new canonical handlers. "/do analyze_client_credit" → analyze_credit_strategy
+const WORKFLOW_KEY_ALIASES: Record<string, string> = {
+  analyze_client_credit: "analyze_credit_strategy",
+};
+
+function _resolveWorkflowKey(key: string): string {
+  return WORKFLOW_KEY_ALIASES[key] || key;
+}
 
 function _normalizeText(s: string): string {
   return (s ?? "").trim().toLowerCase();
@@ -551,6 +563,192 @@ interface ToolDef {
   parameters: Record<string, any>;
   destructive: boolean;
   execute: (args: any, context?: ToolExecuteContext) => Promise<string>;
+}
+
+/** Infer track title from /do text + recent chat. */
+function extractPlaylistTrackName(userMessage: string, conversationContext: string): string | null {
+  const combined = `${userMessage}\n${conversationContext}`;
+  const byMatch = combined.match(/\b([A-Za-z0-9][^\n]{0,100}?)\s+by\s+[A-Za-z]/i);
+  if (byMatch) {
+    const t = byMatch[1].trim().replace(/^["']|["']$/g, "");
+    if (t.length >= 1 && t.length <= 120) return t;
+  }
+  const forMatch = userMessage.match(/(?:for|about)\s+["']?([^"'\n]+?)["']?(?:\s+by|\s*$|,)/i);
+  if (forMatch) {
+    const t = forMatch[1].trim();
+    if (t.length >= 1 && t.length <= 120 && !/^(me|the|a|an)$/i.test(t)) return t;
+  }
+  const opp = combined.match(/playlist\s+opportunities?\s+for\s+["']?([^"'\n]+?)["']?(?:\s+by|\s*$|,|\s+)/i);
+  if (opp) {
+    const t = opp[1].trim();
+    if (t.length >= 1 && t.length <= 120) return t;
+  }
+  const opp2 = combined.match(/find\s+playlist\s+opportunities\s+for\s+["']?([^"'\n]+?)["']?/i);
+  if (opp2) {
+    const t = opp2[1].trim();
+    if (t.length >= 1 && t.length <= 120) return t;
+  }
+  return null;
+}
+
+/** Resolve track title for find_playlist_opportunities when the model omits or sends placeholder track_name. */
+async function resolvePlaylistTrackName(
+  args: { track_name?: string; user_vibe?: string },
+  context?: ToolExecuteContext,
+): Promise<string> {
+  let raw = (args?.track_name || "").trim();
+  if (raw && !/^unknown$/i.test(raw) && raw.toLowerCase() !== "unknown track") {
+    return raw;
+  }
+  const um = context?.userMessage || "";
+  const cc = context?.conversationContext || "";
+  const fromExtract = extractPlaylistTrackName(um, cc);
+  if (fromExtract) return fromExtract;
+  if (context?.chatId) {
+    const conv = cc || (await buildConversationContext(context.chatId));
+    const fromConv = extractPlaylistTrackName(um, conv);
+    if (fromConv) return fromConv;
+  }
+  return "";
+}
+
+/** Guess a vibe/mood keyword from the track name. */
+function inferVibeFromTrack(trackName: string): string {
+  const lower = trackName.toLowerCase();
+  if (/chill|vibe|wave|float|drift|ease/i.test(lower)) return "chill / lo-fi";
+  if (/fire|lit|heat|bang|hype|turn/i.test(lower)) return "energetic / hype";
+  if (/rain|cry|pain|hurt|blue|lone|miss/i.test(lower)) return "melancholic / emotional";
+  if (/love|kiss|heart|babe|honey/i.test(lower)) return "romantic / R&B";
+  if (/grind|hustle|money|boss|drip/i.test(lower)) return "motivational / trap";
+  if (/night|dark|shadow|smoke|fog/i.test(lower)) return "dark / atmospheric";
+  return "chill / melodic";
+}
+
+/** Store a pending playlist confirmation in bot_settings. */
+async function setPlaylistConfirm(chatId: string, data: { track_name: string; inferred_vibe: string; created_at: string }) {
+  await supabase.from("bot_settings").upsert(
+    {
+      setting_key: `pending_playlist:${chatId}`,
+      setting_value: JSON.stringify(data),
+      updated_at: new Date().toISOString(),
+    },
+    { onConflict: "setting_key" },
+  );
+}
+
+/** Retrieve a pending playlist confirmation from bot_settings, or null. */
+async function getPlaylistConfirm(chatId: string): Promise<{ track_name: string; inferred_vibe: string; created_at: string } | null> {
+  const { data } = await supabase
+    .from("bot_settings")
+    .select("setting_value")
+    .eq("setting_key", `pending_playlist:${chatId}`)
+    .maybeSingle();
+  if (!data) return null;
+  try {
+    return JSON.parse(data.setting_value);
+  } catch {
+    return null;
+  }
+}
+
+/** Remove a pending playlist confirmation from bot_settings. */
+async function clearPlaylistConfirm(chatId: string) {
+  await supabase.from("bot_settings").delete().eq("setting_key", `pending_playlist:${chatId}`);
+}
+
+type LastPlaylistResearch = {
+  track_name: string; user_vibe: string; ranked_playlist_ids: string[]; ts: string;
+};
+function lastPlaylistResearchKey(chatId: string) { return `last_playlist_research:${chatId}`; }
+function pendingPitchBulkKey(chatId: string) { return `pending_pitch_bulk:${chatId}`; }
+function pendingPitchTier3Key(chatId: string) { return `pending_pitch_tier3:${chatId}`; }
+async function saveLastPlaylistResearch(chatId: string, data: LastPlaylistResearch) {
+  await supabase.from("bot_settings").upsert({ setting_key: lastPlaylistResearchKey(chatId), setting_value: JSON.stringify(data), updated_at: new Date().toISOString() }, { onConflict: "setting_key" });
+}
+async function getLastPlaylistResearch(chatId: string): Promise<LastPlaylistResearch | null> {
+  const { data } = await supabase.from("bot_settings").select("setting_value").eq("setting_key", lastPlaylistResearchKey(chatId)).maybeSingle();
+  if (!data?.setting_value) return null;
+  try { const p = JSON.parse(data.setting_value); if (p?.track_name && Array.isArray(p.ranked_playlist_ids)) return p; } catch {}
+  return null;
+}
+type PendingPitchBulk = { track_name: string; playlist_ids: string[]; ts: string };
+type PendingPitchTier3 = { playlist_id: string; track_name: string; ts: string };
+async function setPendingPitchBulk(chatId: string, state: PendingPitchBulk) {
+  await supabase.from("bot_settings").upsert({ setting_key: pendingPitchBulkKey(chatId), setting_value: JSON.stringify(state), updated_at: new Date().toISOString() }, { onConflict: "setting_key" });
+}
+async function getPendingPitchBulk(chatId: string): Promise<PendingPitchBulk | null> {
+  const { data } = await supabase.from("bot_settings").select("setting_value").eq("setting_key", pendingPitchBulkKey(chatId)).maybeSingle();
+  if (!data?.setting_value) return null;
+  try { const p = JSON.parse(data.setting_value); if (p?.track_name && Array.isArray(p.playlist_ids)) return p; } catch {}
+  return null;
+}
+async function clearPendingPitchBulk(chatId: string) {
+  await supabase.from("bot_settings").delete().eq("setting_key", pendingPitchBulkKey(chatId));
+}
+async function setPendingPitchTier3(chatId: string, state: PendingPitchTier3) {
+  await supabase.from("bot_settings").upsert({ setting_key: pendingPitchTier3Key(chatId), setting_value: JSON.stringify(state), updated_at: new Date().toISOString() }, { onConflict: "setting_key" });
+}
+async function getPendingPitchTier3(chatId: string): Promise<PendingPitchTier3 | null> {
+  const { data } = await supabase.from("bot_settings").select("setting_value").eq("setting_key", pendingPitchTier3Key(chatId)).maybeSingle();
+  if (!data?.setting_value) return null;
+  try { const p = JSON.parse(data.setting_value); if (p?.playlist_id && p?.track_name) return p; } catch {}
+  return null;
+}
+async function clearPendingPitchTier3(chatId: string) {
+  await supabase.from("bot_settings").delete().eq("setting_key", pendingPitchTier3Key(chatId));
+}
+async function hubPlaylistBatch(playlistIds: string[]): Promise<any[]> {
+  if (!playlistIds.length) return [];
+  const r = await callFanFuelHub("playlist-batch", { playlist_ids: playlistIds });
+  return Array.isArray(r?.playlists) ? r.playlists : [];
+}
+
+
+/** Execute the actual playlist research via FanFuel Hub. */
+/**
+ * Calls FanFuel Hub playlist research. Prefer the dedicated playlist-research edge function.
+ * Override edge name with FANFUEL_HUB_PLAYLIST_FN if your project uses a different function name.
+ */
+async function runPlaylistHubResearch(trackName: string, userVibe: string, chatId?: string): Promise<string> {
+  const body = { track_name: trackName, user_vibe: userVibe };
+  const edgeName = (Deno.env.get("FANFUEL_HUB_PLAYLIST_FN") || "playlist-research").trim();
+  let result: any;
+  try {
+    result = await callFanFuelHub(edgeName, body);
+  } catch (e1) {
+    const m = e1 instanceof Error ? e1.message : String(e1);
+    if (/404|not found|Unknown action|FunctionsHttpError|502|503/i.test(m)) {
+      try {
+        result = await callFanFuelHub("control-center-api", {
+          action: "playlist_research",
+          track_name: trackName,
+          user_vibe: userVibe,
+        });
+      } catch {
+        console.error("[runPlaylistHubResearch] primary failed:", m);
+        throw e1;
+      }
+    } else {
+      throw e1;
+    }
+  }
+  if (result && result.playlists && Array.isArray(result.playlists) && result.playlists.length > 0) {
+    const lines = result.playlists
+      .slice(0, 20)
+      .map((p: any, i: number) =>
+        (i + 1) + ". " + (p.name || p.playlist_name) + " — " +
+        (typeof p.followers === "number" ? p.followers.toLocaleString() : (p.followers || "?")) + " followers"
+      )
+      .join("\n");
+  if (chatId && result?.playlists) {
+    const rankedIds = result.playlists.slice(0, 20).map((p: any) => p.playlist_id || p.id);
+    await saveLastPlaylistResearch(chatId, { track_name: trackName, user_vibe: userVibe, ranked_playlist_ids: rankedIds, ts: new Date().toISOString() });
+  }
+
+    return 'Found ' + result.playlists.length + ' playlist opportunities for "' + trackName + '":\n\n' + lines;
+  }
+  return 'Playlist research complete for "' + trackName + '" (vibe: ' + userVibe + '). Results stored. Check back with "show pitch report".';
+}
 }
 
 const AGENT_TOOLS: ToolDef[] = [
@@ -1189,19 +1387,36 @@ const AGENT_TOOLS: ToolDef[] = [
             "CREDIT_COMPASS_KEY is not set — add it to Control Center Edge Function secrets",
         });
       }
+      // Auth strategy: try x-api-key first (matches Fairway cross-project-api contract),
+      // fall back to Bearer if that returns 401/403.
+      const payload = JSON.stringify({ action, client_name, client_id, assessment_id });
+      const endpoint = `${CREDIT_COMPASS_URL}/functions/v1/control-center-api`;
       try {
-        const resp = await fetch(`${CREDIT_COMPASS_URL}/functions/v1/control-center-api`, {
+        let resp = await fetch(endpoint, {
           method: "POST",
           headers: {
             "Content-Type": "application/json",
-            Authorization: `Bearer ${compassKey}`,
+            "x-api-key": compassKey,
           },
-          body: JSON.stringify({ action, client_name, client_id, assessment_id }),
+          body: payload,
         });
+        // Fallback: if x-api-key rejected, try Bearer auth
+        if (resp.status === 401 || resp.status === 403) {
+          console.log("[query_credit_compass] x-api-key auth failed, trying Bearer fallback");
+          resp = await fetch(endpoint, {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+              Authorization: `Bearer ${compassKey}`,
+            },
+            body: payload,
+          });
+        }
         if (!resp.ok) {
+          const detail = (await resp.text()).slice(0, 2000);
           return JSON.stringify({
-            error: `Credit Compass returned ${resp.status}`,
-            detail: (await resp.text()).slice(0, 2000),
+            error: `Credit Compass returned ${resp.status} (tried x-api-key then Bearer)`,
+            detail,
           });
         }
         return JSON.stringify(await resp.json());
@@ -1471,7 +1686,7 @@ const AGENT_TOOLS: ToolDef[] = [
     },
   },
   {
-    name: "get_pitch_report",
+    name: "get_pitch_report" as const,
     description: "Get a report of all playlist pitches sent, replied, and placed.",
     parameters: { type: "object", properties: { track_name: { type: "string" } }, required: [] },
     destructive: false,
@@ -1682,6 +1897,221 @@ const AGENT_TOOLS: ToolDef[] = [
       return raw;
     },
   },
+  {
+    name: "analyze_client_credit",
+    description: "Sync Google Drive files for a client and run the full credit analysis pipeline. Use when Fendi asks to analyze, check, process, or run credit reports for a client like Nicholas, Corey, or Lamonze.",
+    parameters: {
+      client_name: { type: "string", description: "Client name (e.g. 'Nicholas', 'Corey', 'Lamonze')" },
+    },
+    destructive: false,
+    execute: async (params: any) => {
+      const { client_name } = params;
+      const ANON_KEY = Deno.env.get("SUPABASE_PUBLISHABLE_KEY") || SUPABASE_SERVICE_ROLE_KEY;
+      // 1. Trigger drive-sync to pull latest files from Google Drive
+      const syncResp = await fetch(SUPABASE_URL + "/functions/v1/drive-sync", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: "Bearer " + ANON_KEY },
+        body: JSON.stringify({}),
+      });
+      const syncResult = syncResp.ok ? await syncResp.json() : { error: await syncResp.text() };
+      // 2. Find client by name
+      const { data: clients } = await supabase
+        .from("clients")
+        .select("id, name")
+        .ilike("name", "%" + client_name + "%")
+        .limit(5);
+      if (!clients || clients.length === 0) {
+        return JSON.stringify({ error: "No client found matching '" + client_name + "'. Drive sync ran: " + JSON.stringify(syncResult) });
+      }
+      const client = clients[0];
+      // 3. Count and trigger process-document for queued jobs
+      const { count: queuedCount } = await supabase
+        .from("ingestion_jobs")
+        .select("id", { count: "exact", head: true })
+        .eq("client_id", client.id)
+        .eq("status", "queued");
+      let processed = 0;
+      const toProcess = Math.min(queuedCount || 0, 8);
+      for (let i = 0; i < toProcess; i++) {
+        const procResp = await fetch(SUPABASE_URL + "/functions/v1/process-document", {
+          method: "POST",
+          headers: { "Content-Type": "application/json", Authorization: "Bearer " + ANON_KEY },
+          body: JSON.stringify({}),
+        });
+        if (procResp.ok) processed++;
+      }
+      // 4. Return summary
+      const { count: obsCount } = await supabase
+        .from("observations")
+        .select("id", { count: "exact", head: true })
+        .eq("client_id", client.id);
+      const { data: docs } = await supabase
+        .from("documents")
+        .select("file_name, status, bureau, doc_type")
+        .eq("client_id", client.id)
+        .order("updated_at", { ascending: false })
+        .limit(10);
+      return JSON.stringify({
+        client: client.name,
+        client_id: client.id,
+        drive_sync_result: syncResult,
+        processing_jobs_triggered: processed,
+        jobs_queued_before_sync: queuedCount || 0,
+        total_observations_on_file: obsCount || 0,
+        recent_documents: (docs || []).map((d: any) => ({ name: d.file_name, status: d.status, bureau: d.bureau, type: d.doc_type })),
+      });
+    },
+  },
+  {
+    name: "get_client_report",
+    description: "Get a full credit analysis summary for a client - negative tradelines, hard inquiries, public records, bureaus covered. Use when asked to show, read, or summarize a client's credit data.",
+    parameters: {
+      client_name: { type: "string", description: "Client name (e.g. 'Nicholas', 'Corey', 'Lamonze')" },
+      bureau: { type: "string", description: "Optional: filter by bureau - equifax, experian, transunion" },
+    },
+    destructive: false,
+    execute: async (params: any) => {
+      const { client_name, bureau } = params;
+      const { data: clients } = await supabase
+        .from("clients")
+        .select("id, name")
+        .ilike("name", "%" + client_name + "%")
+        .limit(3);
+      if (!clients || clients.length === 0) {
+        return JSON.stringify({ error: "No client found matching '" + client_name + "'. Run analyze_client_credit first." });
+      }
+      const client = clients[0];
+      let docsQuery = supabase
+        .from("documents")
+        .select("id, file_name, bureau, doc_type, status, report_date")
+        .eq("client_id", client.id)
+        .eq("doc_type", "credit_report");
+      if (bureau) docsQuery = (docsQuery as any).eq("bureau", bureau.toLowerCase());
+      const { data: docs } = await (docsQuery as any).order("report_date", { ascending: false });
+      const { data: negTradelines } = await supabase
+        .from("observations")
+        .select("object_key, field_name, field_value_text, evidence_snippet")
+        .eq("client_id", client.id)
+        .eq("object_type", "tradeline")
+        .or("field_value_text.ilike.%late%,field_value_text.ilike.%charge off%,field_value_text.ilike.%collection%,field_value_text.ilike.%derogatory%,field_value_text.ilike.%past due%")
+        .limit(40);
+      const { count: hardInqCount } = await supabase
+        .from("observations")
+        .select("id", { count: "exact", head: true })
+        .eq("client_id", client.id)
+        .eq("object_type", "inquiry")
+        .eq("field_name", "inquiry_type")
+        .eq("field_value_text", "hard");
+      const { data: pubRecs } = await supabase
+        .from("observations")
+        .select("object_key, field_name, field_value_text")
+        .eq("client_id", client.id)
+        .eq("object_type", "public_record")
+        .limit(10);
+      const negByAccount: Record<string, any[]> = {};
+      for (const obs of negTradelines || []) {
+        if (!negByAccount[obs.object_key]) negByAccount[obs.object_key] = [];
+        negByAccount[obs.object_key].push({ field: obs.field_name, value: obs.field_value_text });
+      }
+      return JSON.stringify({
+        client: client.name,
+        documents_processed: docs?.length || 0,
+        bureaus_covered: [...new Set((docs || []).map((d: any) => d.bureau).filter(Boolean))],
+        negative_tradeline_count: Object.keys(negByAccount).length,
+        negative_tradelines: Object.entries(negByAccount).slice(0, 20).map(([key, items]) => ({ account: key, issues: items })),
+        hard_inquiries: hardInqCount || 0,
+        public_records_count: pubRecs?.length || 0,
+        public_record_details: pubRecs || [],
+        documents: docs || [],
+      });
+    },
+  },
+  {
+    name: "generate_dispute_letters",
+    description: "Generate professional FCRA-compliant credit dispute letters for a client based on their analyzed credit data. Creates one letter per bureau targeting all negative items found.",
+    parameters: {
+      client_name: { type: "string", description: "Client name (e.g. 'Nicholas', 'Corey', 'Lamonze')" },
+      bureau: { type: "string", description: "Optional: target one bureau - equifax, experian, transunion. Leave blank for all bureaus." },
+    },
+    destructive: false,
+    execute: async (params: any) => {
+      const { client_name, bureau } = params;
+      const { data: clients } = await supabase
+        .from("clients")
+        .select("id, name")
+        .ilike("name", "%" + client_name + "%")
+        .limit(3);
+      if (!clients || clients.length === 0) {
+        return JSON.stringify({ error: "No client found matching '" + client_name + "'" });
+      }
+      const client = clients[0];
+      const { data: personalObs } = await supabase
+        .from("observations")
+        .select("field_name, field_value_text")
+        .eq("client_id", client.id)
+        .eq("object_type", "personal_info")
+        .in("field_name", ["full_name", "address", "dob"]);
+      const personalInfo: Record<string, string> = {};
+      for (const obs of personalObs || []) personalInfo[obs.field_name] = obs.field_value_text;
+      const { data: negObs } = await supabase
+        .from("observations")
+        .select("object_key, field_name, field_value_text, document_id")
+        .eq("client_id", client.id)
+        .eq("object_type", "tradeline")
+        .or("field_value_text.ilike.%late%,field_value_text.ilike.%charge off%,field_value_text.ilike.%collection%,field_value_text.ilike.%derogatory%,field_value_text.ilike.%past due%")
+        .limit(60);
+      const { data: creditDocs } = await supabase
+        .from("documents")
+        .select("id, bureau")
+        .eq("client_id", client.id)
+        .eq("doc_type", "credit_report");
+      const docBureau: Record<string, string> = {};
+      for (const d of creditDocs || []) docBureau[d.id] = d.bureau;
+      const byBureau: Record<string, Record<string, string[]>> = {};
+      for (const obs of negObs || []) {
+        const b = docBureau[obs.document_id] || "unknown";
+        if (bureau && b !== bureau.toLowerCase()) continue;
+        if (!byBureau[b]) byBureau[b] = {};
+        if (!byBureau[b][obs.object_key]) byBureau[b][obs.object_key] = [];
+        byBureau[b][obs.object_key].push(obs.field_name + ": " + obs.field_value_text);
+      }
+      if (Object.keys(byBureau).length === 0) {
+        return JSON.stringify({ error: "No negative items found. Run analyze_client_credit first to process credit files." });
+      }
+      const bureauAddresses: Record<string, string> = {
+        equifax: "Equifax Information Services LLC\nP.O. Box 740256\nAtlanta, GA 30374-0256",
+        experian: "Experian\nP.O. Box 4500\nAllen, TX 75013",
+        transunion: "TransUnion LLC Consumer Dispute Center\nP.O. Box 2000\nChester, PA 19016",
+      };
+      const letters: any[] = [];
+      for (const [bur, accountMap] of Object.entries(byBureau)) {
+        const disputeItems = Object.entries(accountMap)
+          .map(([acct, issues]) => "Account: " + acct + "\n  Issues: " + issues.join(", "))
+          .join("\n\n");
+        const clientName = personalInfo.full_name || client.name;
+        const clientAddress = personalInfo.address || "[Client Address]";
+        const today = new Date().toLocaleDateString("en-US", { year: "numeric", month: "long", day: "numeric" });
+        const prompt = "Generate a professional credit dispute letter.\n\nClient: " + clientName + "\nClient Address: " + clientAddress + "\nDate: " + today + "\n\nBureau: " + bur.toUpperCase() + "\nBureau Address:\n" + (bureauAddresses[bur] || "[Bureau Address]") + "\n\nNegative items to dispute:\n" + disputeItems + "\n\nInstructions: Write a firm, professional dispute letter citing the Fair Credit Reporting Act (FCRA) Section 611. State that each item is being disputed as inaccurate or unverifiable. Request investigation and removal or correction of each item. Request written response within 30 days. Format as a complete ready-to-send letter.";
+        const geminiUrl = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=" + GEMINI_KEY;
+        const geminiResp = await fetch(geminiUrl, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            contents: [{ role: "user", parts: [{ text: prompt }] }],
+            generationConfig: { maxOutputTokens: 2048 },
+          }),
+        });
+        if (geminiResp.ok) {
+          const geminiData = await geminiResp.json();
+          const letterText = geminiData.candidates?.[0]?.content?.parts?.[0]?.text || "Failed to generate letter";
+          letters.push({ bureau: bur, accounts_disputed: Object.keys(accountMap).length, letter: letterText });
+        } else {
+          letters.push({ bureau: bur, error: "Gemini error: " + geminiResp.status });
+        }
+      }
+      return JSON.stringify({ client: client.name, letters_generated: letters.length, letters });
+    },
+  }
 ];
 
 // ─── Build tool schemas for AI models ───────────────────────────
@@ -2290,6 +2720,9 @@ function logEvent(e: Record<string, any>) {
 // ─── Execute agentic loop ──────────────────────────────────────
 
 async function executeAgenticLoop(chatId: string, userMessage: string, opts: { taskId: string; sessionModel: "grok" | "gemini" | "chatgpt"; lane?: "lane1_do" | "lane2_assistant" | "lane3_autonomous"; allowTools?: boolean; workflowKey?: string }): Promise<void> {
+  // ── Resolve deprecated workflow key aliases ──
+  if (opts.workflowKey) opts.workflowKey = _resolveWorkflowKey(opts.workflowKey);
+
   // ── STEP 1: EXECUTION METRICS ──
   const executionStart = Date.now();
 
@@ -3024,6 +3457,128 @@ serve(async (req) => {
       }
     }
 
+    // ── Pitch routing ──────────────────────────────────────────
+    let lowerText = text.toLowerCase().trim();
+
+    // "show pitch report"
+    if (lowerText === 'show pitch report' || lowerText === 'pitch report') {
+      const research = await getLastPlaylistResearch(chatId);
+      if (!research) {
+        await sendMessage(chatId, "No playlist research found. Run 'find playlist opportunities for [track]' first.");
+      } else {
+        const playlists = await hubPlaylistBatch(research.ranked_playlist_ids);
+        if (!playlists.length) {
+          await sendMessage(chatId, "Could not load playlist details. Try running research again.");
+        } else {
+          let report = "Pitch Report for \"" + research.track_name + "\":\n\n";
+          playlists.forEach((p: any, i: number) => {
+            const tier = p.tier || (i < 5 ? 1 : i < 12 ? 2 : 3);
+            const tierLabel = tier === 1 ? "Tier 1" : tier === 2 ? "Tier 2" : "Tier 3";
+            report += (i + 1) + ". " + (p.name || p.playlist_id) + " [" + tierLabel + "]";
+            if (p.followers) report += " (" + p.followers + " followers)";
+            if (p.pitch_status) report += " - " + p.pitch_status;
+            report += "\n";
+          });
+          report += "\nCommands: 'pitch N' to pitch one, 'pitch all tier 1' to batch pitch tier 1 playlists.";
+          await sendMessage(chatId, report);
+        }
+      }
+      return new Response("ok");
+    }
+
+    // "pitch N" — pitch a single playlist by index
+    const pitchMatch = lowerText.match(/^pitch\s+(\d+)$/);
+    if (pitchMatch) {
+      const idx = parseInt(pitchMatch[1], 10) - 1;
+      const research = await getLastPlaylistResearch(chatId);
+      if (!research) {
+        await sendMessage(chatId, "No playlist research found. Run research first.");
+        return new Response("ok");
+      }
+      if (idx < 0 || idx >= research.ranked_playlist_ids.length) {
+        await sendMessage(chatId, "Invalid playlist number. Use 1-" + research.ranked_playlist_ids.length);
+        return new Response("ok");
+      }
+      const playlistId = research.ranked_playlist_ids[idx];
+      const playlists = await hubPlaylistBatch([playlistId]);
+      const p = playlists[0];
+      const tier = p?.tier || (idx < 5 ? 1 : idx < 12 ? 2 : 3);
+      if (tier === 3) {
+        await setPendingPitchTier3(chatId, { playlist_id: playlistId, track_name: research.track_name, ts: new Date().toISOString() });
+        await sendMessage(chatId, "Playlist #" + (idx + 1) + " (" + (p?.name || playlistId) + ") is Tier 3. These have lower acceptance rates. Type 'confirm' to pitch anyway, or choose a different number.");
+        return new Response("ok");
+      }
+      const result = await callFanFuelHub("execute-pitch", { playlist_id: playlistId, track_name: research.track_name });
+      await sendMessage(chatId, result?.message || ("Pitch sent to " + (p?.name || playlistId)));
+      return new Response("ok");
+    }
+
+    // "pitch all tier 1"
+    if (lowerText === 'pitch all tier 1') {
+      const research = await getLastPlaylistResearch(chatId);
+      if (!research) {
+        await sendMessage(chatId, "No playlist research found. Run research first.");
+        return new Response("ok");
+      }
+      const playlists = await hubPlaylistBatch(research.ranked_playlist_ids);
+      const tier1 = playlists.filter((p: any, i: number) => (p.tier || (i < 5 ? 1 : 2)) === 1);
+      if (!tier1.length) {
+        await sendMessage(chatId, "No Tier 1 playlists found in your research results.");
+        return new Response("ok");
+      }
+      const tier1Ids = tier1.map((p: any) => p.playlist_id || p.id);
+      await setPendingPitchBulk(chatId, { track_name: research.track_name, playlist_ids: tier1Ids, ts: new Date().toISOString() });
+      let msg = "Ready to pitch " + tier1.length + " Tier 1 playlists for \"" + research.track_name + "\":\n";
+      tier1.forEach((p: any, i: number) => { msg += (i + 1) + ". " + (p.name || p.playlist_id) + "\n"; });
+      msg += "\nType 'confirm all' to send all pitches.";
+      await sendMessage(chatId, msg);
+      return new Response("ok");
+    }
+
+    // "confirm all" — execute bulk pitch
+    if (lowerText === 'confirm all') {
+      const pending = await getPendingPitchBulk(chatId);
+      if (!pending) {
+        await sendMessage(chatId, "Nothing pending. Use 'pitch all tier 1' first.");
+        return new Response("ok");
+      }
+      await clearPendingPitchBulk(chatId);
+      let sent = 0;
+      for (const pid of pending.playlist_ids) {
+        try {
+          await callFanFuelHub("execute-pitch", { playlist_id: pid, track_name: pending.track_name });
+          sent++;
+        } catch (e) { console.error("Pitch failed for", pid, e); }
+      }
+      await sendMessage(chatId, "Pitched " + sent + "/" + pending.playlist_ids.length + " Tier 1 playlists for \"" + pending.track_name + "\".");
+      return new Response("ok");
+    }
+
+    // "confirm" — confirm tier 3 single pitch
+    if (lowerText === 'confirm') {
+      const pending = await getPendingPitchTier3(chatId);
+      if (!pending) {
+        await sendMessage(chatId, "Nothing pending to confirm.");
+        return new Response("ok");
+      }
+      await clearPendingPitchTier3(chatId);
+      const result = await callFanFuelHub("execute-pitch", { playlist_id: pending.playlist_id, track_name: pending.track_name });
+      await sendMessage(chatId, result?.message || ("Pitch sent to " + pending.playlist_id));
+      return new Response("ok");
+    }
+
+    // "playlist X responded" / "playlist X rejected"
+    const statusMatch = lowerText.match(/^playlist\s+(.+?)\s+(responded|rejected|accepted)$/);
+    if (statusMatch) {
+      const playlistName = statusMatch[1];
+      const newStatus = statusMatch[2];
+      const result = await callFanFuelHub("update-pitch-status", { playlist_name: playlistName, status: newStatus });
+      await sendMessage(chatId, result?.message || ("Updated pitch status for " + playlistName + " to " + newStatus));
+      return new Response("ok");
+    }
+    // ── End pitch routing ──────────────────────────────────────
+
+
     try {
       taskId = await createTaskRow(session.id, text, requestedModel);
       _currentTaskId = taskId;
@@ -3283,7 +3838,7 @@ serve(async (req) => {
     }
 
     // Normalized text for intent routing (auto-promote + autonomous mode). Must run before Lane 2.
-    const lowerText = text.toLowerCase().trim();
+    // lowerText already declared in pitch routing section above
 
     // ══════════════════════════════════════════════════════════
     // PLAYLIST INTENT — deterministic (NO executeAgenticLoop / NO Lane 2 Grok)
@@ -3423,6 +3978,7 @@ serve(async (req) => {
       }
       return new Response("ok");
     }
+
 
     // /start still shows the help menu
     if (text === "/start") {
@@ -4100,6 +4656,7 @@ async function callFanFuelHub(functionName: string, body: any) {
       // Keep these for compatibility with other deployments/endpoints.
       "Authorization": `Bearer ${key}`,
       "apikey": key,
+        "x-api-key": key,
     },
     body: JSON.stringify(body),
   });
