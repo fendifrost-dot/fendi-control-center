@@ -650,6 +650,7 @@ interface ToolDef {
   execute: (args: any, context?: ToolExecuteContext) => Promise<string>;
 }
 
+/** Infer track title from /do text + recent chat. */
 
 const AGENT_TOOLS: ToolDef[] = [
   {
