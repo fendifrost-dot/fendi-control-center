@@ -3,7 +3,7 @@ import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
 
 
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.49.1";
-import { resolveClientName } from "../_shared/fuzzyClientSearch.ts";
+import { fetchCreditGuardian } from "../_shared/creditGuardian.ts";
 
 const BOT_TOKEN = Deno.env.get("FendiAIbot")!;
 const CHAT_ID = Deno.env.get("TELEGRAM_CHAT_ID")!;
@@ -14,48 +14,90 @@ const GROK_KEY = Deno.env.get("Frost_Grok")!;
 const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
 const TELEGRAM_API = `https://api.telegram.org/bot${BOT_TOKEN}`;
 const SYSTEM_IDENTITY = "Fendi Control Center AI";
-// âââ Implemented workflow keys â handler names (deterministic routing) âââ
+// ─── Implemented workflow keys → handler names (deterministic routing) ───
+// Cardinality is IMPLEMENTED_WORKFLOW_KEYS.size (also exposed in /status health); do not hardcode counts in docs.
 const IMPLEMENTED_WORKFLOW_KEYS = new Set([
-  "ping", "system_status", "resend_faied", "list_workflows", "help",
-    "model_switch", "document_approval", "document_rejection",
-    "failed_job_management", "drive_sync", "client_overview",
-    "file_browsing", "connected_project_stats", "error_explanation",
-    "active_jobs_summary", "document_ingestion_processing",
-    "drive_ingest", "free_agent",
-    "find_playlist_opportunities", "get_pitch_report", "send_playlist_pitch", "update_pitch_status"
-, "analyze_client_credit", "get_client_report", "generate_dispute_letters",
+  "ping", "system_status", "resend_failed", "list_workflows", "help",
+  "model_switch", "document_approval", "document_rejection",
+  "failed_job_management", "drive_sync", "client_overview",
+  "file_browsing", "connected_project_stats", "error_explanation",
+  "active_jobs_summary", "document_ingestion_processing",
+  "drive_ingest", "free_agent",
+  "find_playlist_opportunities", "get_pitch_report", "send_playlist_pitch", "update_pitch_status",
+  "analyze_client_credit",
+  "get_client_report",
+  "generate_dispute_letters",
+  "query_credit_compass",
+  "get_tax_status",
+  "get_tax_transactions",
+  "get_tax_documents",
+  "get_tax_discrepancies",
+  "query_cc_tax",
   "analyze_credit_strategy",
+  "generate_dispute_letter",
   "send_dispute_letter",
   "research_playlists",
   "generate_pitch",
   "send_pitch",
   "credit_analysis_and_disputes",
-  "playlist_pitch_workflow"]);
+  "playlist_pitch_workflow",
+]);
 
-// Synthetic workflow entry for find_playlist_opportunities (fallback when registry is empty)
-const SYNTHETIC_FIND_PLAYLIST_OPPORTUNITIES = {
-  id: "synthetic-find-playlist-opportunities",
+// ─── Workflow registry fetch ────────────────────────────────────
+interface WorkflowEntry {
+  key: string; name: string; description: string;
+  trigger_phrases: string[]; tools: string[];
+}
+
+// Synthetic workflow for auto-promoted "find playlist opportunities" when DB registry doesn't have it
+const SYNTHETIC_FIND_PLAYLIST_OPPORTUNITIES: WorkflowEntry = {
   key: "find_playlist_opportunities",
   name: "Find Playlist Opportunities",
-  description: "Research playlist opportunities for a track on Spotify and SoundCloud",
+  description: "Research playlist opportunities for a track on Spotify and SoundCloud.",
   trigger_phrases: ["find playlist opportunities", "playlist opportunities for"],
   tools: ["find_playlist_opportunities"],
 };
 
-// Synthetic workflow entry for analyze_client_credit (fallback when registry is empty)
-const SYNTHETIC_ANALYZE_CLIENT_CREDIT = {
-  id: "synthetic-analyze-client-credit",
-  key: "analyze_client_credit",
-  name: "Analyze Client Credit",
-  description: "Full credit analysis pipeline: sync Drive, ingest documents, and run Credit Guardian analysis",
-  trigger_phrases: ["analyze credit", "credit report", "credit analysis", "run analysis", "pull up credit"],
-  tools: ["drive_sync", "ingest_drive_clients", "query_credit_guardian", "get_client_report", "generate_dispute_letters"],
+const SYNTHETIC_ANALYZE_CREDIT_STRATEGY: WorkflowEntry = {
+  key: "analyze_credit_strategy",
+  name: "Analyze Credit Strategy",
+  description: "Analyze a client's credit profile and return prioritized dispute strategy.",
+  trigger_phrases: ["analyze credit strategy", "analyze client credit", "credit strategy"],
+  tools: ["analyze_credit_strategy"],
 };
 
-// âââ Workflow registry fetch ââââââââââââââââââââââââââââââââââââ
-interface WorkflowEntry {
-  key: string; name: string; description: string;
-  trigger_phrases: string[]; tools: string[];
+const SYNTHETIC_PLAYLIST_PITCH_WORKFLOW: WorkflowEntry = {
+  key: "playlist_pitch_workflow",
+  name: "Playlist Pitch Workflow",
+  description: "Research playlist opportunities, draft a pitch, and send after approval.",
+  trigger_phrases: ["research playlists", "playlist pitch workflow", "generate pitch"],
+  tools: ["research_playlists", "generate_pitch", "send_pitch"],
+};
+
+const SYNTHETIC_QUERY_CREDIT_COMPASS: WorkflowEntry = {
+  key: "query_credit_compass",
+  name: "Query Credit Compass",
+  description: "Create/review new-client credit assessment files and dispute strategy context.",
+  trigger_phrases: ["credit compass", "new client credit file", "blank client credit report"],
+  tools: ["query_credit_compass", "query_credit_guardian"],
+};
+
+const SYNTHETIC_QUERY_CC_TAX: WorkflowEntry = {
+  key: "query_cc_tax",
+  name: "Query CC Tax",
+  description: "Run CC Tax status, transactions, documents, and discrepancy checks.",
+  trigger_phrases: ["tax status", "tax generator", "tax discrepancies", "tax documents", "tax transactions"],
+  tools: ["query_cc_tax"],
+};
+
+// ─── Workflow key aliases (deprecated → canonical) ──────────
+// Routes old keys to new canonical handlers. "/do analyze_client_credit" → analyze_credit_strategy
+const WORKFLOW_KEY_ALIASES: Record<string, string> = {
+  analyze_client_credit: "analyze_credit_strategy",
+};
+
+function _resolveWorkflowKey(key: string): string {
+  return WORKFLOW_KEY_ALIASES[key] || key;
 }
 
 const SYNTHETIC_PLAYLIST_PITCH_WORKFLOW: WorkflowEntry = {
@@ -74,17 +116,22 @@ function _matchWorkflows(input: string, workflows: WorkflowEntry[]): { matches: 
   const norm = _normalizeText(input);
   if (!norm) return { matches: [] };
   const matched: WorkflowEntry[] = [];
+  const normKey = norm.replace(/\s+/g, "_");
   for (const wf of workflows) {
-    const normKey = wf.key.replace(/_/g, ' ');
-    if (norm === wf.key || norm === normKey || norm.replace(/ /g, '_') === wf.key) { matched.push(wf); break; }
+    const wfKeyNorm = _normalizeText(wf.key).replace(/\s+/g, "_");
+    if (norm === wfKeyNorm || normKey === wfKeyNorm || norm.includes(wfKeyNorm) || wfKeyNorm.includes(norm)) {
+      matched.push(wf);
+      break;
+    }
     for (const phrase of wf.trigger_phrases) {
       const np = _normalizeText(phrase);
       if (norm === np || norm.includes(np) || (norm.length >= 4 && np.includes(norm))) {
-        matched.push(wf); break;
+        matched.push(wf);
+        break;
       }
     }
   }
-  if (matched.length >= 1) return { matches: matched, chosen: matched.sort((a, b) => Math.max(...b.trigger_phrases.map(p => p.length)) - Math.max(...a.trigger_phrases.map(p => p.length)))[0] };
+  if (matched.length >= 1) return { matches: matched, chosen: matched.sort((a, b) => Math.max(...(b.trigger_phrases || []).map(p => p.length), b.key.length) - Math.max(...(a.trigger_phrases || []).map(p => p.length), a.key.length))[0] };
   return { matches: matched };
 }
 
@@ -270,14 +317,11 @@ async function flushTelegramOutbox(chatId: string, max = 5): Promise<{ sent: num
         if (result.ok) {
           await supabase.from("telegram_outbox").update({ status: "sent", sent_at: new Date().toISOString(), last_error: null }).eq("id", row.id);
           sent++;
-        } else if (
-          result.description && result.description.includes("can't parse entities") &&
-          (row.payload as any)?.parse_mode
-        ) {
-          // Retry without parse_mode
-          const fallbackPayload = { ...(row.payload as Record<string, any>) };
-          delete fallbackPayload.parse_mode;
-          const retry = await _rawTelegramSend(row.kind || "sendMessage", fallbackPayload);
+        } else if (result.description?.includes("can't parse entities") && (row.payload as any)?.parse_mode) {
+          console.warn("[OUTBOX] Parse error, retrying without parse_mode:", result.description);
+          const plainPayload = { ...(row.payload as Record<string, any>) };
+          delete plainPayload.parse_mode;
+          const retry = await _rawTelegramSend(row.kind || "sendMessage", plainPayload);
           if (retry.ok) {
             await supabase.from("telegram_outbox").update({ status: "sent", sent_at: new Date().toISOString(), last_error: "parse_mode_fallback" }).eq("id", row.id);
             sent++;
@@ -547,21 +591,23 @@ async function fetchProjectStats(project: any): Promise<{ name: string; tables: 
       return null;
     }
 
-    // Try POST endpoints with x-api-key
+    // Fairway Fixer / Credit Guardian: POST cross-project-api (or control-center-api) with x-api-key
     for (const ep of CROSS_PROJECT_ENDPOINTS) {
       try {
         const resp = await fetch(`${project.supabase_url}/functions/v1/${ep}`, {
           method: "POST",
           headers: { "Content-Type": "application/json", "x-api-key": apiKey },
-          body: JSON.stringify({ action: "get_stats" }),
+          body: JSON.stringify({ action: "get_clients" }),
         });
-        if (resp.ok) return await resp.json();
-        // consume body to avoid leak
+        if (resp.ok) {
+          const j = await resp.json();
+          const n = Array.isArray(j.data) ? j.data.length : 0;
+          return { name: project.name, tables: { clients: n } };
+        }
         await resp.text();
       } catch { /* try next */ }
     }
 
-    // Fallback: legacy project-stats GET
     try {
       const fallback = await fetch(`${project.supabase_url}/functions/v1/project-stats`, {
         method: "GET",
@@ -596,6 +642,7 @@ function systemHealthCheck() {
 // Each tool: { name, description, parameters, destructive, execute }
 // destructive tools require confirmation before execution
 
+/** Passed into tool.execute from the agentic loop (playlist tools use userMessage + conversationContext to infer track_name). */
 interface ToolExecuteContext {
   chatId?: string;
   userMessage?: string;
@@ -793,6 +840,7 @@ async function runPlaylistHubResearch(trackName: string, userVibe: string, chatI
     return 'Found ' + result.playlists.length + ' playlist opportunities for "' + trackName + '":\n\n' + lines;
   }
   return 'Playlist research complete for "' + trackName + '" (vibe: ' + userVibe + '). Results stored. Check back with "show pitch report".';
+}
 }
 
 const AGENT_TOOLS: ToolDef[] = [
@@ -1294,99 +1342,259 @@ const AGENT_TOOLS: ToolDef[] = [
       return JSON.stringify(await resp.json());
     },
   },
-    {
-      name: "query_credit_guardian" as const,
-      description: "Full Credit Guardian API. Supports: client CRUD, credit scores, bureau responses, credit reports, dispute stats, timelines, accounts, and summaries. Use action param to select operation.",
-      destructive: false,
-      parameters: {
-        type: "object" as const,
-        properties: {
-          action: {
-            type: "string",
-            enum: ["get_clients", "get_client_detail", "get_documents", "get_recent_activity", "import_timeline_events", "update_client_record", "get_client_accounts", "upsert_client_accounts", "get_score_history", "add_score_entry", "get_credit_reports", "save_credit_report", "get_bureau_responses", "save_bureau_response", "get_client_summaries", "save_client_summary", "get_bureau_narrative", "get_dispute_stats"],
-            description: "Which Credit Guardian API action to call.",
-          },
-          client_id: {
-            type: "string",
-            description: "Client UUID. Required for most per-client actions.",
-          },
-          client_name: {
-            type: "string",
-            description: "Client name for import_timeline_events (will match or create client).",
-          },
-          fields: {
-            type: "object",
-            description: "Fields to update for update_client_record (legal_name, preferred_name, email, phone, status, etc).",
-          },
-          events: {
-            type: "array",
-            description: "Array of timeline event objects for import_timeline_events.",
-          },
-          limit: {
-            type: "number",
-            description: "Max results for get_recent_activity (default 25, max 100).",
-          },
-          bureau: {
-            type: "string",
-            description: "Bureau name (equifax, experian, transunion) for get_bureau_responses, get_bureau_narrative, get_score_history.",
-          },
-          report_data: {
-            type: "object",
-            description: "Credit report data object for save_credit_report.",
-          },
-          response_data: {
-            type: "object",
-            description: "Bureau response data for save_bureau_response.",
-          },
-          summary_data: {
-            type: "object",
-            description: "Client summary data for save_client_summary.",
-          },
-          accounts: {
-            type: "array",
-            description: "Array of account objects for upsert_client_accounts.",
-          },
-          score_entry: {
-            type: "object",
-            description: "Score entry object for add_score_entry (bureau, score, source).",
-          },
+  {
+    name: "query_credit_guardian" as const,
+    description:
+      "Read-only query of Fairway Fixer (Credit Guardian) via cross-project-api. Uses get_clients, get_client_detail (includes timeline events), get_documents, get_recent_activity. For legacy prompts, session_id is treated as Fairway client UUID.",
+    destructive: false,
+    parameters: {
+      type: "object" as const,
+      properties: {
+        action: {
+          type: "string",
+          enum: [
+            "get_clients",
+            "get_client_detail",
+            "get_documents",
+            "get_recent_activity",
+            "get_assessments",
+            "get_timeline_events",
+            "get_assessment_detail",
+            "get_report",
+          ],
+          description:
+            "Fairway actions: get_clients, get_client_detail, get_documents, get_recent_activity. Legacy names map to get_clients or get_client_detail (use client_id).",
         },
-        required: ["action"],
+        client_id: {
+          type: "string",
+          description: "Fairway client UUID — required for get_client_detail, get_documents; optional filter for get_recent_activity.",
+        },
+        session_id: {
+          type: "string",
+          description: "Alias for client_id (legacy). Used when client_id omitted.",
+        },
+        limit: { type: "number", description: "For get_recent_activity (max 100)." },
       },
-      execute: async (args: { action: string; client_id?: string; client_name?: string; fields?: Record<string, unknown>; events?: unknown[]; limit?: number; bureau?: string; report_data?: Record<string, unknown>; response_data?: Record<string, unknown>; summary_data?: Record<string, unknown>; accounts?: unknown[]; score_entry?: Record<string, unknown> }) => {
-        const CG_URL = Deno.env.get("CREDIT_GUARDIAN_URL") || "https://gflvvzkiuleeochqcdeb.supabase.co";
-        const CG_KEY = Deno.env.get("CREDIT_GUARDIAN_KEY")!;
-        const payload: Record<string, unknown> = { action: args.action };
-        // Forward all optional params
-        if (args.client_id) payload.client_id = args.client_id;
-        if (args.client_name) payload.client_name = args.client_name;
-        if (args.fields) payload.fields = args.fields;
-        if (args.events) payload.events = args.events;
-        if (args.limit) payload.limit = args.limit;
-        if (args.bureau) payload.bureau = args.bureau;
-        if (args.report_data) payload.report_data = args.report_data;
-        if (args.response_data) payload.response_data = args.response_data;
-        if (args.summary_data) payload.summary_data = args.summary_data;
-        if (args.accounts) payload.accounts = args.accounts;
-        if (args.score_entry) payload.score_entry = args.score_entry;
-        // Also forward any params sub-object for backward compat
-        const params: Record<string, unknown> = {};
-        if (args.client_id) params.client_id = args.client_id;
-        if (args.fields) params.fields = args.fields;
-        if (args.limit) params.limit = args.limit;
-        if (Object.keys(params).length > 0) payload.params = params;
-        const resp = await fetch(`${CG_URL}/functions/v1/cross-project-api`, {
+      required: ["action"],
+    },
+    execute: async (args: {
+      action: string;
+      client_id?: string;
+      session_id?: string;
+      limit?: number;
+    }) => {
+      const cid = args.client_id || args.session_id;
+      let body: Record<string, unknown>;
+
+      switch (args.action) {
+        case "get_clients":
+        case "get_assessments":
+          body = { action: "get_clients" };
+          break;
+        case "get_timeline_events":
+        case "get_assessment_detail":
+        case "get_report":
+        case "get_client_detail":
+          if (!cid) {
+            throw new Error("client_id or session_id (Fairway client UUID) required for this action");
+          }
+          body = { action: "get_client_detail", params: { client_id: cid } };
+          break;
+        case "get_documents":
+          if (!cid) throw new Error("client_id or session_id required");
+          body = { action: "get_documents", params: { client_id: cid } };
+          break;
+        case "get_recent_activity": {
+          const params: Record<string, unknown> = {};
+          if (typeof args.limit === "number") params.limit = args.limit;
+          if (cid) params.client_id = cid;
+          body = { action: "get_recent_activity", params };
+          break;
+        }
+        default:
+          throw new Error(`Unknown action: ${args.action}`);
+      }
+
+      const resp = await fetchCreditGuardian(body);
+      const text = await resp.text();
+      if (!resp.ok) throw new Error(`Credit Guardian query failed: ${resp.status} — ${text.slice(0, 300)}`);
+      return text;
+    },
+  },
+  {
+    name: "query_credit_compass" as const,
+    description:
+      "Query Credit Compass (same Supabase/Lovable project as Credit Guardian — GitHub: fairway-fixer-18; Lovable may show the Credit Compass name) for credit assessment data, client records, dispute sessions, and strategy context. Use when the user asks about credit assessments, battle plans, or Credit Compass specifically.",
+    parameters: {
+      type: "object" as const,
+      properties: {
+        action: {
+          type: "string",
+          enum: [
+            "get_clients",
+            "get_client_detail",
+            "get_assessment",
+            "create_assessment",
+            "get_dispute_letters",
+            "generate_dispute_letters",
+          ],
+          description: "The Credit Compass action to perform",
+        },
+        client_name: {
+          type: "string",
+          description: "Client name to look up",
+        },
+        client_id: {
+          type: "string",
+          description: "Client ID for specific record lookups",
+        },
+        assessment_id: {
+          type: "string",
+          description: "Assessment ID for detailed queries",
+        },
+      },
+      required: ["action"],
+    },
+    destructive: false,
+    execute: async (params: {
+      action: string;
+      client_name?: string;
+      client_id?: string;
+      assessment_id?: string;
+    }) => {
+      const { action, client_name, client_id, assessment_id } = params;
+      // Credit Compass = fairway-fixer-18 / Credit Guardian (same project); Lovable display name may say Credit Compass.
+      // Secrets: often same host as CREDIT_GUARDIAN_URL. This path uses Bearer → control-center-api (legacy shape).
+      // Fairway’s control-center-api handler is the same as cross-project-api and expects x-api-key — if CREDIT_COMPASS_URL
+      // points at Fairway and you get 401, align with CREDIT_GUARDIAN_KEY or refactor this tool to fetchCreditGuardian().
+      const CREDIT_COMPASS_URL = Deno.env.get("CREDIT_COMPASS_URL");
+      if (!CREDIT_COMPASS_URL) {
+        return JSON.stringify({ error: "CREDIT_COMPASS_URL secret is not set in this project" });
+      }
+      // Service role or shared secret for the Credit Compass / Fairway project (CREDIT_COMPASS_KEY in CC Edge secrets).
+      const compassKey = Deno.env.get("CREDIT_COMPASS_KEY") ?? "";
+      if (!compassKey) {
+        return JSON.stringify({
+          error:
+            "CREDIT_COMPASS_KEY is not set — add it to Control Center Edge Function secrets",
+        });
+      }
+      // Auth strategy: try x-api-key first (matches Fairway cross-project-api contract),
+      // fall back to Bearer if that returns 401/403.
+      const payload = JSON.stringify({ action, client_name, client_id, assessment_id });
+      const endpoint = `${CREDIT_COMPASS_URL}/functions/v1/control-center-api`;
+      try {
+        let resp = await fetch(endpoint, {
           method: "POST",
           headers: {
-            "Authorization": `Bearer ${CG_KEY}`,
             "Content-Type": "application/json",
-            "x-api-key": CG_KEY,
+            "x-api-key": compassKey,
           },
-          body: JSON.stringify(payload),
+          body: payload,
         });
-        if (!resp.ok) throw new Error(`Credit Guardian query failed: ${resp.status} ${await resp.text()}`);
+        // Fallback: if x-api-key rejected, try Bearer auth
+        if (resp.status === 401 || resp.status === 403) {
+          console.log("[query_credit_compass] x-api-key auth failed, trying Bearer fallback");
+          resp = await fetch(endpoint, {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+              Authorization: `Bearer ${compassKey}`,
+            },
+            body: payload,
+          });
+        }
+        if (!resp.ok) {
+          const detail = (await resp.text()).slice(0, 2000);
+          return JSON.stringify({
+            error: `Credit Compass returned ${resp.status} (tried x-api-key then Bearer)`,
+            detail,
+          });
+        }
         return JSON.stringify(await resp.json());
+      } catch (err: unknown) {
+        const msg = err instanceof Error ? err.message : String(err);
+        return JSON.stringify({ error: `Failed to reach Credit Compass: ${msg}` });
+      }
+    },
+  },
+  {
+    name: "query_cc_tax" as const,
+    description:
+      "Query CC Tax (taxgenerator project) for tax data — workflow status, tax year configuration, documents, transactions, evidence, invoices, income reconciliation, and discrepancies. Use when the user asks about tax filings, tax year progress, tax documents, expenses, or anything CC Tax-related.",
+    parameters: {
+      type: "object" as const,
+      properties: {
+        action: {
+          type: "string",
+          enum: [
+            "get_workflow_status",
+            "get_year_config",
+            "get_documents",
+            "get_transactions",
+            "get_evidence",
+            "get_invoices",
+            "get_reconciliations",
+            "get_discrepancies",
+            "get_pl_report",
+          ],
+          description: "The CC Tax action to perform",
+        },
+        tax_year: {
+          type: "number",
+          description: "The tax year to query (e.g. 2024). Defaults to current/most recent year if omitted.",
+        },
+        status_filter: {
+          type: "string",
+          description: "Optional filter — e.g. 'unresolved', 'missing', 'critical', 'pending'",
+        },
+        limit: {
+          type: "number",
+          description: "Max number of records to return (default 20)",
+        },
       },
+      required: ["action"],
+    },
+    destructive: false,
+    execute: async (params: {
+      action: string;
+      tax_year?: number;
+      status_filter?: string;
+      limit?: number;
+    }) => {
+      const { action, tax_year, status_filter, limit } = params;
+      const CC_TAX_URL = Deno.env.get("CC_TAX_URL");
+      if (!CC_TAX_URL) {
+        return JSON.stringify({
+          error: "CC_TAX_URL secret is not set in this project. CC Tax integration is not yet connected.",
+        });
+      }
+      const ccTaxKey = Deno.env.get("CC_TAX_KEY") ?? "";
+      if (!ccTaxKey) {
+        return JSON.stringify({
+          error: "CC_TAX_KEY is not set — add taxgenerator service role to Control Center Edge Function secrets",
+        });
+      }
+      try {
+        const resp = await fetch(`${CC_TAX_URL}/functions/v1/control-center-api`, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: `Bearer ${ccTaxKey}`,
+          },
+          body: JSON.stringify({ action, tax_year, status_filter, limit }),
+        });
+        if (!resp.ok) {
+          return JSON.stringify({
+            error: `CC Tax returned ${resp.status}`,
+            detail: (await resp.text()).slice(0, 2000),
+          });
+        }
+        return JSON.stringify(await resp.json());
+      } catch (err: unknown) {
+        const msg = err instanceof Error ? err.message : String(err);
+        return JSON.stringify({ error: `Failed to reach CC Tax: ${msg}` });
+      }
     },
   {
     name: "scan_drive_overview" as const,
@@ -1530,28 +1738,33 @@ const AGENT_TOOLS: ToolDef[] = [
     execute: async (args: { track_name?: string; user_vibe?: string }, context?: ToolExecuteContext) => {
       const trackName = await resolvePlaylistTrackName(args, context);
       const explicitVibe = args?.user_vibe?.trim();
+
       if (!trackName) {
         return [
           `ð§ *Playlist opportunities*`,
           ``,
-          `I couldn't detect a track name from your message.`,
+          `I couldn’t detect a track name from your message.`,
           `Try: \`/do find_playlist_opportunities\` with the track (e.g. *Meditate by Fendi Frost*) or name the track in your next message.`,
         ].join("\n");
       }
+
       if (explicitVibe) {
-        return await runPlaylistHubResearch(trackName, explicitVibe);
+        return await runPlaylistHubResearch(trackName, explicitVibe, context?.chatId);
       }
+
       const chatId = context?.chatId;
       if (!chatId) {
         const inferred = inferVibeFromTrack(trackName);
         return await runPlaylistHubResearch(trackName, inferred);
       }
+
       const inferred = inferVibeFromTrack(trackName);
       await setPlaylistConfirm(chatId, {
         track_name: trackName,
         inferred_vibe: inferred,
         created_at: new Date().toISOString(),
       });
+
       return [
         `ð§ *Confirm vibe before playlist search*`,
         ``,
@@ -1566,31 +1779,213 @@ const AGENT_TOOLS: ToolDef[] = [
   {
     name: "get_pitch_report" as const,
     description: "Get a report of all playlist pitches sent, replied, and placed.",
-    parameters: { type: "object", properties: { track_name: { type: "string" } }, required: [] as string[] },
+    parameters: { type: "object", properties: { track_name: { type: "string" } }, required: [] },
     destructive: false,
     execute: async (args: { track_name?: string }) => {
-      const res = await callFanFuelHub("pitch-status", { action: "get_pitch_log", track_name: args.track_name });
-      return JSON.stringify(res);
+      const result = await callFanFuelHub("pitch-status", { track_name: args?.track_name ?? "" });
+      const entries = result?.entries ?? [];
+      if (!Array.isArray(entries) || entries.length === 0) return "No pitches logged yet.";
+      const lines = entries.slice(0, 25).map((p: any) =>
+        `• ${p.playlist_id} — ${p.track_name} — ${p.status} (${p.method ?? "?"})`
+      ).join("\n");
+      const cap = result?.summary?.email_pitches_last_24h;
+      const capLine = typeof cap === "number" ? `\nEmail pitches (last 24h): ${cap}/10` : "";
+      return `Pitch log (${entries.length} shown):\n\n${lines}${capLine}`;
     },
   },
   {
-    name: "send_playlist_pitch" as const,
-    description: "Send a pitch email to a playlist curator. WRITE operation - requires propose_plan approval first.",
-    parameters: { type: "object", properties: { playlist_id: { type: "string" }, curator_email: { type: "string" }, curator_name: { type: "string" }, playlist_name: { type: "string" }, track_name: { type: "string" }, subject: { type: "string" }, body: { type: "string" } }, required: ["playlist_id", "curator_email", "track_name", "subject", "body"] },
-    destructive: false,
+    name: "send_playlist_pitch",
+    description: "Execute one pitch for a playlist via FanFuel Hub (email or instructions). Pass playlist_id and track_name.",
+    parameters: {
+      type: "object",
+      properties: {
+        playlist_id: { type: "string" },
+        track_name: { type: "string" },
+        tier_confirmed: { type: "boolean", description: "Set true if user confirmed a tier-3 target." },
+      },
+      required: ["playlist_id", "track_name"],
+    },
+    destructive: true,
     execute: async (args: any) => {
-      const res = await callFanFuelHub("execute-pitch", { action: "send_pitch_email", ...args });
-      return JSON.stringify(res);
+      const res = await callFanFuelHub("execute-pitch", {
+        playlist_id: args.playlist_id,
+        track_name: args.track_name,
+        tier_confirmed: Boolean(args.tier_confirmed),
+      });
+      return typeof res?.message_to_user === "string" ? res.message_to_user : JSON.stringify(res ?? {});
     },
   },
   {
-    name: "update_pitch_status" as const,
-    description: "Update the status of a pitch (replied, placed, declined).",
-    parameters: { type: "object", properties: { playlist_id: { type: "string" }, status: { type: "string", description: "replied | placed | declined | do_not_pitch" }, notes: { type: "string" } }, required: ["playlist_id", "status"] },
+    name: "update_pitch_status",
+    description: "Update curator response for a pitch (responded or rejected) in pitch_log.",
+    parameters: {
+      type: "object",
+      properties: {
+        playlist_id: { type: "string" },
+        playlist_name: { type: "string", description: "If playlist_id unknown, pass name to resolve." },
+        track_name: { type: "string" },
+        status: { type: "string", description: "responded | rejected" },
+        notes: { type: "string" },
+      },
+      required: ["track_name", "status"],
+    },
     destructive: false,
     execute: async (args: any) => {
-      const res = await callFanFuelHub("update-pitch-status", { action: "update_pitch_status", ...args });
-      return JSON.stringify(res);
+      const res = await callFanFuelHub("update-pitch-status", {
+        playlist_id: args.playlist_id,
+        playlist_name: args.playlist_name,
+        track_name: args.track_name,
+        status: args.status,
+        notes: args.notes,
+      });
+      return typeof res?.message_to_user === "string" ? res.message_to_user : JSON.stringify(res ?? {});
+    },
+  },
+  {
+    name: "analyze_credit_strategy",
+    description: "Analyze a client's credit timeline and generate prioritized dispute strategy via Claude.",
+    parameters: {
+      type: "object",
+      properties: {
+        client_id: { type: "string" },
+        client_name: { type: "string" },
+      },
+      required: [],
+    },
+    destructive: false,
+    execute: async (args: any) => {
+      const ANON_KEY = Deno.env.get("SUPABASE_PUBLISHABLE_KEY") || SUPABASE_SERVICE_ROLE_KEY;
+      const resp = await fetch(`${SUPABASE_URL}/functions/v1/analyze-credit-strategy`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${ANON_KEY}` },
+        body: JSON.stringify({ client_id: args.client_id, client_name: args.client_name }),
+      });
+      const raw = await resp.text();
+      if (!resp.ok) throw new Error(`analyze-credit-strategy failed (${resp.status}): ${raw.slice(0, 400)}`);
+      return raw;
+    },
+  },
+  {
+    name: "generate_dispute_letter",
+    description: "Generate an FCRA-aligned dispute letter draft for one dispute item via Claude.",
+    parameters: {
+      type: "object",
+      properties: {
+        client_id: { type: "string" },
+        dispute_item: { type: "object" },
+        analysis_id: { type: "string" },
+      },
+      required: ["client_id", "dispute_item"],
+    },
+    destructive: true,
+    execute: async (args: any) => {
+      const ANON_KEY = Deno.env.get("SUPABASE_PUBLISHABLE_KEY") || SUPABASE_SERVICE_ROLE_KEY;
+      const resp = await fetch(`${SUPABASE_URL}/functions/v1/generate-dispute-letters`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${ANON_KEY}` },
+        body: JSON.stringify({ action: "generate", client_id: args.client_id, dispute_item: args.dispute_item, analysis_id: args.analysis_id }),
+      });
+      const raw = await resp.text();
+      if (!resp.ok) throw new Error(`generate-dispute-letters failed (${resp.status}): ${raw.slice(0, 400)}`);
+      return raw;
+    },
+  },
+  {
+    name: "send_dispute_letter",
+    description: "Mark a generated dispute letter approved for send.",
+    parameters: {
+      type: "object",
+      properties: {
+        letter_id: { type: "string" },
+      },
+      required: ["letter_id"],
+    },
+    destructive: true,
+    execute: async (args: any) => {
+      const ANON_KEY = Deno.env.get("SUPABASE_PUBLISHABLE_KEY") || SUPABASE_SERVICE_ROLE_KEY;
+      const resp = await fetch(`${SUPABASE_URL}/functions/v1/generate-dispute-letters`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${ANON_KEY}` },
+        body: JSON.stringify({ action: "send", letter_id: args.letter_id }),
+      });
+      const raw = await resp.text();
+      if (!resp.ok) throw new Error(`send_dispute_letter failed (${resp.status}): ${raw.slice(0, 400)}`);
+      return raw;
+    },
+  },
+  {
+    name: "research_playlists",
+    description: "Research playlist opportunities for a track via ChatGPT and FanFuel context.",
+    parameters: {
+      type: "object",
+      properties: {
+        track_name: { type: "string" },
+        genre: { type: "string" },
+        mood: { type: "string" },
+        bpm: { type: "number" },
+        similar_artists: { type: "array", items: { type: "string" } },
+      },
+      required: ["track_name"],
+    },
+    destructive: false,
+    execute: async (args: any) => {
+      const ANON_KEY = Deno.env.get("SUPABASE_PUBLISHABLE_KEY") || SUPABASE_SERVICE_ROLE_KEY;
+      const resp = await fetch(`${SUPABASE_URL}/functions/v1/playlist-research`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${ANON_KEY}` },
+        body: JSON.stringify(args),
+      });
+      const raw = await resp.text();
+      if (!resp.ok) throw new Error(`playlist-research failed (${resp.status}): ${raw.slice(0, 400)}`);
+      return raw;
+    },
+  },
+  {
+    name: "generate_pitch",
+    description: "Generate a personalized playlist pitch email draft via ChatGPT.",
+    parameters: {
+      type: "object",
+      properties: {
+        playlist_id: { type: "string" },
+        track_id: { type: "string" },
+        research_id: { type: "string" },
+      },
+      required: ["playlist_id", "track_id"],
+    },
+    destructive: false,
+    execute: async (args: any) => {
+      const ANON_KEY = Deno.env.get("SUPABASE_PUBLISHABLE_KEY") || SUPABASE_SERVICE_ROLE_KEY;
+      const resp = await fetch(`${SUPABASE_URL}/functions/v1/generate-pitch-email`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${ANON_KEY}` },
+        body: JSON.stringify({ action: "generate", ...args }),
+      });
+      const raw = await resp.text();
+      if (!resp.ok) throw new Error(`generate-pitch-email failed (${resp.status}): ${raw.slice(0, 400)}`);
+      return raw;
+    },
+  },
+  {
+    name: "send_pitch",
+    description: "Mark a generated pitch draft approved for send.",
+    parameters: {
+      type: "object",
+      properties: {
+        pitch_id: { type: "string" },
+      },
+      required: ["pitch_id"],
+    },
+    destructive: true,
+    execute: async (args: any) => {
+      const ANON_KEY = Deno.env.get("SUPABASE_PUBLISHABLE_KEY") || SUPABASE_SERVICE_ROLE_KEY;
+      const resp = await fetch(`${SUPABASE_URL}/functions/v1/generate-pitch-email`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${ANON_KEY}` },
+        body: JSON.stringify({ action: "send", pitch_id: args.pitch_id }),
+      });
+      const raw = await resp.text();
+      if (!resp.ok) throw new Error(`send_pitch failed (${resp.status}): ${raw.slice(0, 400)}`);
+      return raw;
     },
   },
   {
@@ -1951,27 +2346,365 @@ async function deletePendingAction(actionId: string) {
   await supabase.from("bot_settings").delete().eq("setting_key", `pending_action:${actionId}`);
 }
 
-// âââ Agentic AI call with tool use âââââââââââââââââââââââââââââ
+// ─── Playlist vibe confirmation (two-step) — persisted per chat ───
+function playlistConfirmKey(chatId: string): string {
+  return `playlist_confirm:${chatId}`;
+}
+
+interface PlaylistConfirmState {
+  track_name: string;
+  inferred_vibe: string;
+  created_at: string;
+}
+
+async function getPlaylistConfirm(chatId: string): Promise<PlaylistConfirmState | null> {
+  const { data } = await supabase
+    .from("bot_settings")
+    .select("setting_value")
+    .eq("setting_key", playlistConfirmKey(chatId))
+    .maybeSingle();
+  if (!data?.setting_value) return null;
+  try {
+    return JSON.parse(data.setting_value) as PlaylistConfirmState;
+  } catch {
+    return null;
+  }
+}
+
+async function setPlaylistConfirm(chatId: string, state: PlaylistConfirmState): Promise<void> {
+  await supabase.from("bot_settings").upsert(
+    {
+      setting_key: playlistConfirmKey(chatId),
+      setting_value: JSON.stringify(state),
+      updated_at: new Date().toISOString(),
+    },
+    { onConflict: "setting_key" },
+  );
+}
+
+async function clearPlaylistConfirm(chatId: string): Promise<void> {
+  await supabase.from("bot_settings").delete().eq("setting_key", playlistConfirmKey(chatId));
+}
+
+// ─── Last playlist research (pitch report / pitch N) ─────────────────
+type LastPlaylistResearch = {
+  track_name: string;
+  user_vibe: string;
+  ranked_playlist_ids: string[];
+  ts: string;
+};
+
+function lastPlaylistResearchKey(chatId: string): string {
+  return `last_playlist_research:${chatId}`;
+}
+
+function pendingPitchBulkKey(chatId: string): string {
+  return `pending_pitch_bulk:${chatId}`;
+}
+
+function pendingPitchTier3Key(chatId: string): string {
+  return `pending_pitch_tier3:${chatId}`;
+}
+
+async function saveLastPlaylistResearch(chatId: string, data: LastPlaylistResearch): Promise<void> {
+  await supabase.from("bot_settings").upsert(
+    {
+      setting_key: lastPlaylistResearchKey(chatId),
+      setting_value: JSON.stringify(data),
+      updated_at: new Date().toISOString(),
+    },
+    { onConflict: "setting_key" },
+  );
+}
+
+async function getLastPlaylistResearch(chatId: string): Promise<LastPlaylistResearch | null> {
+  const { data } = await supabase
+    .from("bot_settings")
+    .select("setting_value")
+    .eq("setting_key", lastPlaylistResearchKey(chatId))
+    .maybeSingle();
+  if (!data?.setting_value) return null;
+  try {
+    const p = JSON.parse(data.setting_value);
+    if (p && typeof p.track_name === "string" && Array.isArray(p.ranked_playlist_ids)) {
+      return p as LastPlaylistResearch;
+    }
+  } catch { /* ignore */ }
+  return null;
+}
+
+type PendingPitchBulk = { track_name: string; playlist_ids: string[]; ts: string };
+type PendingPitchTier3 = { playlist_id: string; track_name: string; ts: string };
+
+async function setPendingPitchBulk(chatId: string, state: PendingPitchBulk): Promise<void> {
+  await supabase.from("bot_settings").upsert(
+    {
+      setting_key: pendingPitchBulkKey(chatId),
+      setting_value: JSON.stringify(state),
+      updated_at: new Date().toISOString(),
+    },
+    { onConflict: "setting_key" },
+  );
+}
+
+async function getPendingPitchBulk(chatId: string): Promise<PendingPitchBulk | null> {
+  const { data } = await supabase
+    .from("bot_settings")
+    .select("setting_value")
+    .eq("setting_key", pendingPitchBulkKey(chatId))
+    .maybeSingle();
+  if (!data?.setting_value) return null;
+  try {
+    const p = JSON.parse(data.setting_value);
+    if (p?.track_name && Array.isArray(p.playlist_ids)) return p as PendingPitchBulk;
+  } catch { /* ignore */ }
+  return null;
+}
+
+async function clearPendingPitchBulk(chatId: string): Promise<void> {
+  await supabase.from("bot_settings").delete().eq("setting_key", pendingPitchBulkKey(chatId));
+}
+
+async function setPendingPitchTier3(chatId: string, state: PendingPitchTier3): Promise<void> {
+  await supabase.from("bot_settings").upsert(
+    {
+      setting_key: pendingPitchTier3Key(chatId),
+      setting_value: JSON.stringify(state),
+      updated_at: new Date().toISOString(),
+    },
+    { onConflict: "setting_key" },
+  );
+}
+
+async function getPendingPitchTier3(chatId: string): Promise<PendingPitchTier3 | null> {
+  const { data } = await supabase
+    .from("bot_settings")
+    .select("setting_value")
+    .eq("setting_key", pendingPitchTier3Key(chatId))
+    .maybeSingle();
+  if (!data?.setting_value) return null;
+  try {
+    const p = JSON.parse(data.setting_value);
+    if (p?.playlist_id && p?.track_name) return p as PendingPitchTier3;
+  } catch { /* ignore */ }
+  return null;
+}
+
+async function clearPendingPitchTier3(chatId: string): Promise<void> {
+  await supabase.from("bot_settings").delete().eq("setting_key", pendingPitchTier3Key(chatId));
+}
+
+const NON_BULK_PITCH_METHODS = new Set(["algorithmic", "distributor_pitch"]);
+
+async function hubPlaylistBatch(playlistIds: string[]): Promise<any[]> {
+  if (!playlistIds.length) return [];
+  const r = await callFanFuelHub("playlist-batch", { playlist_ids: playlistIds });
+  return Array.isArray(r?.playlists) ? r.playlists : [];
+}
+
+/** Heuristic vibe label from track title (no external API). */
+function inferVibeFromTrack(trackName: string): string {
+  const t = (trackName || "").toLowerCase();
+  if (/meditat|zen|calm|peace|sleep|ambient|lofi/.test(t)) return "calm / chill / ambient-adjacent";
+  if (/grind|hustle|motivat|money|boss/.test(t)) return "motivational hip-hop / street energy";
+  if (/love|heart|soul|slow/.test(t)) return "R&B / soulful / late-night";
+  return "West Coast hip-hop / smooth soulful lane (Larry June–adjacent)";
+}
+
+/**
+ * Calls FanFuel Hub playlist research. Prefer the dedicated `playlist-research` edge function with body
+ * `{ track_name, user_vibe }` only — do NOT route this through control-center-api using the tool name as
+ * `action` (Hub reports "Unknown action: findplaylistopportunities" when misrouted).
+ * Override edge name with FANFUEL_HUB_PLAYLIST_FN if your project uses a different function name.
+ */
+async function runPlaylistHubResearch(trackName: string, userVibe: string, chatId?: string): Promise<string> {
+  const body = { track_name: trackName, user_vibe: userVibe };
+  const edgeName = (Deno.env.get("FANFUEL_HUB_PLAYLIST_FN") || "playlist-research").trim();
+
+  let result: any;
+  try {
+    result = await callFanFuelHub(edgeName, body);
+  } catch (e1) {
+    const m = e1 instanceof Error ? e1.message : String(e1);
+    // Some Hub deployments only expose playlist via control-center-api with a fixed action name.
+    if (/404|not found|Unknown action|FunctionsHttpError|502|503/i.test(m)) {
+      try {
+        result = await callFanFuelHub("control-center-api", {
+          action: "playlist_research",
+          track_name: trackName,
+          user_vibe: userVibe,
+        });
+      } catch {
+        console.error("[runPlaylistHubResearch] primary failed:", m, "fallback playlist_research failed");
+        throw e1;
+      }
+    } else {
+      throw e1;
+    }
+  }
+
+  if (result?.playlists && Array.isArray(result.playlists) && result.playlists.length > 0) {
+    const rankedIds = result.playlists.map((p: { playlist_id?: string }) => p.playlist_id).filter(Boolean) as string[];
+    if (chatId && rankedIds.length > 0) {
+      await saveLastPlaylistResearch(chatId, {
+        track_name: trackName,
+        user_vibe: userVibe,
+        ranked_playlist_ids: rankedIds,
+        ts: new Date().toISOString(),
+      });
+    }
+    const lines = result.playlists
+      .slice(0, 20)
+      .map((p: any, i: number) => {
+        const mid =
+          p.followers_label ??
+          (typeof p.followers === "number"
+            ? p.followers.toLocaleString()
+            : p.follower_count != null
+              ? p.follower_count.toLocaleString()
+              : "?");
+        const suffix = mid === "editorial" || mid === "N/A" ? "" : " followers";
+        return `${i + 1}. ${p.name ?? p.playlist_name} — ${mid}${suffix}`;
+      })
+      .join("\n");
+    return `Found ${result.playlists.length} playlist opportunities for "${trackName}":\n\n${lines}`;
+  }
+  return `Playlist research complete for "${trackName}" (vibe: ${userVibe}). Results stored. Check back with "show pitch report".`;
+}
+
+/** Infer track title from /do text + recent chat (so /do find_playlist_opportunities still works). */
+function extractPlaylistTrackName(userMessage: string, conversationContext: string): string | null {
+  const combined = `${userMessage}\n${conversationContext}`;
+  // "Title by Artist" (e.g. Meditate by Fendi Frost)
+  const byMatch = combined.match(/\b([A-Za-z0-9][^\n]{0,100}?)\s+by\s+[A-Za-z]/i);
+  if (byMatch) {
+    const t = byMatch[1].trim().replace(/^["']|["']$/g, "");
+    if (t.length >= 1 && t.length <= 120) return t;
+  }
+  // "... for Meditate" / "for TRACK" (end of line, comma, or before by)
+  const forMatch = userMessage.match(
+    /(?:for|about)\s+["']?([^"'\n]+?)["']?(?:\s+by|\s*$|,)/i,
+  );
+  if (forMatch) {
+    let t = forMatch[1].trim();
+    // Normalize common casual phrasing: "for my new song Meditate" -> "Meditate"
+    t = t.replace(/^(my|our)\s+(new\s+)?(song|track)\s+/i, "").trim();
+    if (t.length >= 1 && t.length <= 120 && !/^(me|the|a|an)$/i.test(t)) return t;
+  }
+  const opp = combined.match(
+    /playlist\s+opportunities?\s+for\s+["']?([^"'\n]+?)["']?(?:\s+by|\s*$|,|\s+)/i,
+  );
+  if (opp) {
+    const t = opp[1].trim();
+    if (t.length >= 1 && t.length <= 120) return t;
+  }
+  const opp2 = combined.match(/find\s+playlist\s+opportunities\s+for\s+["']?([^"'\n]+?)["']?/i);
+  if (opp2) {
+    const t = opp2[1].trim();
+    if (t.length >= 1 && t.length <= 120) return t;
+  }
+  return null;
+}
+
+function extractClientNameForCreditCommand(userMessage: string, conversationContext: string): string | null {
+  const combined = `${userMessage}\n${conversationContext}`;
+  const explicit = userMessage.match(/\banaly[sz]e\s+(.+?)\s+(?:new\s+)?(?:equifax|experian|transunion)?\s*credit\s+report\b/i);
+  if (explicit?.[1]) {
+    const name = explicit[1].replace(/\b(my|the|a)\b/gi, "").trim();
+    if (name.length >= 2 && name.length <= 80) return name;
+  }
+  const shorter = combined.match(/\banaly[sz]e\s+(.+?)\s+credit\b/i);
+  if (shorter?.[1]) {
+    const name = shorter[1].replace(/\b(my|the|a|new)\b/gi, "").trim();
+    if (name.length >= 2 && name.length <= 80) return name;
+  }
+  return null;
+}
+
+function isNewClientCreditIntent(lowerText: string): boolean {
+  return (
+    /\bblank\s+client\b/i.test(lowerText) ||
+    /\bnew\s+client\b/i.test(lowerText) ||
+    /\bbuild(ing)?\s+(a\s+)?file\b/i.test(lowerText) ||
+    /\bcreate\s+(a\s+)?(client\s+)?(credit\s+)?summary\b/i.test(lowerText)
+  );
+}
+
+function isExistingClientProgressIntent(lowerText: string): boolean {
+  return (
+    /\bupdated?\s+(equifax|experian|transunion)\b/i.test(lowerText) ||
+    /\bnew\s+(equifax|experian|transunion)\b/i.test(lowerText) ||
+    /\bexisting\s+client\b/i.test(lowerText) ||
+    /\bclient'?s?\s+(updated?|new)\s+(equifax|experian|transunion)\b/i.test(lowerText)
+  );
+}
+
+function isTaxIntent(lowerText: string): boolean {
+  return (
+    /\btax\b/i.test(lowerText) ||
+    /\bcc\s*tax\b/i.test(lowerText) ||
+    /\btax\s+generator\b/i.test(lowerText) ||
+    /\bdiscrepanc(y|ies)\b/i.test(lowerText)
+  );
+}
+
+/** Resolve track title for find_playlist_opportunities when the model omits or sends placeholder track_name. */
+async function resolvePlaylistTrackName(
+  args: { track_name?: string; user_vibe?: string },
+  context?: ToolExecuteContext,
+): Promise<string> {
+  let raw = (args?.track_name || "").trim();
+  if (raw && !/^unknown$/i.test(raw) && raw.toLowerCase() !== "unknown track") {
+    return raw;
+  }
+  const um = context?.userMessage || "";
+  const cc = context?.conversationContext || "";
+  const fromExtract = extractPlaylistTrackName(um, cc);
+  if (fromExtract) return fromExtract;
+  if (context?.chatId) {
+    const conv = cc || (await buildConversationContext(context.chatId));
+    const fromConv = extractPlaylistTrackName(um, conv);
+    if (fromConv) return fromConv;
+  }
+  return "";
+}
+
+function playlistWorkflowSystemAddendum(): string {
+  return `
+PLAYLIST WORKFLOW (ACTIVE — this run is restricted to find_playlist_opportunities):
+- You MUST call the tool find_playlist_opportunities with track_name set to a real song title.
+- If the user only sent a workflow key (e.g. "find_playlist_opportunities"), infer track_name from the Conversation Context below (e.g. messages like "Meditate by Fendi Frost" → track_name "Meditate").
+- Do NOT refuse. Do NOT say you have no tool — find_playlist_opportunities IS available in this workflow.
+- If track_name is truly impossible to infer, call find_playlist_opportunities with track_name "unknown" and the tool will prompt the user.
+`;
+}
+
+// ─── Agentic AI call with tool use ─────────────────────────────
 
 async function agenticGeminiCall(
   userMessage: string,
   docContext: string,
   conversationContext: string,
-  allowedToolNames?: string[]
+  allowedToolNames?: string[],
+  workflowKey?: string,
 ): Promise<{ text: string; toolCalls: Array<{ name: string; args: any }> }> {
+  const playlistBlock = workflowKey === "find_playlist_opportunities" ? playlistWorkflowSystemAddendum() : "";
   const systemPrompt = `You are the ${SYSTEM_IDENTITY}. You serve Fendi Frost as a personal command center assistant.
-
-CRITICAL RULES â MANDATORY:
-1. NO TOOL, NO CLAIM: You MUST use your available tools to fulfill requests. NEVER describe what you would do â actually call the function. If the user asks to see comments, call the tool. Do NOT respond with text saying "I'll do X" without calling the corresponding function.
+${playlistBlock}
+CRITICAL RULES — MANDATORY:
+1. NO TOOL, NO CLAIM: You MUST use your available tools to fulfill requests. NEVER describe what you would do — actually call the function. If the user asks to see comments, call the tool. Do NOT respond with text saying "I'll do X" without calling the corresponding function.
 2. NO WORKFLOW, NO ACTION: If the user's request does not correspond to ANY of your available tools, respond with a short message suggesting they run /workflows to see available commands. Never invent workflows.
 3. EVIDENCE OVER CLAIMS: All data must come from tool calls. Never invent counts, names, or metrics.
-4. For destructive actions (retry, archive, approve, reject, Instagram DMs/replies), ALWAYS call the tool â the system will handle confirmation.
+4. For destructive actions (retry, archive, approve, reject, Instagram DMs/replies), ALWAYS call the tool — the system will handle confirmation.
 
 Available capabilities via tools:
 - System status, job management (active jobs summary, failed jobs), document approvals
 - Instagram: send DMs, reply to comments, reply to story mentions, view conversations & comments
 - Drive sync, file listing, client summaries
 - Connected project stats
+- FanFuel / playlists: find_playlist_opportunities (research playlists for a track — FanFuel Hub)
+- Credit strategy: analyze_credit_strategy, generate_dispute_letter, send_dispute_letter
+- Playlist email workflow: research_playlists, generate_pitch, send_pitch
 
 Be concise, professional, and use emoji sparingly.
 
@@ -2023,9 +2756,10 @@ async function agenticGrokCall(
   userMessage: string,
   docContext: string,
   conversationContext: string,
-  allowedToolNames?: string[]
+  allowedToolNames?: string[],
+  workflowKey?: string,
 ): Promise<{ text: string; toolCalls: Array<{ name: string; args: any }> }> {
-  const isAutonomousLane = false;
+  const isAutonomousLane = workflowKey === "free_agent";
   const autonomousPrefix = isAutonomousLane
     ? `ð¤ AUTONOMOUS AGENT MODE ACTIVE
 You have full tool access. Your rules:
@@ -2048,7 +2782,8 @@ Systems:
 HARD RULE: For analyze_client_credit, execute it DIRECTLY without propose_plan. For standalone ingest_drive_clients, call propose_plan first then stop.
 `
     : "";
-  const systemPrompt = `${autonomousPrefix}You are the ${SYSTEM_IDENTITY}. You serve Fendi Frost as a personal command center assistant.
+  const playlistBlock = workflowKey === "find_playlist_opportunities" ? playlistWorkflowSystemAddendum() : "";
+  const systemPrompt = `${autonomousPrefix}${playlistBlock}You are the ${SYSTEM_IDENTITY}. You serve Fendi Frost as a personal command center assistant.
 
 CRITICAL RULES â MANDATORY:
 1. NO TOOL, NO CLAIM: You MUST use your available tools to fulfill requests. NEVER describe what you would do â actually call the function. If the user asks to see comments, call the tool. Do NOT respond with text saying "I'll do X" without calling the corresponding function.
@@ -2061,6 +2796,9 @@ Available capabilities via tools:
 - Instagram: send DMs, reply to comments, reply to story mentions, view conversations & comments
 - Drive sync, file listing, client summaries
 - Connected project stats
+- FanFuel / playlists: find_playlist_opportunities (research playlists for a track)
+- Credit strategy: analyze_credit_strategy, generate_dispute_letter, send_dispute_letter
+- Playlist email workflow: research_playlists, generate_pitch, send_pitch
 
 Be witty, direct, and concise. Use emoji sparingly.
 
@@ -2156,7 +2894,10 @@ function logEvent(e: Record<string, any>) {
 // âââ Execute agentic loop ââââââââââââââââââââââââââââââââââââââ
 
 async function executeAgenticLoop(chatId: string, userMessage: string, opts: { taskId: string; sessionModel: "grok" | "gemini" | "chatgpt"; lane?: "lane1_do" | "lane2_assistant" | "lane3_autonomous"; allowTools?: boolean; workflowKey?: string }): Promise<void> {
-  // ââ STEP 1: EXECUTION METRICS ââ
+  // ── Resolve deprecated workflow key aliases ──
+  if (opts.workflowKey) opts.workflowKey = _resolveWorkflowKey(opts.workflowKey);
+
+  // ── STEP 1: EXECUTION METRICS ──
   const executionStart = Date.now();
 
   // ââ HARD EXECUTION GUARD ââ
@@ -2208,9 +2949,26 @@ async function executeAgenticLoop(chatId: string, userMessage: string, opts: { t
   // ââ LOAD TOOLS FROM WORKFLOW ââ
   const workflows = await fetchWorkflowRegistry();
   let matchedWorkflow = workflows.find(w => w.key === opts.workflowKey);
-  // Synthetic fallback â if registry missing find_playlist_opportunities, use built-in constant
+
+  // Allow known implemented workflows when registry doesn't have them (e.g. find_playlist_opportunities in Lovable)
   if (!matchedWorkflow && opts.workflowKey === "find_playlist_opportunities" && IMPLEMENTED_WORKFLOW_KEYS.has("find_playlist_opportunities")) {
-    matchedWorkflow = SYNTHETIC_FIND_PLAYLIST_OPPORTUNITIES as any;
+    matchedWorkflow = SYNTHETIC_FIND_PLAYLIST_OPPORTUNITIES;
+    console.log(JSON.stringify({ ts: Date.now(), event: "workflow_synthetic_fallback", key: opts.workflowKey, taskId: opts.taskId }));
+  }
+  if (!matchedWorkflow && opts.workflowKey === "analyze_credit_strategy" && IMPLEMENTED_WORKFLOW_KEYS.has("analyze_credit_strategy")) {
+    matchedWorkflow = SYNTHETIC_ANALYZE_CREDIT_STRATEGY;
+    console.log(JSON.stringify({ ts: Date.now(), event: "workflow_synthetic_fallback", key: opts.workflowKey, taskId: opts.taskId }));
+  }
+  if (!matchedWorkflow && opts.workflowKey === "playlist_pitch_workflow" && IMPLEMENTED_WORKFLOW_KEYS.has("playlist_pitch_workflow")) {
+    matchedWorkflow = SYNTHETIC_PLAYLIST_PITCH_WORKFLOW;
+    console.log(JSON.stringify({ ts: Date.now(), event: "workflow_synthetic_fallback", key: opts.workflowKey, taskId: opts.taskId }));
+  }
+  if (!matchedWorkflow && opts.workflowKey === "query_credit_compass" && IMPLEMENTED_WORKFLOW_KEYS.has("query_credit_compass")) {
+    matchedWorkflow = SYNTHETIC_QUERY_CREDIT_COMPASS;
+    console.log(JSON.stringify({ ts: Date.now(), event: "workflow_synthetic_fallback", key: opts.workflowKey, taskId: opts.taskId }));
+  }
+  if (!matchedWorkflow && opts.workflowKey === "query_cc_tax" && IMPLEMENTED_WORKFLOW_KEYS.has("query_cc_tax")) {
+    matchedWorkflow = SYNTHETIC_QUERY_CC_TAX;
     console.log(JSON.stringify({ ts: Date.now(), event: "workflow_synthetic_fallback", key: opts.workflowKey, taskId: opts.taskId }));
   }
   // Synthetic fallback â if registry missing analyze_client_credit, use built-in constant
@@ -2246,9 +3004,40 @@ async function executeAgenticLoop(chatId: string, userMessage: string, opts: { t
 
   // Step 1: Get AI response with workflow-scoped tool calls
   logEvent({ event: "ai_call_start", taskId: opts.taskId, model, workflow: opts.workflowKey });
-  const result = model === "grok"
-    ? await agenticGrokCall(userMessage, docContext, conversationContext, workflowToolNames)
-    : await agenticGeminiCall(userMessage, docContext, conversationContext, workflowToolNames);
+
+  // Deterministic playlist run: if we can infer track from chat, skip LLM refusal paths
+  let result: { text: string; toolCalls: Array<{ name: string; args: any }> };
+  if (opts.workflowKey === "find_playlist_opportunities") {
+    const inferredTrack = extractPlaylistTrackName(userMessage, conversationContext);
+    if (inferredTrack) {
+      logEvent({ event: "playlist_track_inferred", taskId: opts.taskId, inferredTrack });
+      result = {
+        text: "",
+        toolCalls: [{ name: "find_playlist_opportunities", args: { track_name: inferredTrack } }],
+      };
+    } else {
+      result = model === "grok"
+        ? await agenticGrokCall(userMessage, docContext, conversationContext, workflowToolNames, opts.workflowKey)
+        : await agenticGeminiCall(userMessage, docContext, conversationContext, workflowToolNames, opts.workflowKey);
+    }
+  } else if (opts.workflowKey === "analyze_credit_strategy") {
+    const inferredClient = extractClientNameForCreditCommand(userMessage, conversationContext);
+    if (inferredClient) {
+      logEvent({ event: "credit_client_inferred", taskId: opts.taskId, inferredClient });
+      result = {
+        text: "",
+        toolCalls: [{ name: "analyze_credit_strategy", args: { client_name: inferredClient } }],
+      };
+    } else {
+      result = model === "grok"
+        ? await agenticGrokCall(userMessage, docContext, conversationContext, workflowToolNames, opts.workflowKey)
+        : await agenticGeminiCall(userMessage, docContext, conversationContext, workflowToolNames, opts.workflowKey);
+    }
+  } else {
+    result = model === "grok"
+      ? await agenticGrokCall(userMessage, docContext, conversationContext, workflowToolNames, opts.workflowKey)
+      : await agenticGeminiCall(userMessage, docContext, conversationContext, workflowToolNames, opts.workflowKey);
+  }
   logEvent({ event: "ai_response", taskId: opts.taskId, workflow: opts.workflowKey, model, toolCalls: result.toolCalls.length, hasText: !!result.text });
   await supabase.from("tasks").update({ result_json: { progress_step: "E_ai_done", tool_count: result.toolCalls.length, execution_lock: lockId } }).eq("id", opts.taskId);
 
@@ -2609,7 +3398,7 @@ serve(async (req) => {
       return new Response("ok");
     }
 
-    // ââ Text messages ââ
+    // ── Text messages ──
     const message = update.message;
     if (!message?.text) return new Response("ok");
 
@@ -2617,11 +3406,11 @@ serve(async (req) => {
     const text = message.text.trim();
 
     if (chatId !== CHAT_ID) {
-      console.log(`ð« Blocked message from unauthorized chat: ${chatId}`);
+      console.log(`🚫 Blocked message from unauthorized chat: ${chatId}`);
       return new Response("ok");
     }
 
-    // âââ DETERMINISTIC SPINE: resolve session + create task âââ
+    // ─── DETERMINISTIC SPINE: resolve session + create task ───
     let session: { id: string; active_model: string };
     let taskId: string;
 
@@ -2629,15 +3418,145 @@ serve(async (req) => {
       session = await resolveSession(chatId);
     } catch (sessionErr) {
       console.error("FATAL: session resolution failed:", sessionErr);
-      await sendMessage(chatId, `ð¨ *${SYSTEM_IDENTITY}* â Session resolution failed: ${String(sessionErr)}`);
+      await sendMessage(chatId, `🚨 *${SYSTEM_IDENTITY}* — Session resolution failed: ${String(sessionErr)}`);
       return new Response("ok");
     }
 
-    // Determine if this is an explicit model request (for requested_model field only â no mutation)
+    // Determine if this is an explicit model request (for requested_model field only — no mutation)
     const modelRequestMatch = text.match(/^\/model\s+(grok|gemini|chatgpt)$/i);
     const requestedModel = modelRequestMatch ? modelRequestMatch[1].toLowerCase() : null;
 
-    // ââ Pending playlist vibe: handle BEFORE task row + lane routing (so Lane 2 never steals yes/cancel) ââ
+    const routingClearAndContinue =
+      text.toLowerCase().trim().startsWith("/do ") ||
+      text.toLowerCase().trim() === "/start" ||
+      text.toLowerCase().trim().startsWith("/workflows") ||
+      text.toLowerCase().trim().startsWith("/metrics") ||
+      text.toLowerCase().trim().startsWith("/triage") ||
+      text.toLowerCase().trim().startsWith("/status") ||
+      text.toLowerCase().trim().startsWith("/help") ||
+      text.toLowerCase().trim() === "/ping" ||
+      text.toLowerCase().trim().startsWith("/resend") ||
+      text.toLowerCase().trim().startsWith("/model");
+
+    // ── Pending bulk pitch (confirm all) ────────────────────────────────
+    const pendingBulkEarly = await getPendingPitchBulk(chatId);
+    if (pendingBulkEarly) {
+      const lower = text.toLowerCase().trim();
+      if (routingClearAndContinue) {
+        await clearPendingPitchBulk(chatId);
+      } else if (lower === "cancel" || lower === "no") {
+        try {
+          taskId = await createTaskRow(session.id, text, requestedModel);
+          _currentTaskId = taskId;
+        } catch (taskErr) {
+          console.error("FATAL: task creation failed:", taskErr);
+          await sendMessage(chatId, `🚨 *${SYSTEM_IDENTITY}* — Task creation failed: ${String(taskErr)}`);
+          return new Response("ok");
+        }
+        await sendMessage(chatId, `📋 Queued: \`${taskId}\``, {}, `task:${taskId}:queued`);
+        await clearPendingPitchBulk(chatId);
+        await sendMessage(chatId, "Bulk pitch cancelled.", {}, `task:${taskId}:bulk-cancel`);
+        await supabase.from("tasks").update({ status: "succeeded", result_json: { shortcut: "pitch_bulk_cancel" } }).eq("id", taskId);
+        await sendMessage(chatId, `✅ Done: \`${taskId}\``, {}, `task:${taskId}:done`);
+        _currentTaskId = null;
+        return new Response("ok");
+      } else if (/^confirm\s+all$/i.test(text.trim())) {
+        try {
+          taskId = await createTaskRow(session.id, text, requestedModel);
+          _currentTaskId = taskId;
+        } catch (taskErr) {
+          console.error("FATAL: task creation failed:", taskErr);
+          await sendMessage(chatId, `🚨 *${SYSTEM_IDENTITY}* — Task creation failed: ${String(taskErr)}`);
+          return new Response("ok");
+        }
+        await sendMessage(chatId, `📋 Queued: \`${taskId}\``, {}, `task:${taskId}:queued`);
+        const modelForPitch = (session.active_model === "grok" ? "grok" : "gemini") as "grok" | "gemini";
+        const ids = [...pendingBulkEarly.playlist_ids];
+        await clearPendingPitchBulk(chatId);
+        for (const pid of ids) {
+          try {
+            const res = await callFanFuelHub("execute-pitch", {
+              playlist_id: pid,
+              track_name: pendingBulkEarly.track_name,
+              bulk: true,
+            });
+            const msg = typeof res?.message_to_user === "string" ? res.message_to_user : JSON.stringify(res ?? {});
+            await sendMessage(chatId, formatAssistantMessage(modelForPitch, msg), {}, `task:${taskId}:bulk-pitch`);
+          } catch (e) {
+            const errStr = e instanceof Error ? e.message : String(e);
+            await sendMessage(chatId, formatAssistantMessage(modelForPitch, `❌ ${errStr}`), {}, `task:${taskId}:bulk-pitch-err`);
+          }
+        }
+        await supabase.from("tasks").update({
+          status: "succeeded",
+          result_json: { shortcut: "pitch_bulk_done", count: ids.length },
+        }).eq("id", taskId);
+        await sendMessage(chatId, `✅ Done: \`${taskId}\``, {}, `task:${taskId}:done`);
+        _currentTaskId = null;
+        return new Response("ok");
+      } else {
+        await sendMessage(chatId, "Reply *confirm all* to pitch the listed playlists, or *cancel*.");
+        return new Response("ok");
+      }
+    }
+
+    // ── Pending tier-3 pitch confirm ────────────────────────────────────
+    const pendingTier3Early = await getPendingPitchTier3(chatId);
+    if (pendingTier3Early) {
+      const lower = text.toLowerCase().trim();
+      if (routingClearAndContinue) {
+        await clearPendingPitchTier3(chatId);
+      } else if (lower === "cancel" || lower === "no") {
+        try {
+          taskId = await createTaskRow(session.id, text, requestedModel);
+          _currentTaskId = taskId;
+        } catch (taskErr) {
+          console.error("FATAL: task creation failed:", taskErr);
+          await sendMessage(chatId, `🚨 *${SYSTEM_IDENTITY}* — Task creation failed: ${String(taskErr)}`);
+          return new Response("ok");
+        }
+        await sendMessage(chatId, `📋 Queued: \`${taskId}\``, {}, `task:${taskId}:queued`);
+        await clearPendingPitchTier3(chatId);
+        await sendMessage(chatId, "Tier-3 pitch cancelled.", {}, `task:${taskId}:t3-cancel`);
+        await supabase.from("tasks").update({ status: "succeeded", result_json: { shortcut: "pitch_t3_cancel" } }).eq("id", taskId);
+        await sendMessage(chatId, `✅ Done: \`${taskId}\``, {}, `task:${taskId}:done`);
+        _currentTaskId = null;
+        return new Response("ok");
+      } else if (/^confirm$/i.test(text.trim())) {
+        try {
+          taskId = await createTaskRow(session.id, text, requestedModel);
+          _currentTaskId = taskId;
+        } catch (taskErr) {
+          console.error("FATAL: task creation failed:", taskErr);
+          await sendMessage(chatId, `🚨 *${SYSTEM_IDENTITY}* — Task creation failed: ${String(taskErr)}`);
+          return new Response("ok");
+        }
+        await sendMessage(chatId, `📋 Queued: \`${taskId}\``, {}, `task:${taskId}:queued`);
+        const modelForPitch = (session.active_model === "grok" ? "grok" : "gemini") as "grok" | "gemini";
+        await clearPendingPitchTier3(chatId);
+        try {
+          const res = await callFanFuelHub("execute-pitch", {
+            playlist_id: pendingTier3Early.playlist_id,
+            track_name: pendingTier3Early.track_name,
+            tier_confirmed: true,
+          });
+          const msg = typeof res?.message_to_user === "string" ? res.message_to_user : JSON.stringify(res ?? {});
+          await sendMessage(chatId, formatAssistantMessage(modelForPitch, msg), {}, `task:${taskId}:t3-pitch`);
+        } catch (e) {
+          const errStr = e instanceof Error ? e.message : String(e);
+          await sendMessage(chatId, formatAssistantMessage(modelForPitch, `❌ ${errStr}`), {}, `task:${taskId}:t3-pitch-err`);
+        }
+        await supabase.from("tasks").update({ status: "succeeded", result_json: { shortcut: "pitch_tier3_confirmed" } }).eq("id", taskId);
+        await sendMessage(chatId, `✅ Done: \`${taskId}\``, {}, `task:${taskId}:done`);
+        _currentTaskId = null;
+        return new Response("ok");
+      } else {
+        await sendMessage(chatId, "Reply *confirm* to pitch this tier-3 playlist, or *cancel*.");
+        return new Response("ok");
+      }
+    }
+
+    // ── Pending playlist vibe: handle BEFORE task row + lane routing (so Lane 2 never steals yes/cancel) ──
     const pendingPlaylistEarly = await getPlaylistConfirm(chatId);
     if (pendingPlaylistEarly) {
       const lower = text.toLowerCase().trim();
@@ -2652,6 +3571,7 @@ serve(async (req) => {
         lower === "/ping" ||
         lower.startsWith("/resend") ||
         lower.startsWith("/model");
+
       if (clearAndContinue) {
         await clearPlaylistConfirm(chatId);
         // fall through: one task + normal routing
@@ -2693,7 +3613,7 @@ serve(async (req) => {
         await clearPlaylistConfirm(chatId);
         const modelForPlaylist = (session.active_model === "grok" ? "grok" : "gemini") as "grok" | "gemini";
         try {
-          const out = await runPlaylistHubResearch(pendingPlaylistEarly.track_name, userVibe);
+          const out = await runPlaylistHubResearch(pendingPlaylistEarly.track_name, userVibe, chatId);
           await sendMessage(chatId, formatAssistantMessage(modelForPlaylist, out), {}, `task:${taskId}:playlist-result`);
         } catch (e) {
           const errStr = e instanceof Error ? e.message : String(e);
@@ -2853,44 +3773,394 @@ serve(async (req) => {
     // Send queued confirmation with task_id
     await sendMessage(chatId, `ð Queued: \`${taskId}\``, {}, `task:${taskId}:queued`);
 
-    // ââ Pending playlist confirmation: user replied to a vibe-check prompt ââ
-    {
-      const { data: pendingRow } = await supabase
-        .from("bot_settings")
-        .select("setting_value")
-        .eq("setting_key", `pending_playlist:${chatId}`)
-        .single();
-      if (pendingRow) {
-        const pending = JSON.parse(pendingRow.setting_value) as { track_name: string; vibe: string };
-        await supabase.from("bot_settings").delete().eq("setting_key", `pending_playlist:${chatId}`);
-        const userContext = text.toLowerCase().trim() === "yes" ? "" : text;
-        const trackLabel = pending.track_name + (userContext ? ` (context: ${userContext})` : "");
-        await sendMessage(chatId, `ð Searching playlist opportunities for *${pending.track_name}*â¦`, {}, `task:${taskId}:playlist-searching`);
-        await supabase.from("tasks").update({
-          status: "running",
-          selected_workflow: "find_playlist_opportunities",
-          result_json: { execution_lane: "lane1_do", progress_step: "playlist_confirmed", track_name: pending.track_name, user_context: userContext || null }
-        }).eq("id", taskId);
-        try {
-          await Promise.race([
-            executeAgenticLoop(chatId, `find playlist opportunities for ${trackLabel}`, {
-              taskId,
-              lane: "lane1_do",
-              allowTools: true,
-              workflowKey: "find_playlist_opportunities",
-              sessionModel: session.active_model as "grok" | "gemini" | "chatgpt"
-            }),
-            new Promise<never>((_, reject) => setTimeout(() => reject(new Error("TIMEOUT")), 55000))
-          ]);
-        } catch (err) {
-          const errMsg = (err as Error).message || "unknown";
-          const failResult = buildFailureResultJson({ execution_lane: "lane1_do" }, errMsg);
-          await supabase.from("tasks").update({ status: "failed", error: errMsg.slice(0, 300), result_json: failResult }).eq("id", taskId);
-          await sendMessage(chatId, `â Failed: \`${taskId}\` â ${errMsg.slice(0, 200)}`, {}, `task:${taskId}:failed`);
-        }
+    const modelPitch = (session.active_model === "grok" ? "grok" : "gemini") as "grok" | "gemini";
+
+    // ── Manual curator response → pitch_log ───────────────────────────
+    const plResp = text.match(/^playlist\s+(.+?)\s+responded\s*[—–-]\s*interested\s*$/i);
+    const plRej = text.match(/^playlist\s+(.+?)\s+rejected\s*$/i);
+    if (plResp || plRej) {
+      const lastRs = await getLastPlaylistResearch(chatId);
+      const trackForStatus = lastRs?.track_name?.trim() || "";
+      if (!trackForStatus) {
+        await sendMessage(
+          chatId,
+          formatAssistantMessage(modelPitch, "No recent research — run *find playlist opportunities for [track]* first."),
+          {},
+          `task:${taskId}:pitch-status-no-track`,
+        );
+        await supabase.from("tasks").update({ status: "succeeded", result_json: { shortcut: "pitch_status_no_track" } }).eq("id", taskId);
+        await sendMessage(chatId, `✅ Done: \`${taskId}\``, {}, `task:${taskId}:done`);
+        _currentTaskId = null;
         return new Response("ok");
       }
+      const namePart = (plResp ?? plRej)?.[1]?.trim() ?? "";
+      try {
+        const res = await callFanFuelHub("update-pitch-status", {
+          playlist_name: namePart,
+          track_name: trackForStatus,
+          status: plResp ? "responded" : "rejected",
+        });
+        const msg = typeof res?.message_to_user === "string" ? res.message_to_user : JSON.stringify(res ?? {});
+        await sendMessage(chatId, formatAssistantMessage(modelPitch, msg), {}, `task:${taskId}:pitch-manual-status`);
+      } catch (e) {
+        const errStr = e instanceof Error ? e.message : String(e);
+        await sendMessage(chatId, formatAssistantMessage(modelPitch, `❌ ${errStr}`), {}, `task:${taskId}:pitch-manual-err`);
+      }
+      await supabase.from("tasks").update({ status: "succeeded", result_json: { shortcut: "pitch_manual_status" } }).eq("id", taskId);
+      await sendMessage(chatId, `✅ Done: \`${taskId}\``, {}, `task:${taskId}:done`);
+      _currentTaskId = null;
+      return new Response("ok");
     }
+
+    // ── pitch all tier 1 (max 5, confirm) ─────────────────────────────
+    if (/^pitch\s+all\s+(?:tier\s*1|t1)\s*$/i.test(text.trim())) {
+      const lastBulk = await getLastPlaylistResearch(chatId);
+      if (!lastBulk?.ranked_playlist_ids?.length) {
+        await sendMessage(
+          chatId,
+          formatAssistantMessage(modelPitch, "No recent research found. Try: *find playlist opportunities for [track name]*"),
+          {},
+          `task:${taskId}:pitch-all-no-research`,
+        );
+        await supabase.from("tasks").update({ status: "succeeded", result_json: { shortcut: "pitch_all_no_research" } }).eq("id", taskId);
+        await sendMessage(chatId, `✅ Done: \`${taskId}\``, {}, `task:${taskId}:done`);
+        _currentTaskId = null;
+        return new Response("ok");
+      }
+      const allPl = await hubPlaylistBatch(lastBulk.ranked_playlist_ids);
+      const tier1 = allPl
+        .filter((p: { tier?: number; submission_method?: string }) =>
+          p.tier === 1 && !NON_BULK_PITCH_METHODS.has(String(p.submission_method || "").toLowerCase())
+        )
+        .slice(0, 5);
+      if (!tier1.length) {
+        await sendMessage(
+          chatId,
+          formatAssistantMessage(
+            modelPitch,
+            "No tier *1* pitchable targets in your last results (or all are algorithmic/distributor). Run research again or pitch by number.",
+          ),
+          {},
+          `task:${taskId}:pitch-all-empty`,
+        );
+        await supabase.from("tasks").update({ status: "succeeded", result_json: { shortcut: "pitch_all_empty" } }).eq("id", taskId);
+        await sendMessage(chatId, `✅ Done: \`${taskId}\``, {}, `task:${taskId}:done`);
+        _currentTaskId = null;
+        return new Response("ok");
+      }
+      const lines = tier1
+        .map((p: { playlist_name?: string; playlist_id: string; submission_method?: string }, i: number) =>
+          `${i + 1}. *${p.playlist_name ?? p.playlist_id}* — ${p.submission_method ?? "?"}`
+        )
+        .join("\n");
+      await setPendingPitchBulk(chatId, {
+        track_name: lastBulk.track_name,
+        playlist_ids: tier1.map((p: { playlist_id: string }) => p.playlist_id),
+        ts: new Date().toISOString(),
+      });
+      const bulkMsg = [
+        `📣 *Pitch all tier 1* (max 5)`,
+        ``,
+        `Track: *${lastBulk.track_name}*`,
+        ``,
+        lines,
+        ``,
+        `Reply *confirm all* to run these pitches sequentially, or *cancel*.`,
+      ].join("\n");
+      await sendMessage(chatId, formatAssistantMessage(modelPitch, bulkMsg), {}, `task:${taskId}:pitch-all-confirm`);
+      await supabase.from("tasks").update({
+        status: "succeeded",
+        result_json: { shortcut: "pitch_all_await_confirm", count: tier1.length },
+      }).eq("id", taskId);
+      await sendMessage(chatId, `✅ Done: \`${taskId}\``, {}, `task:${taskId}:done`);
+      _currentTaskId = null;
+      return new Response("ok");
+    }
+
+    // ── show pitch report ─────────────────────────────────────────────
+    if (/^(?:show\s+)?pitch\s+report$/i.test(text.trim())) {
+      const lastRep = await getLastPlaylistResearch(chatId);
+      if (!lastRep?.ranked_playlist_ids?.length) {
+        await sendMessage(
+          chatId,
+          formatAssistantMessage(modelPitch, "No recent research found. Try: *find playlist opportunities for [track name]*"),
+          {},
+          `task:${taskId}:pitch-report-empty`,
+        );
+      } else {
+        const playlists = await hubPlaylistBatch(lastRep.ranked_playlist_ids.slice(0, 20));
+        const repLines = playlists
+          .map((p: { playlist_name?: string; playlist_id: string; tier?: number; submission_method?: string }, i: number) => {
+            const tier = p.tier != null ? `T${p.tier}` : "?";
+            const method = p.submission_method ?? "—";
+            return `${i + 1}. *${p.playlist_name ?? p.playlist_id}* — ${tier} — ${method}`;
+          })
+          .join("\n");
+        const reportMsg = [
+          `📋 *Pitch report* (last search: *${lastRep.track_name}*)`,
+          ``,
+          repLines,
+          ``,
+          `Reply *pitch 1* … *pitch 20*, *pitch [name]*, or *pitch all tier 1*.`,
+        ].join("\n");
+        await sendMessage(chatId, formatAssistantMessage(modelPitch, reportMsg), {}, `task:${taskId}:pitch-report`);
+      }
+      await supabase.from("tasks").update({ status: "succeeded", result_json: { shortcut: "pitch_report" } }).eq("id", taskId);
+      await sendMessage(chatId, `✅ Done: \`${taskId}\``, {}, `task:${taskId}:done`);
+      _currentTaskId = null;
+      return new Response("ok");
+    }
+
+    // ── pitch status / my pitches ─────────────────────────────────────
+    if (/^(?:pitch\s+status|my\s+pitches)$/i.test(text.trim())) {
+      try {
+        const lastSt = await getLastPlaylistResearch(chatId);
+        const r = await callFanFuelHub("pitch-status", { track_name: lastSt?.track_name ?? "" });
+        const entries = r?.entries ?? [];
+        const cap = r?.summary?.email_pitches_last_24h;
+        let body: string;
+        if (!entries.length) {
+          body = "No pitches logged yet.";
+        } else {
+          const lines = entries.slice(0, 25).map((p: Record<string, string>) =>
+            `• ${p.playlist_id} — ${p.track_name} — ${p.status} (${p.method ?? "?"})`
+          ).join("\n");
+          body = `*Pitch log* (${entries.length})\n\n${lines}`;
+          if (typeof cap === "number") body += `\n\n📧 Email pitches (last 24h): ${cap}/10`;
+        }
+        await sendMessage(chatId, formatAssistantMessage(modelPitch, body), {}, `task:${taskId}:pitch-status`);
+      } catch (e) {
+        const errStr = e instanceof Error ? e.message : String(e);
+        await sendMessage(chatId, formatAssistantMessage(modelPitch, `❌ ${errStr}`), {}, `task:${taskId}:pitch-status-err`);
+      }
+      await supabase.from("tasks").update({ status: "succeeded", result_json: { shortcut: "pitch_status_cmd" } }).eq("id", taskId);
+      await sendMessage(chatId, `✅ Done: \`${taskId}\``, {}, `task:${taskId}:done`);
+      _currentTaskId = null;
+      return new Response("ok");
+    }
+
+    // ── pitch [n] / pitch [name] ──────────────────────────────────────
+    const pitchNumMatch = text.match(/^pitch\s+#?(\d+)\s*$/i);
+    const pitchNameMatch = !pitchNumMatch && /^pitch\s+(.+)$/i.exec(text.trim());
+    if (pitchNumMatch || pitchNameMatch) {
+      const lastOne = await getLastPlaylistResearch(chatId);
+      if (!lastOne?.ranked_playlist_ids?.length) {
+        await sendMessage(
+          chatId,
+          formatAssistantMessage(modelPitch, "No recent research found. Try: *find playlist opportunities for [track name]*"),
+          {},
+          `task:${taskId}:pitch-single-no-research`,
+        );
+        await supabase.from("tasks").update({ status: "succeeded", result_json: { shortcut: "pitch_single_no_research" } }).eq("id", taskId);
+        await sendMessage(chatId, `✅ Done: \`${taskId}\``, {}, `task:${taskId}:done`);
+        _currentTaskId = null;
+        return new Response("ok");
+      }
+      let playlistId: string | null = null;
+      if (pitchNumMatch) {
+        const idx = Number(pitchNumMatch[1]);
+        if (!Number.isFinite(idx) || idx < 1 || idx > lastOne.ranked_playlist_ids.length) {
+          await sendMessage(
+            chatId,
+            formatAssistantMessage(modelPitch, `Pick a number between 1 and ${lastOne.ranked_playlist_ids.length}.`),
+            {},
+            `task:${taskId}:pitch-bad-index`,
+          );
+          await supabase.from("tasks").update({ status: "succeeded", result_json: { shortcut: "pitch_bad_index" } }).eq("id", taskId);
+          await sendMessage(chatId, `✅ Done: \`${taskId}\``, {}, `task:${taskId}:done`);
+          _currentTaskId = null;
+          return new Response("ok");
+        }
+        playlistId = lastOne.ranked_playlist_ids[idx - 1];
+      } else if (pitchNameMatch) {
+        const q = pitchNameMatch[1].trim().toLowerCase();
+        const allNm = await hubPlaylistBatch(lastOne.ranked_playlist_ids);
+        const hit = allNm.find((p: { playlist_name?: string; playlist_id?: string }) =>
+          String(p.playlist_name ?? "").toLowerCase().includes(q) ||
+          String(p.playlist_id ?? "").toLowerCase().includes(q)
+        );
+        if (!hit) {
+          await sendMessage(
+            chatId,
+            formatAssistantMessage(modelPitch, `No playlist in your last results matches "${pitchNameMatch[1].trim()}". Try *show pitch report*.`),
+            {},
+            `task:${taskId}:pitch-name-miss`,
+          );
+          await supabase.from("tasks").update({ status: "succeeded", result_json: { shortcut: "pitch_name_miss" } }).eq("id", taskId);
+          await sendMessage(chatId, `✅ Done: \`${taskId}\``, {}, `task:${taskId}:done`);
+          _currentTaskId = null;
+          return new Response("ok");
+        }
+        playlistId = hit.playlist_id;
+      }
+      if (playlistId) {
+        try {
+          const res = await callFanFuelHub("execute-pitch", {
+            playlist_id: playlistId,
+            track_name: lastOne.track_name,
+          });
+          if (res?.action_taken === "tier_gate" && res?.ok === false) {
+            await setPendingPitchTier3(chatId, {
+              playlist_id: playlistId,
+              track_name: lastOne.track_name,
+              ts: new Date().toISOString(),
+            });
+          }
+          const msg = typeof res?.message_to_user === "string" ? res.message_to_user : JSON.stringify(res ?? {});
+          await sendMessage(chatId, formatAssistantMessage(modelPitch, msg), {}, `task:${taskId}:pitch-one`);
+        } catch (e) {
+          const errStr = e instanceof Error ? e.message : String(e);
+          await sendMessage(chatId, formatAssistantMessage(modelPitch, `❌ ${errStr}`), {}, `task:${taskId}:pitch-one-err`);
+        }
+      }
+      await supabase.from("tasks").update({ status: "succeeded", result_json: { shortcut: "pitch_single" } }).eq("id", taskId);
+      await sendMessage(chatId, `✅ Done: \`${taskId}\``, {}, `task:${taskId}:done`);
+      _currentTaskId = null;
+      return new Response("ok");
+    }
+
+    // Normalized text for intent routing (auto-promote + autonomous mode). Must run before Lane 2.
+    // lowerText already declared in pitch routing section above
+
+    // ══════════════════════════════════════════════════════════
+    // PLAYLIST INTENT — deterministic (NO executeAgenticLoop / NO Lane 2 Grok)
+    // Natural language: extract track → setPlaylistConfirm → vibe question → return.
+    // /do find_playlist_opportunities is handled later in the /do → Lane 1 path.
+    // ══════════════════════════════════════════════════════════
+    const findPlaylistRequested =
+      /\bfind\s+playlist\s+opportunities\b/i.test(lowerText) ||
+      /\bfind\s+a\s+playlist\s+for\s+/i.test(lowerText) ||
+      /\bfind\s+playlist\s+for\s+/i.test(lowerText) ||
+      /\bsearch\s+playlist\s+opportunities\s+for\s+/i.test(lowerText) ||
+      /\bplaylist\s+opportunities\s+for\s+/i.test(lowerText) ||
+      (/\bplaylist\s+opportunities\b/i.test(lowerText) && /\bfor\s+\S+/i.test(lowerText)) ||
+      /\bfind\s+playlists?\s+for\s+/i.test(lowerText);
+
+    if (
+      findPlaylistRequested &&
+      IMPLEMENTED_WORKFLOW_KEYS.has("find_playlist_opportunities") &&
+      !lowerText.startsWith("/do")
+    ) {
+      const conv = await buildConversationContext(chatId);
+      const trackNl = extractPlaylistTrackName(text, conv);
+      const modelNl = (session.active_model === "grok" ? "grok" : "gemini") as "grok" | "gemini";
+
+      if (trackNl) {
+        const inferredNl = inferVibeFromTrack(trackNl);
+        console.log("[PLAYLIST_NL] execute-first (deterministic)", { taskId, track: trackNl, vibe: inferredNl });
+        const immediate = await runPlaylistHubResearch(trackNl, inferredNl, chatId);
+        await sendMessage(chatId, formatAssistantMessage(modelNl, immediate), {}, `task:${taskId}:playlist-immediate`);
+        await supabase.from("tasks").update({
+          status: "succeeded",
+          result_json: {
+            execution_lane: "playlist_nl",
+            shortcut: "playlist_execute_first_natural",
+            track: trackNl,
+            inferred_vibe: inferredNl,
+          },
+        }).eq("id", taskId);
+        await sendMessage(chatId, `✅ Done: \`${taskId}\``, {}, `task:${taskId}:done`);
+        _currentTaskId = null;
+        return new Response("ok");
+      }
+
+      const needTrack = [
+        `🎧 *Playlist opportunities*`,
+        ``,
+        `I need a *track name* in your message.`,
+        `Example: *Find playlist opportunities for Meditate by Fendi Frost*.`,
+      ].join("\n");
+      await sendMessage(chatId, formatAssistantMessage(modelNl, needTrack), {}, `task:${taskId}:playlist-need-track`);
+      await supabase.from("tasks").update({
+        status: "succeeded",
+        result_json: { execution_lane: "playlist_nl", shortcut: "playlist_need_track_natural" },
+      }).eq("id", taskId);
+      await sendMessage(chatId, `✅ Done: \`${taskId}\``, {}, `task:${taskId}:done`);
+      _currentTaskId = null;
+      return new Response("ok");
+    }
+
+    // ══════════════════════════════════════════════════════════
+    // INTENT-BASED LANE 1 AUTO-PROMOTION (early — before shortcuts/Lane 2)
+    // "Run / execute / start …" → other workflows (playlist NL handled above).
+    // ══════════════════════════════════════════════════════════
+    const EXECUTION_INTENT_PREFIXES = ["run ", "execute ", "trigger ", "start "];
+    const hasExecutionIntent = EXECUTION_INTENT_PREFIXES.some(p => lowerText.startsWith(p));
+
+    let autoPromotedWorkflow: WorkflowEntry | undefined;
+    const newClientIntent = isNewClientCreditIntent(lowerText);
+    const existingClientIntent = isExistingClientProgressIntent(lowerText);
+    const taxIntent = isTaxIntent(lowerText);
+    const creditIntent =
+      /\banalyze\b.*\bcredit\b/i.test(lowerText) ||
+      /\bcredit strategy\b/i.test(lowerText) ||
+      /\bdispute strategy\b/i.test(lowerText);
+    const playlistPitchIntent =
+      /\bresearch playlists?\b/i.test(lowerText) ||
+      /\bgenerate pitch\b/i.test(lowerText) ||
+      /\bplaylist pitch workflow\b/i.test(lowerText);
+    // Deterministic business routing:
+    // - new/blank client file build => Credit Compass
+    // - existing client progress/update => Credit Guardian strategy path
+    // - tax operations => CC Tax
+    if (taxIntent && IMPLEMENTED_WORKFLOW_KEYS.has("query_cc_tax")) {
+      autoPromotedWorkflow = SYNTHETIC_QUERY_CC_TAX;
+    } else if (newClientIntent && IMPLEMENTED_WORKFLOW_KEYS.has("query_credit_compass")) {
+      autoPromotedWorkflow = SYNTHETIC_QUERY_CREDIT_COMPASS;
+    } else if ((existingClientIntent || creditIntent) && IMPLEMENTED_WORKFLOW_KEYS.has("analyze_credit_strategy")) {
+      autoPromotedWorkflow = SYNTHETIC_ANALYZE_CREDIT_STRATEGY;
+    } else if (playlistPitchIntent && IMPLEMENTED_WORKFLOW_KEYS.has("playlist_pitch_workflow")) {
+      autoPromotedWorkflow = SYNTHETIC_PLAYLIST_PITCH_WORKFLOW;
+    }
+
+    if (hasExecutionIntent) {
+      const intentArg = lowerText.replace(/^(run|execute|trigger|start)\s+/, "").trim();
+      const intentWorkflows = await fetchWorkflowRegistry();
+      const { chosen: intentChosen } = _matchWorkflows(intentArg, intentWorkflows);
+      if (intentChosen && IMPLEMENTED_WORKFLOW_KEYS.has(intentChosen.key)) {
+        autoPromotedWorkflow = intentChosen;
+      }
+      if (!intentChosen && taxIntent && IMPLEMENTED_WORKFLOW_KEYS.has("query_cc_tax")) {
+        autoPromotedWorkflow = SYNTHETIC_QUERY_CC_TAX;
+      } else if (!intentChosen && newClientIntent && IMPLEMENTED_WORKFLOW_KEYS.has("query_credit_compass")) {
+        autoPromotedWorkflow = SYNTHETIC_QUERY_CREDIT_COMPASS;
+      } else if (!intentChosen && (existingClientIntent || creditIntent) && IMPLEMENTED_WORKFLOW_KEYS.has("analyze_credit_strategy")) {
+        autoPromotedWorkflow = SYNTHETIC_ANALYZE_CREDIT_STRATEGY;
+      } else if (!intentChosen && playlistPitchIntent && IMPLEMENTED_WORKFLOW_KEYS.has("playlist_pitch_workflow")) {
+        autoPromotedWorkflow = SYNTHETIC_PLAYLIST_PITCH_WORKFLOW;
+      }
+    }
+
+    if (autoPromotedWorkflow) {
+      console.log("[AUTO_PROMOTE] Routing to Lane 1", {
+        taskId,
+        workflowKey: autoPromotedWorkflow.key,
+      });
+      await supabase.from("tasks").update({
+        status: "running",
+        selected_workflow: autoPromotedWorkflow.key,
+        result_json: { execution_lane: "lane1_do", progress_step: "lane1_auto_promoted", auto_promoted: true },
+      }).eq("id", taskId);
+      try {
+        await Promise.race([
+          executeAgenticLoop(chatId, text, {
+            taskId,
+            lane: "lane1_do",
+            allowTools: true,
+            workflowKey: autoPromotedWorkflow.key,
+            sessionModel: session.active_model as "grok" | "gemini" | "chatgpt",
+          }),
+          new Promise<never>((_, reject) => setTimeout(() => reject(new Error("TIMEOUT")), 55000)),
+        ]);
+      } catch (err) {
+        const errMsg = (err as Error).message || "unknown";
+        const failResult = buildFailureResultJson({ execution_lane: "lane1_do" }, errMsg);
+        await supabase.from("tasks").update({ status: "failed", error: errMsg.slice(0, 300), result_json: failResult }).eq("id", taskId);
+        await sendMessage(chatId, `❌ Failed: \`${taskId}\` — ${errMsg.slice(0, 200)}`, {}, `task:${taskId}:failed`);
+      }
+      return new Response("ok");
+    }
+
 
     // /start still shows the help menu
     if (text === "/start") {
@@ -3266,139 +4536,9 @@ serve(async (req) => {
       return new Response("ok");
     }
 
-    // ââââââââââââââââââââââââââââââââââââââââââââââââââââââââââ
-    // INTENT-BASED LANE 1 AUTO-PROMOTION
-    // Natural language like "run system status" auto-routes to Lane 1
-    // ââââââââââââââââââââââââââââââââââââââââââââââââââââââââââ
-    const EXECUTION_INTENT_PREFIXES = ["run ", "execute ", "trigger ", "start ", "pull up ", "check ", "analyze ", "get me ", "show me ", "do "];
-    lowerText = text.toLowerCase().trim();
-    const hasExecutionIntent = EXECUTION_INTENT_PREFIXES.some(p => lowerText.startsWith(p));
-    const findPlaylistMatch =
-      /\bfind\s+playlist\s+opportunities\b/i.test(lowerText) ||
-      /\bsearch\s+playlist\s+opportunities\s+for\s+/i.test(lowerText) ||
-      /\bplaylist\s+opportunities\s+for\s+/i.test(lowerText) ||
-      (/\bplaylist\s+opportunities\b/i.test(lowerText) && /\bfor\s+\S+/i.test(lowerText)) ||
-      /\bfind\s+playlists?\s+for\s+/i.test(lowerText) ||
-        /\bpitch\b.*\bplaylists?\b/i.test(lowerText) ||
-          /\bpitch\b.*\bto\b/i.test(lowerText) ||
-            /\bresearch\s+playlists?\b/i.test(lowerText) ||
-              /\bgenerate\s+pitch\b/i.test(lowerText) ||
-                /\bplaylist\s+pitch/i.test(lowerText);
-    // ââ Credit analysis intent matching ââ
-    const creditAnalysisMatch =
-      /\b(credit\s*report|credit\s*analysis|analyze\s*credit|check\s*credit|run\s*(the\s+)?(full\s+)?analysis|pull\s*up.*credit|credit.*analyz)\b/i.test(lowerText);
-    const clientNameMatch = text.match(/\b([A-Z][a-z]+\s+[A-Z][a-z]+)(?:'s)?\b/);
-    const creditClientName = clientNameMatch ? clientNameMatch[1] : null;
-
-    let autoPromotedWorkflow: WorkflowEntry | undefined;
-    if (creditAnalysisMatch && IMPLEMENTED_WORKFLOW_KEYS.has("analyze_client_credit")) {
-      // ââ AUTO-PROMOTE: Credit analysis â lane_do ââ      const creditWorkflowKey = "analyze_client_credit";
-      const creditUserMsg = creditClientName
-        ? `Analyze credit for ${creditClientName}. Run the full pipeline: sync Drive, ingest documents, and run Credit Guardian analysis.`
-        : text;
-      await supabase.from("tasks").update({
-        status: "running",
-        selected_workflow: creditWorkflowKey,
-        result_json: { execution_lane: "lane_do", progress_step: "credit_auto_promoted", auto_promoted: true, client_name: creditClientName },
-      }).eq("id", taskId);
-      try {
-        await Promise.race([
-          executeAgenticLoop(chatId, creditUserMsg, {
-            taskId,
-            lane: "lane1_do",
-            allowTools: true,
-            workflowKey: creditWorkflowKey,
-            sessionModel: (session?.active_model === "grok" ? "grok" : session?.active_model === "gemini" ? "gemini" : "chatgpt") as "grok" | "gemini" | "chatgpt",
-          }),
-          new Promise<never>((_, reject) => setTimeout(() => reject(new Error("TIMEOUT")), 150_000)),
-        ]);
-      } catch (err) {
-        const errMsg = err instanceof Error ? err.message : "unknown";
-        const failResult = buildFailureResultJson({ execution_lane: "lane1_do" }, errMsg);
-        await supabase.from("tasks").update({ status: "failed", error: errMsg.slice(0, 500), result_json: failResult }).eq("id", taskId);
-        await sendMessage(chatId, `\u274C Failed: ${taskId} â ${errMsg.slice(0, 200)}`, `task|${taskId}|failed`);
-      }
-      _currentTaskId = null;
-      return new Response("ok");
-    }
-
-    if (findPlaylistMatch) {
-      // ââ TWO-STEP CONVERSATIONAL CONFIRMATION ââ
-      // Instead of auto-executing, store pending + send vibe-check message
-      const forMatch = text.match(/\bfor\s+(.+)/i);
-      const trackName = (forMatch ? forMatch[1] : "").trim() || "your track";
-      const vibeGuesses: Record<string, string> = {
-        default: "chill / melodic",
-      };
-      const vibe = vibeGuesses.default;
-      console.log("[PLAYLIST_VIBE_CHECK] Storing pending playlist search", { taskId, trackName, vibe });
-
-      await supabase.from("bot_settings").upsert({
-        setting_key: `pending_playlist:${chatId}`,
-        setting_value: JSON.stringify({ track_name: trackName, vibe }),
-        updated_at: new Date().toISOString(),
-      }, { onConflict: "setting_key" });
-
-      await sendMessage(chatId, [
-        `ðµ Got it â searching playlist opportunities for *${trackName}*.`,
-        ``,
-        `ðµ To find the right playlists for *${trackName}*, tell me:`,
-        ``,
-        `1ï¸â£ *Genre/subgenre* â e.g. chill trap, drill, conscious rap, west coast`,
-        `2ï¸â£ *Similar artists or features* â e.g. Larry June, FBG Duck`,
-        `3ï¸â£ *Mood/theme* â e.g. spiritual, street, introspective, healing`,
-        ``,
-        `Just reply with whatever fits. More detail = better results.`,
-      ].join("\n"), {}, `task:${taskId}:playlist-vibe-check`);
-
-      await supabase.from("tasks").update({
-        status: "succeeded",
-        selected_workflow: "find_playlist_opportunities",
-        result_json: { execution_lane: "lane1_do", progress_step: "playlist_vibe_check_sent", track_name: trackName, vibe }
-      }).eq("id", taskId);
-      await sendMessage(chatId, `â Done: \`${taskId}\``, {}, `task:${taskId}:done`);
-      return new Response("ok");
-    }
-    if (!autoPromotedWorkflow && hasExecutionIntent) {
-      const intentArg = lowerText.replace(/^(run|execute|trigger|start)\s+/, "").trim();
-      const intentWorkflows = await fetchWorkflowRegistry();
-      const { chosen: intentChosen } = _matchWorkflows(intentArg, intentWorkflows);
-      if (intentChosen && IMPLEMENTED_WORKFLOW_KEYS.has(intentChosen.key)) {
-        autoPromotedWorkflow = intentChosen;
-      }
-    }
-    if (autoPromotedWorkflow) {
-      await supabase.from("tasks").update({
-        status: "running",
-        selected_workflow: autoPromotedWorkflow.key,
-        result_json: { execution_lane: "lane1_do", progress_step: "lane1_auto_promoted", auto_promoted: true }
-      }).eq("id", taskId);
-      try {
-        await Promise.race([
-          executeAgenticLoop(chatId, text, {
-            taskId,
-            lane: "lane1_do",
-            allowTools: true,
-            workflowKey: autoPromotedWorkflow.key,
-            sessionModel: session.active_model as "grok" | "gemini" | "chatgpt"
-          }),
-          new Promise<never>((_, reject) => setTimeout(() => reject(new Error("TIMEOUT")), 55000))
-        ]);
-      } catch (err) {
-        const errMsg = (err as Error).message || "unknown";
-        const failResult = buildFailureResultJson({ execution_lane: "lane1_do" }, errMsg);
-        await supabase.from("tasks").update({ status: "failed", error: errMsg.slice(0, 300), result_json: failResult }).eq("id", taskId);
-        await sendMessage(chatId, `â Failed: \`${taskId}\` â ${errMsg.slice(0, 200)}`, {}, `task:${taskId}:failed`);
-      }
-      return new Response("ok");
-    }
-
-    // Auto-route FanFuel playlist phrases to Lane 1
-
-
-    // ââââââââââââââââââââââââââââââââââââââââââââââââââââââââââ
-    // LANE 1 â EXECUTION MODE (triggered by /do <workflow>)
-    // ââââââââââââââââââââââââââââââââââââââââââââââââââââââââââ
+    // ══════════════════════════════════════════════════════════
+    // LANE 1 — EXECUTION MODE (triggered by /do <workflow>)
+    // ══════════════════════════════════════════════════════════
 
     if (text.toLowerCase().startsWith("/do")) {
       const doArg = text.slice(3).trim(); // everything after "/do"
@@ -3425,9 +4565,9 @@ serve(async (req) => {
 
       if (matches.length === 0) {
         const noMatch = _formatNoMatch(workflows);
-        await sendMessage(chatId, `ð« No executable workflow found for: \`${doArg}\`\n\n${noMatch}`, {}, `task:${taskId}:no-match`);
-            await supabase.from("tasks").update({ status: "succeeded", result_json: { action: "do_no_match", input: doArg } }).eq("id", taskId);
-        await sendMessage(chatId, `â Done: \`${taskId}\``, {}, `task:${taskId}:done`);
+        await sendMessage(chatId, `🚫 No executable workflow found for: \`${doArg}\`\n\n${noMatch}`, {}, `task:${taskId}:no-match`);
+        await supabase.from("tasks").update({ status: "succeeded", result_json: { action: "do_no_match", input: doArg } }).eq("id", taskId);
+        await sendMessage(chatId, `✅ Done: \`${taskId}\``, {}, `task:${taskId}:done`);
         _currentTaskId = null;
         return new Response("ok");
       }
@@ -3745,15 +4885,26 @@ async function callFanFuelHub(functionName: string, body: any) {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
+      // FanFuel Hub's `control-center-api` authenticates using `x-api-key`.
+      "x-api-key": key,
+      // Keep these for compatibility with other deployments/endpoints.
       "Authorization": `Bearer ${key}`,
       "apikey": key,
         "x-api-key": key,
     },
     body: JSON.stringify(body),
   });
+  const raw = await resp.text();
   if (!resp.ok) {
-    const err = await resp.text();
-    throw new Error(`FanFuel Hub error ${resp.status}: ${err.slice(0, 200)}`);
+    throw new Error(`FanFuel Hub error ${resp.status}: ${raw.slice(0, 500)}`);
   }
-  return resp.json();
+  // Avoid opaque JSON parse errors: Hub must return JSON; if not, surface first bytes for debugging.
+  try {
+    return raw.length ? JSON.parse(raw) : {};
+  } catch (e) {
+    const preview = raw.slice(0, 120).replace(/\s+/g, " ");
+    throw new Error(
+      `FanFuel Hub returned non-JSON (HTTP ${resp.status}): ${preview}${raw.length > 120 ? "…" : ""}`
+    );
+  }
 }

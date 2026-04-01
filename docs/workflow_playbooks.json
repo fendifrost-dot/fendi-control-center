@@ -402,6 +402,49 @@
         "tool_execution_logs": "1 row with status='succeeded' and response_json containing full breakdown"
       },
       "approval_points": []
+    },
+    {
+      "workflow_name": "credit_analysis_and_disputes",
+      "trigger_examples": [
+        "run full credit analysis",
+        "analyze credit and generate disputes",
+        "credit pipeline"
+      ],
+      "preconditions": ["Client exists in Credit Guardian", "ANTHROPIC_API_KEY configured"],
+      "steps": [
+        { "step": 1, "action": "trigger_drive_sync or ingest_drive_clients to ensure latest docs are synced" },
+        { "step": 2, "action": "Execute analyze_credit_strategy(client_id or client_name)" },
+        { "step": 3, "action": "Execute generate_dispute_letter(client_id, dispute_item) for selected high-priority disputes" },
+        { "step": 4, "action": "Execute send_dispute_letter(letter_id) after operator approval" }
+      ],
+      "stop_conditions": ["Analysis generated and at least one dispute letter draft produced"],
+      "safe_failure_behavior": "If client cannot be resolved, return actionable error and request client_id or better client_name.",
+      "evidence_produced": {
+        "credit_analyses": "1+ rows with analysis_json and status",
+        "dispute_letters": "1+ rows with drafted letter content"
+      },
+      "approval_points": ["send_dispute_letter requires explicit confirmation"]
+    },
+    {
+      "workflow_name": "playlist_pitch_workflow",
+      "trigger_examples": [
+        "research playlists and pitch",
+        "run playlist pitch workflow",
+        "generate and send playlist pitch"
+      ],
+      "preconditions": ["OPENAI_API_KEY configured", "FANFUEL_HUB_URL/FANFUEL_HUB_KEY configured for enrichment"],
+      "steps": [
+        { "step": 1, "action": "Execute research_playlists(track_name, genre, mood)" },
+        { "step": 2, "action": "Execute generate_pitch(playlist_id, track_id)" },
+        { "step": 3, "action": "Execute send_pitch(pitch_id) after operator approval" }
+      ],
+      "stop_conditions": ["Playlist research produced and pitch draft stored"],
+      "safe_failure_behavior": "If playlist context is unavailable, still return GPT-generated draft and mark integration data missing.",
+      "evidence_produced": {
+        "playlist_research": "1+ rows with results_json",
+        "pitch_drafts": "1+ rows with email subject/body"
+      },
+      "approval_points": ["send_pitch requires explicit confirmation"]
     }
   ]
 }

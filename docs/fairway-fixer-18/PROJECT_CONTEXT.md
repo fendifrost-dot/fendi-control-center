@@ -1,75 +1,70 @@
-# PROJECT_CONTEXT — fairway-fixer-18 (Credit Guardian / Credit Compass)
+# Fairway Fixer — project context (for humans & Cursor)
 
-> **Mirror location:** `fendi-control-center/docs/fairway-fixer-18/PROJECT_CONTEXT.md`
-> Keep both copies identical. If you edit one, copy to the other.
+> **Names:** This repo is **Credit Guardian / Fairway Fixer** in code and **Credit Compass** in some Lovable labels — **same project** (rename/rebrand, not a separate app).  
+> **Sync:** A duplicate used for GitHub sync from the Control Center repo lives at **`fendi-control-center/docs/fairway-fixer-18/PROJECT_CONTEXT.md`**. Keep this file and **`fairway-fixer-18/PROJECT_CONTEXT.md`** (repo root) in lockstep; see `fendi-control-center/docs/CLAUDE_HANDOFF_PROMPT.md`.
 
----
+Forensic-grade **evidence ledger and operator console** for documenting credit-file disputes and bureau/data-furnisher correspondence. This is not a “credit repair bot”; the operator remains in control.
 
-## Identity
+## Product philosophy
+1. **Operator authority** — No automated recommendations, workflow auto-advancement, or AI interpretation that replaces judgment.
+2. **Forensic ledger** — Timeline events are evidence; preserve provenance and ambiguity (`raw_line`, `date_is_unknown`).
+3. **Transparent errors** — Null/invalid sources appear as placement issues; nothing is silently dropped.
+4. **AI as assist only** — Parsing (`parse-with-ai`) and **Response Analyzer** letter drafting assist the operator; all outputs require review before sending.
+5. **Source fidelity** — Evidence stays tied to its source (bureau, regulator, creditor bucket, etc.); no merged “all bureaus” views that obscure origin.
+6. **Auditing** — Source corrections and client deletions should leave audit trails where the schema supports it.
 
-- **GitHub repo:** `fendifrost-dot/fairway-fixer-18`
-- **Product names:** **Credit Guardian** (original), **Credit Compass** (Lovable display/rebrand) — same codebase, same Supabase project.
-- **Supabase project ID:** `gflvvzkiuleeochqcdeb`
-- **Lovable project ID:** `f7f8be84-44ea-47da-b039-0c5ea8b28e2c`
+## Stack
+- Vite, React, TypeScript, Tailwind, shadcn/ui, TanStack Query, Supabase (auth + RLS + edge functions).
 
----
+## Key files
+| Area | Path |
+|------|------|
+| Domain types | `src/types/operator.ts` |
+| DB-facing types | `src/types/database.ts` |
+| Client workspace | `src/pages/ClientDetail.tsx` |
+| Import engine | `src/components/operator/ChatGPTImport.tsx` |
+| Evidence timeline | `src/components/operator/EvidenceTimeline/index.tsx` |
+| Timeline CRUD + `raw_line` enforcement | `src/hooks/useTimelineEvents.ts` |
+| Plain-text smart import | `src/lib/smartImport.ts` |
+| Structured parser | `src/lib/parser/index.ts` |
+| Auth | `src/contexts/AuthContext.tsx` |
+| Cross-project API | `supabase/functions/cross-project-api/index.ts` (shared logic: `supabase/functions/_shared/creditGuardianApi.ts`) |
+| Alias entrypoint | `supabase/functions/control-center-api/index.ts` — same behavior as `cross-project-api` for older hub URLs |
+| AI parse assist | `supabase/functions/parse-with-ai/index.ts` |
+| Bureau response → draft letter | `supabase/functions/analyze-bureau-response/index.ts` |
+| Document text extraction (PDF/DOCX/image OCR) | `src/lib/responseDocumentExtract.ts` |
+| Evidence bundling for analyzer | `src/lib/bureauResponseFacts.ts` |
+| Analyzer UI | `src/components/operator/ResponseAnalyzerPanel.tsx` |
 
-## Edge Functions
+## Data rules
+- `timeline_events.event_kind` (lowercase): `action` \| `response` \| `outcome` \| `note` \| `draft` (and drafts may use `is_draft`).
+- `timeline_events.category`: PascalCase (`Action`, `Response`, `Outcome`, `Note`).
+- Evidence timeline query excludes drafts and restricts `event_kind` to action/response/outcome/note.
+- `Creditor` is a broad bucket; company names live in text fields, not the enum.
+- `matters` → `clients` may lack an FK in DB; joins use explicit selects; TypeScript may use `as unknown` casts.
 
-| Function | Purpose | Auth | Called by |
-|----------|---------|------|-----------|
-| **`cross-project-api`** | Primary API for Control Center. Actions: `get_clients`, `get_client_detail`, `update_client_record`, `get_documents`, `get_recent_activity`, `import_timeline_events`. | `x-api-key` = `CREDIT_GUARDIAN_KEY` | Control Center (`telegram-webhook`, `ingest-drive-clients`) |
-| **`control-center-api`** | Alias — **same Deno handler** as `cross-project-api` via `_shared/creditGuardianApi.ts` | `x-api-key` = `CREDIT_GUARDIAN_KEY` | Legacy callers (if any) |
-| **`parse-with-ai`** | AI credit event parsing via Lovable gateway (Gemini) | JWT (validated internally) | App frontend |
-| **`project-stats`** | Dashboard statistics for the operator console | None (public) | App frontend |
-| **`run-probe`** | RLS diagnostic probes | JWT (forwarded) | App frontend (admin) |
+## Edge functions (summary)
+| Function | Role |
+|----------|------|
+| `parse-with-ai` | Structure unrouted lines into timeline suggestions (JWT; default `verify_jwt` unless overridden in `supabase/config.toml`). |
+| `analyze-bureau-response` | Combine masked bureau response text + ledger excerpts → draft letter JSON (`verify_jwt = true` in config). |
+| `cross-project-api` / `control-center-api` | Same handler (`_shared/creditGuardianApi.ts`). Fendi Control Hub + Telegram; `x-api-key` === `CREDIT_GUARDIAN_KEY`. Service role — keep key secret. Actions include `import_timeline_events` (Drive ingest), `get_clients`, `get_client_detail`, etc. |
+| `project-stats` | Dashboard stats; `verify_jwt = false`. |
+| `run-probe` | RLS diagnostic: matters insert probe under the caller’s JWT (`verify_jwt` follows project defaults). |
 
-### Shared module
+## Client file URL tabs
+- `/clients/:id` — Evidence & notes (default).
+- `/clients/:id?tab=inbox` — Import & letters (deep link; shareable).
 
-`supabase/functions/_shared/creditGuardianApi.ts` — contains the unified handler for both `cross-project-api` and `control-center-api`. All actions route through here.
+## Deploying the Response Analyzer edge function
+From the repo root (with Supabase CLI logged in):
 
----
+`supabase functions deploy analyze-bureau-response`
 
-## Key Tables
+Requires the same `LOVABLE_API_KEY` secret as `parse-with-ai` (Lovable AI gateway).
 
-| Table | Purpose |
-|-------|---------|
-| `clients` | Client records (`legal_name`, `preferred_name`, contact info) |
-| `timeline_events` | Credit events per client. Columns: `id`, `client_id`, `event_date`, `category` (enum: Action/Note/Outcome/Response), `source` (enum: AG/BBB/CFPB/etc.), `title`, `summary`, `details`, `event_kind`, `date_is_unknown`, `raw_line`, `is_draft`, `related_accounts`, `created_at` |
-| `documents` | Uploaded/linked documents per client |
-| `tasks` | Open tasks for clients |
-| `assessments` | Credit assessments |
+## Testing
+`npm test` / `npx vitest run` — parser, smart import, import routing, JSON import, regressions, deletion, bureau evidence helpers, etc.
 
-### Enum types
-
-- **`event_category`:** Action, Note, Outcome, Response
-- **`event_source`:** AG, BBB, CFPB, ChexSystems, CoreLogic, Creditor, Equifax, EWS, Experian, FTC, Innovis, LexisNexis, NCTUE, Other, Sagestream, TransUnion
-
----
-
-## Environment Variables (Supabase secrets)
-
-- `CREDIT_GUARDIAN_KEY` — shared secret; must match what Control Center sends in `x-api-key` header
-- `SUPABASE_SERVICE_ROLE_KEY` — admin DB access for edge functions
-- `LOVABLE_API_KEY` — for `parse-with-ai` Gemini gateway
-
----
-
-## Product Rules
-
-1. **Credit Compass = this repo.** Do not create a separate repo or project for Credit Compass.
-2. **Auth is `x-api-key`**, not Bearer, for cross-project calls from Control Center. The `query_credit_compass` tool in Control Center currently uses Bearer and may 401 — this is a known issue (see onboarding doc §3).
-3. **`import_timeline_events`** is the action Control Center uses to push Drive-extracted events. It validates enums, handles null dates via `date_is_unknown`, and batch-inserts in groups of 50.
-4. **Deploy via Lovable** after committing to GitHub. Code changes go through GitHub web editor, not Lovable.
-
----
-
-## Recent Fixes (March 2026)
-
-- **`import_timeline_events` action added** to `cross-project-api` (was missing entirely — broke Drive→CG pipeline)
-- **Schema alignment** — removed non-existent columns (`confidence`, `source_file`, `drive_file_id`), added required NOT NULL fields (`date_is_unknown`, `raw_line`, `is_draft`), validated enum types
-- Both fixes committed and deployed via Lovable
-
----
-
-*Keep this file in sync with `fendi-control-center/docs/fairway-fixer-18/PROJECT_CONTEXT.md`.*
+## Guardrails (“what not to build”)
+Automated dispute strategy, undisclosed AI decisions, CRM/sales features, aggregated cross-bureau views that hide source, or any feature that removes the operator from the loop.

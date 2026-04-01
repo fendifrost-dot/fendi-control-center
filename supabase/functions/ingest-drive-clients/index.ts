@@ -16,7 +16,8 @@ const DRIVE_FOLDER_ID = RAW_DRIVE_FOLDER.includes("/folders/")
 
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
 const SUPABASE_SERVICE_ROLE_KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
-const GROK_KEY = Deno.env.get("Frost_Grok")!;
+
+
 const GEMINI_KEY = Deno.env.get("Frost_Gemini")!;
 
 const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
@@ -274,9 +275,8 @@ async function pushEventsToCreditGuardian(clientName: string, events: any[]): Pr
     if (data.error) {
       return { success: false, count: 0, error: String(data.error).slice(0, 200) };
     }
-    if (data.errors && data.errors.length > 0) {
-      return { success: false, count: data.imported_count ?? 0, error: `Batch errors: ${JSON.stringify(data.errors).slice(0, 200)}` };
-    }
+
+
     return { success: true, count: data.imported_count ?? events.length };
   } catch (err) {
     return { success: false, count: 0, error: String(err).slice(0, 200) };

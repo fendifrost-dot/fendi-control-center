@@ -58,7 +58,7 @@ Open GitHub → **Compare & pull request** → `handoff/claude-docs` into `main`
 
 2. **Lovable:** Open the project linked to that GitHub repo; confirm the new commit synced; let the app **build/deploy** if required.
 
-3. **Supabase edge functions:** Deploy changed functions from Lovable's Cloud/Supabase UI or:
+3. **Supabase edge functions:** Deploy changed functions from Lovable’s Cloud/Supabase UI or:
 
    ```bash
    supabase functions deploy <function-name>
@@ -83,7 +83,7 @@ If you only have access to **fendi-control-center** in an agent session, commit 
 
 ---
 
-## Full audit reference (local path on user's Mac)
+## Full audit reference (local path on user’s Mac)
 
 `Documents/Claude/Projects/Control Hub/FENDI_CONTROL_HUB_FULL_AUDIT_2026-03-29.md`
 

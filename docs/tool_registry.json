@@ -633,6 +633,112 @@
       "approval_mechanism": null,
       "destructive": false,
       "source_line": 652
+    },
+    {
+      "tool_name": "analyze_credit_strategy",
+      "purpose": "Fetches client credit context and generates prioritized dispute strategy via Claude.",
+      "when_to_use": "User asks to analyze credit strategy for a client.",
+      "required_args": {},
+      "optional_args": {
+        "client_id": { "type": "string", "description": "Client UUID" },
+        "client_name": { "type": "string", "description": "Client name lookup if UUID is unknown" }
+      },
+      "returns": "JSON with analysis_id, priority_disputes, bureau_strategies, risk_flags, and next_steps",
+      "side_effects": "write (creates credit_analyses row)",
+      "permissions_secrets_used": ["SUPABASE_URL", "SUPABASE_SERVICE_ROLE_KEY", "ANTHROPIC_API_KEY", "CREDIT_GUARDIAN_KEY"],
+      "failure_modes": [
+        { "error": "Client could not be resolved", "agent_response": "Returns validation error requesting client_id or more specific client_name" }
+      ],
+      "logging": { "tool_execution_logs": "1 row: attempted → succeeded or failed" },
+      "approval_required": false,
+      "approval_mechanism": null,
+      "destructive": false
+    },
+    {
+      "tool_name": "generate_dispute_letter",
+      "purpose": "Generates one dispute letter draft for a selected dispute item via Claude.",
+      "when_to_use": "After strategy analysis when user wants a concrete dispute letter draft.",
+      "required_args": {
+        "client_id": "string",
+        "dispute_item": "object"
+      },
+      "optional_args": { "analysis_id": { "type": "string" } },
+      "returns": "JSON with letter_id and draft object",
+      "side_effects": "write (creates dispute_letters row)",
+      "permissions_secrets_used": ["SUPABASE_URL", "SUPABASE_SERVICE_ROLE_KEY", "ANTHROPIC_API_KEY", "CREDIT_GUARDIAN_KEY"],
+      "failure_modes": [],
+      "logging": { "tool_execution_logs": "1 row: attempted → succeeded or failed" },
+      "approval_required": true,
+      "approval_mechanism": "Inline Telegram confirmation before destructive execution",
+      "destructive": true
+    },
+    {
+      "tool_name": "send_dispute_letter",
+      "purpose": "Marks a generated dispute letter as approved-to-send.",
+      "when_to_use": "Operator approves a drafted dispute letter.",
+      "required_args": { "letter_id": "string" },
+      "optional_args": {},
+      "returns": "JSON confirmation with updated status",
+      "side_effects": "write (updates dispute_letters.status)",
+      "permissions_secrets_used": ["SUPABASE_URL", "SUPABASE_SERVICE_ROLE_KEY"],
+      "failure_modes": [],
+      "logging": { "tool_execution_logs": "1 row: attempted → succeeded or failed" },
+      "approval_required": true,
+      "approval_mechanism": "Inline Telegram confirmation",
+      "destructive": true
+    },
+    {
+      "tool_name": "research_playlists",
+      "purpose": "Researches playlist fit and pitch angles using ChatGPT and FanFuel enrichment data.",
+      "when_to_use": "User asks for playlist research for a track.",
+      "required_args": { "track_name": "string" },
+      "optional_args": {
+        "genre": { "type": "string" },
+        "mood": { "type": "string" },
+        "bpm": { "type": "number" },
+        "similar_artists": { "type": "array" }
+      },
+      "returns": "JSON with research_id and ranked recommendations",
+      "side_effects": "write (creates playlist_research row)",
+      "permissions_secrets_used": ["SUPABASE_URL", "SUPABASE_SERVICE_ROLE_KEY", "OPENAI_API_KEY", "FANFUEL_HUB_KEY"],
+      "failure_modes": [],
+      "logging": { "tool_execution_logs": "1 row: attempted → succeeded or failed" },
+      "approval_required": false,
+      "approval_mechanism": null,
+      "destructive": false
+    },
+    {
+      "tool_name": "generate_pitch",
+      "purpose": "Generates a personalized pitch email draft for a playlist + track pair.",
+      "when_to_use": "After playlist research to draft outreach copy.",
+      "required_args": {
+        "playlist_id": "string",
+        "track_id": "string"
+      },
+      "optional_args": { "research_id": { "type": "string" } },
+      "returns": "JSON with pitch_id and draft copy",
+      "side_effects": "write (creates pitch_drafts row)",
+      "permissions_secrets_used": ["SUPABASE_URL", "SUPABASE_SERVICE_ROLE_KEY", "OPENAI_API_KEY", "FANFUEL_HUB_KEY"],
+      "failure_modes": [],
+      "logging": { "tool_execution_logs": "1 row: attempted → succeeded or failed" },
+      "approval_required": false,
+      "approval_mechanism": null,
+      "destructive": false
+    },
+    {
+      "tool_name": "send_pitch",
+      "purpose": "Marks a pitch draft as approved-to-send.",
+      "when_to_use": "Operator approves the generated pitch draft.",
+      "required_args": { "pitch_id": "string" },
+      "optional_args": {},
+      "returns": "JSON confirmation with updated status",
+      "side_effects": "write (updates pitch_drafts.status)",
+      "permissions_secrets_used": ["SUPABASE_URL", "SUPABASE_SERVICE_ROLE_KEY"],
+      "failure_modes": [],
+      "logging": { "tool_execution_logs": "1 row: attempted → succeeded or failed" },
+      "approval_required": true,
+      "approval_mechanism": "Inline Telegram confirmation",
+      "destructive": true
     }
   ],
   "edge_functions": [
@@ -677,6 +783,34 @@
       "invoked_by": "Manual diagnostic call",
       "secrets_used": ["Artist_Growth_Hub_Meta"],
       "tables_written": []
+    },
+    {
+      "function_name": "analyze-credit-strategy",
+      "purpose": "Fetches client timeline/documents and produces structured credit strategy with Claude.",
+      "invoked_by": "analyze_credit_strategy tool",
+      "secrets_used": ["ANTHROPIC_API_KEY", "CREDIT_GUARDIAN_KEY", "SUPABASE_URL", "SUPABASE_SERVICE_ROLE_KEY"],
+      "tables_written": ["credit_analyses"]
+    },
+    {
+      "function_name": "generate-dispute-letters",
+      "purpose": "Generates and tracks dispute letter drafts with Claude; also handles send approval state.",
+      "invoked_by": "generate_dispute_letter and send_dispute_letter tools",
+      "secrets_used": ["ANTHROPIC_API_KEY", "CREDIT_GUARDIAN_KEY", "SUPABASE_URL", "SUPABASE_SERVICE_ROLE_KEY"],
+      "tables_written": ["dispute_letters"]
+    },
+    {
+      "function_name": "playlist-research",
+      "purpose": "Builds playlist strategy recommendations via OpenAI and optional FanFuel enrichment.",
+      "invoked_by": "research_playlists tool",
+      "secrets_used": ["OPENAI_API_KEY", "FANFUEL_HUB_URL", "FANFUEL_HUB_KEY", "SUPABASE_URL", "SUPABASE_SERVICE_ROLE_KEY"],
+      "tables_written": ["playlist_research"]
+    },
+    {
+      "function_name": "generate-pitch-email",
+      "purpose": "Generates playlist pitch drafts via OpenAI and tracks send-approval state.",
+      "invoked_by": "generate_pitch and send_pitch tools",
+      "secrets_used": ["OPENAI_API_KEY", "FANFUEL_HUB_URL", "FANFUEL_HUB_KEY", "SUPABASE_URL", "SUPABASE_SERVICE_ROLE_KEY"],
+      "tables_written": ["pitch_drafts"]
     }
   ]
 }
