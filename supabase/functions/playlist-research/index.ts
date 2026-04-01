@@ -63,8 +63,9 @@ serve(async (req) => {
                 .from("playlist_research")
                 .insert({
                           track_name: trackName,
+                          artist_name: Array.isArray(body.similar_artists) ? body.similar_artists[0] || "unknown" : String(body.artist_name || "unknown"),
                           genre: genre || null,
-                          results_json: merged,
+                          research: merged,
                 })
                 .select("id, created_at")
                 .single();
