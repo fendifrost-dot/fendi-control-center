@@ -15,7 +15,7 @@ const TELEGRAM_API = `https://api.telegram.org/bot${BOT_TOKEN}`;
 const SYSTEM_IDENTITY = "Fendi Control Center AI";
 // âââ Implemented workflow keys â handler names (deterministic routing) âââ
 const IMPLEMENTED_WORKFLOW_KEYS = new Set([
-  "ping", "system_status", "resend_failed", "list_workflows", "help",
+  "ping", "system_status", "resend_faied", "list_workflows", "help",
     "model_switch", "document_approval", "document_rejection",
     "failed_job_management", "drive_sync", "client_overview",
     "file_browsing", "connected_project_stats", "error_explanation",
@@ -3277,7 +3277,12 @@ serve(async (req) => {
       /\bsearch\s+playlist\s+opportunities\s+for\s+/i.test(lowerText) ||
       /\bplaylist\s+opportunities\s+for\s+/i.test(lowerText) ||
       (/\bplaylist\s+opportunities\b/i.test(lowerText) && /\bfor\s+\S+/i.test(lowerText)) ||
-      /\bfind\s+playlists?\s+for\s+/i.test(lowerText);
+      /\bfind\s+playlists?\s+for\s+/i.test(lowerText) ||
+        /\bpitch\b.*\bplaylists?\b/i.test(lowerText) ||
+          /\bpitch\b.*\bto\b/i.test(lowerText) ||
+            /\bresearch\s+playlists?\b/i.test(lowerText) ||
+              /\bgenerate\s+pitch\b/i.test(lowerText) ||
+                /\bplaylist\s+pitch/i.test(lowerText);
     // ââ Credit analysis intent matching ââ
     const creditAnalysisMatch =
       /\b(credit\s*report|credit\s*analysis|analyze\s*credit|check\s*credit|run\s*(the\s+)?(full\s+)?analysis|pull\s*up.*credit|credit.*analyz)\b/i.test(lowerText);
@@ -3286,8 +3291,7 @@ serve(async (req) => {
 
     let autoPromotedWorkflow: WorkflowEntry | undefined;
     if (creditAnalysisMatch && IMPLEMENTED_WORKFLOW_KEYS.has("analyze_client_credit")) {
-      // ââ AUTO-PROMOTE: Credit analysis â lane_do ââ
-      const creditWorkflowKey = "analyze_client_credit";
+      // ââ AUTO-PROMOTE: Credit analysis â lane_do ââ      const creditWorkflowKey = "analyze_client_credit";
       const creditUserMsg = creditClientName
         ? `Analyze credit for ${creditClientName}. Run the full pipeline: sync Drive, ingest documents, and run Credit Guardian analysis.`
         : text;
