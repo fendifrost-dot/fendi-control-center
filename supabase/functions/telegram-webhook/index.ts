@@ -72,6 +72,22 @@ const SYNTHETIC_PLAYLIST_PITCH_WORKFLOW: WorkflowEntry = {
   tools: ["research_playlists", "generate_pitch", "send_pitch"],
 };
 
+const SYNTHETIC_QUERY_CREDIT_COMPASS: WorkflowEntry = {
+  key: "query_credit_compass",
+  name: "Query Credit Compass",
+  description: "Create/review new-client credit assessment files and dispute strategy context.",
+  trigger_phrases: ["credit compass", "new client credit file", "blank client credit report"],
+  tools: ["query_credit_compass", "query_credit_guardian"],
+};
+
+const SYNTHETIC_QUERY_CC_TAX: WorkflowEntry = {
+  key: "query_cc_tax",
+  name: "Query CC Tax",
+  description: "Run CC Tax status, transactions, documents, and discrepancy checks.",
+  trigger_phrases: ["tax status", "tax generator", "tax discrepancies", "tax documents", "tax transactions"],
+  tools: ["query_cc_tax"],
+};
+
 function _normalizeText(s: string): string {
   return (s ?? "").trim().toLowerCase();
 }
@@ -1966,7 +1982,9 @@ function extractPlaylistTrackName(userMessage: string, conversationContext: stri
     /(?:for|about)\s+["']?([^"'\n]+?)["']?(?:\s+by|\s*$|,)/i,
   );
   if (forMatch) {
-    const t = forMatch[1].trim();
+    let t = forMatch[1].trim();
+    // Normalize common casual phrasing: "for my new song Meditate" -> "Meditate"
+    t = t.replace(/^(my|our)\s+(new\s+)?(song|track)\s+/i, "").trim();
     if (t.length >= 1 && t.length <= 120 && !/^(me|the|a|an)$/i.test(t)) return t;
   }
   const opp = combined.match(
@@ -1982,6 +2000,48 @@ function extractPlaylistTrackName(userMessage: string, conversationContext: stri
     if (t.length >= 1 && t.length <= 120) return t;
   }
   return null;
+}
+
+function extractClientNameForCreditCommand(userMessage: string, conversationContext: string): string | null {
+  const combined = `${userMessage}\n${conversationContext}`;
+  const explicit = userMessage.match(/\banaly[sz]e\s+(.+?)\s+(?:new\s+)?(?:equifax|experian|transunion)?\s*credit\s+report\b/i);
+  if (explicit?.[1]) {
+    const name = explicit[1].replace(/\b(my|the|a)\b/gi, "").trim();
+    if (name.length >= 2 && name.length <= 80) return name;
+  }
+  const shorter = combined.match(/\banaly[sz]e\s+(.+?)\s+credit\b/i);
+  if (shorter?.[1]) {
+    const name = shorter[1].replace(/\b(my|the|a|new)\b/gi, "").trim();
+    if (name.length >= 2 && name.length <= 80) return name;
+  }
+  return null;
+}
+
+function isNewClientCreditIntent(lowerText: string): boolean {
+  return (
+    /\bblank\s+client\b/i.test(lowerText) ||
+    /\bnew\s+client\b/i.test(lowerText) ||
+    /\bbuild(ing)?\s+(a\s+)?file\b/i.test(lowerText) ||
+    /\bcreate\s+(a\s+)?(client\s+)?(credit\s+)?summary\b/i.test(lowerText)
+  );
+}
+
+function isExistingClientProgressIntent(lowerText: string): boolean {
+  return (
+    /\bupdated?\s+(equifax|experian|transunion)\b/i.test(lowerText) ||
+    /\bnew\s+(equifax|experian|transunion)\b/i.test(lowerText) ||
+    /\bexisting\s+client\b/i.test(lowerText) ||
+    /\bclient'?s?\s+(updated?|new)\s+(equifax|experian|transunion)\b/i.test(lowerText)
+  );
+}
+
+function isTaxIntent(lowerText: string): boolean {
+  return (
+    /\btax\b/i.test(lowerText) ||
+    /\bcc\s*tax\b/i.test(lowerText) ||
+    /\btax\s+generator\b/i.test(lowerText) ||
+    /\bdiscrepanc(y|ies)\b/i.test(lowerText)
+  );
 }
 
 /** Resolve track title for find_playlist_opportunities when the model omits or sends placeholder track_name. */
@@ -2039,6 +2099,8 @@ Available capabilities via tools:
 - Drive sync, file listing, client summaries
 - Connected project stats
 - FanFuel / playlists: find_playlist_opportunities (research playlists for a track — FanFuel Hub)
+- Credit strategy: analyze_credit_strategy, generate_dispute_letter, send_dispute_letter
+- Playlist email workflow: research_playlists, generate_pitch, send_pitch
 
 Be concise, professional, and use emoji sparingly.
 
@@ -2131,6 +2193,8 @@ Available capabilities via tools:
 - Drive sync, file listing, client summaries
 - Connected project stats
 - FanFuel / playlists: find_playlist_opportunities (research playlists for a track)
+- Credit strategy: analyze_credit_strategy, generate_dispute_letter, send_dispute_letter
+- Playlist email workflow: research_playlists, generate_pitch, send_pitch
 
 Be witty, direct, and concise. Use emoji sparingly.
 
@@ -2284,6 +2348,22 @@ async function executeAgenticLoop(chatId: string, userMessage: string, opts: { t
     matchedWorkflow = SYNTHETIC_FIND_PLAYLIST_OPPORTUNITIES;
     console.log(JSON.stringify({ ts: Date.now(), event: "workflow_synthetic_fallback", key: opts.workflowKey, taskId: opts.taskId }));
   }
+  if (!matchedWorkflow && opts.workflowKey === "analyze_credit_strategy" && IMPLEMENTED_WORKFLOW_KEYS.has("analyze_credit_strategy")) {
+    matchedWorkflow = SYNTHETIC_ANALYZE_CREDIT_STRATEGY;
+    console.log(JSON.stringify({ ts: Date.now(), event: "workflow_synthetic_fallback", key: opts.workflowKey, taskId: opts.taskId }));
+  }
+  if (!matchedWorkflow && opts.workflowKey === "playlist_pitch_workflow" && IMPLEMENTED_WORKFLOW_KEYS.has("playlist_pitch_workflow")) {
+    matchedWorkflow = SYNTHETIC_PLAYLIST_PITCH_WORKFLOW;
+    console.log(JSON.stringify({ ts: Date.now(), event: "workflow_synthetic_fallback", key: opts.workflowKey, taskId: opts.taskId }));
+  }
+  if (!matchedWorkflow && opts.workflowKey === "query_credit_compass" && IMPLEMENTED_WORKFLOW_KEYS.has("query_credit_compass")) {
+    matchedWorkflow = SYNTHETIC_QUERY_CREDIT_COMPASS;
+    console.log(JSON.stringify({ ts: Date.now(), event: "workflow_synthetic_fallback", key: opts.workflowKey, taskId: opts.taskId }));
+  }
+  if (!matchedWorkflow && opts.workflowKey === "query_cc_tax" && IMPLEMENTED_WORKFLOW_KEYS.has("query_cc_tax")) {
+    matchedWorkflow = SYNTHETIC_QUERY_CC_TAX;
+    console.log(JSON.stringify({ ts: Date.now(), event: "workflow_synthetic_fallback", key: opts.workflowKey, taskId: opts.taskId }));
+  }
 
   // ── VALIDATE WORKFLOW EXISTS ──
   if (!matchedWorkflow) {
@@ -2322,6 +2402,19 @@ async function executeAgenticLoop(chatId: string, userMessage: string, opts: { t
       result = {
         text: "",
         toolCalls: [{ name: "find_playlist_opportunities", args: { track_name: inferredTrack } }],
+      };
+    } else {
+      result = model === "grok"
+        ? await agenticGrokCall(userMessage, docContext, conversationContext, workflowToolNames, opts.workflowKey)
+        : await agenticGeminiCall(userMessage, docContext, conversationContext, workflowToolNames, opts.workflowKey);
+    }
+  } else if (opts.workflowKey === "analyze_credit_strategy") {
+    const inferredClient = extractClientNameForCreditCommand(userMessage, conversationContext);
+    if (inferredClient) {
+      logEvent({ event: "credit_client_inferred", taskId: opts.taskId, inferredClient });
+      result = {
+        text: "",
+        toolCalls: [{ name: "analyze_credit_strategy", args: { client_name: inferredClient } }],
       };
     } else {
       result = model === "grok"
@@ -3199,6 +3292,8 @@ serve(async (req) => {
     // ══════════════════════════════════════════════════════════
     const findPlaylistRequested =
       /\bfind\s+playlist\s+opportunities\b/i.test(lowerText) ||
+      /\bfind\s+a\s+playlist\s+for\s+/i.test(lowerText) ||
+      /\bfind\s+playlist\s+for\s+/i.test(lowerText) ||
       /\bsearch\s+playlist\s+opportunities\s+for\s+/i.test(lowerText) ||
       /\bplaylist\s+opportunities\s+for\s+/i.test(lowerText) ||
       (/\bplaylist\s+opportunities\b/i.test(lowerText) && /\bfor\s+\S+/i.test(lowerText)) ||
@@ -3215,25 +3310,16 @@ serve(async (req) => {
 
       if (trackNl) {
         const inferredNl = inferVibeFromTrack(trackNl);
-        await setPlaylistConfirm(chatId, {
-          track_name: trackNl,
-          inferred_vibe: inferredNl,
-          created_at: new Date().toISOString(),
-        });
-        const vibePrompt =
-          `🎵 To find the right playlists for *${trackNl}*, tell me:\n\n` +
-          `1️⃣ *Genre/subgenre* — e.g. chill trap, drill, conscious rap, west coast\n` +
-          `2️⃣ *Similar artists or features* — e.g. Larry June, FBG Duck\n` +
-          `3️⃣ *Mood/theme* — e.g. spiritual, street, introspective, healing\n\n` +
-          `Just reply with whatever fits. More detail = better results.`;
-        console.log("[PLAYLIST_NL] vibe prompt (deterministic)", { taskId, track: trackNl });
-        await sendMessage(chatId, formatAssistantMessage(modelNl, vibePrompt), {}, `task:${taskId}:playlist-vibe-prompt`);
+        console.log("[PLAYLIST_NL] execute-first (deterministic)", { taskId, track: trackNl, vibe: inferredNl });
+        const immediate = await runPlaylistHubResearch(trackNl, inferredNl, chatId);
+        await sendMessage(chatId, formatAssistantMessage(modelNl, immediate), {}, `task:${taskId}:playlist-immediate`);
         await supabase.from("tasks").update({
           status: "succeeded",
           result_json: {
             execution_lane: "playlist_nl",
-            shortcut: "playlist_vibe_prompt_natural",
+            shortcut: "playlist_execute_first_natural",
             track: trackNl,
+            inferred_vibe: inferredNl,
           },
         }).eq("id", taskId);
         await sendMessage(chatId, `✅ Done: \`${taskId}\``, {}, `task:${taskId}:done`);
@@ -3265,6 +3351,9 @@ serve(async (req) => {
     const hasExecutionIntent = EXECUTION_INTENT_PREFIXES.some(p => lowerText.startsWith(p));
 
     let autoPromotedWorkflow: WorkflowEntry | undefined;
+    const newClientIntent = isNewClientCreditIntent(lowerText);
+    const existingClientIntent = isExistingClientProgressIntent(lowerText);
+    const taxIntent = isTaxIntent(lowerText);
     const creditIntent =
       /\banalyze\b.*\bcredit\b/i.test(lowerText) ||
       /\bcredit strategy\b/i.test(lowerText) ||
@@ -3273,7 +3362,15 @@ serve(async (req) => {
       /\bresearch playlists?\b/i.test(lowerText) ||
       /\bgenerate pitch\b/i.test(lowerText) ||
       /\bplaylist pitch workflow\b/i.test(lowerText);
-    if (creditIntent && IMPLEMENTED_WORKFLOW_KEYS.has("analyze_credit_strategy")) {
+    // Deterministic business routing:
+    // - new/blank client file build => Credit Compass
+    // - existing client progress/update => Credit Guardian strategy path
+    // - tax operations => CC Tax
+    if (taxIntent && IMPLEMENTED_WORKFLOW_KEYS.has("query_cc_tax")) {
+      autoPromotedWorkflow = SYNTHETIC_QUERY_CC_TAX;
+    } else if (newClientIntent && IMPLEMENTED_WORKFLOW_KEYS.has("query_credit_compass")) {
+      autoPromotedWorkflow = SYNTHETIC_QUERY_CREDIT_COMPASS;
+    } else if ((existingClientIntent || creditIntent) && IMPLEMENTED_WORKFLOW_KEYS.has("analyze_credit_strategy")) {
       autoPromotedWorkflow = SYNTHETIC_ANALYZE_CREDIT_STRATEGY;
     } else if (playlistPitchIntent && IMPLEMENTED_WORKFLOW_KEYS.has("playlist_pitch_workflow")) {
       autoPromotedWorkflow = SYNTHETIC_PLAYLIST_PITCH_WORKFLOW;
@@ -3286,7 +3383,11 @@ serve(async (req) => {
       if (intentChosen && IMPLEMENTED_WORKFLOW_KEYS.has(intentChosen.key)) {
         autoPromotedWorkflow = intentChosen;
       }
-      if (!intentChosen && creditIntent && IMPLEMENTED_WORKFLOW_KEYS.has("analyze_credit_strategy")) {
+      if (!intentChosen && taxIntent && IMPLEMENTED_WORKFLOW_KEYS.has("query_cc_tax")) {
+        autoPromotedWorkflow = SYNTHETIC_QUERY_CC_TAX;
+      } else if (!intentChosen && newClientIntent && IMPLEMENTED_WORKFLOW_KEYS.has("query_credit_compass")) {
+        autoPromotedWorkflow = SYNTHETIC_QUERY_CREDIT_COMPASS;
+      } else if (!intentChosen && (existingClientIntent || creditIntent) && IMPLEMENTED_WORKFLOW_KEYS.has("analyze_credit_strategy")) {
         autoPromotedWorkflow = SYNTHETIC_ANALYZE_CREDIT_STRATEGY;
       } else if (!intentChosen && playlistPitchIntent && IMPLEMENTED_WORKFLOW_KEYS.has("playlist_pitch_workflow")) {
         autoPromotedWorkflow = SYNTHETIC_PLAYLIST_PITCH_WORKFLOW;
