@@ -100,13 +100,6 @@ function _resolveWorkflowKey(key: string): string {
   return WORKFLOW_KEY_ALIASES[key] || key;
 }
 
-const SYNTHETIC_PLAYLIST_PITCH_WORKFLOW: WorkflowEntry = {
-  key: "playlist_pitch_workflow",
-  name: "Playlist Pitch Workflow",
-  description: "Research playlist opportunities, draft a pitch, and send after approval.",
-  trigger_phrases: ["research playlists", "playlist pitch workflow", "generate pitch"],
-  tools: ["research_playlists", "generate_pitch", "send_pitch"],
-};
 
 function _normalizeText(s: string): string {
   return (s ?? "").trim().toLowerCase();
