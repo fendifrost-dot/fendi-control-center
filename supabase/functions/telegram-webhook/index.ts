@@ -145,17 +145,25 @@ User message: "${userMessage}"
 
 Respond with ONLY the workflow key or NONE.`;
 
-    const res = await fetch(
-      `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${GEMINI_KEY}`,
-      {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          contents: [{ parts: [{ text: prompt }] }],
-          generationConfig: { temperature: 0, maxOutputTokens: 50 },
-        }),
-      }
-    );
+    const callClassifier = async () =>
+      fetch(
+        `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash-lite:generateContent?key=${GEMINI_KEY}`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            contents: [{ parts: [{ text: prompt }] }],
+            generationConfig: { temperature: 0, maxOutputTokens: 50 },
+          }),
+        }
+      );
+
+    let res = await callClassifier();
+    if (res.status === 429) {
+      console.log("[NL_CLASSIFY] 429 received, retrying in 1s...");
+      await new Promise((r) => setTimeout(r, 1000));
+      res = await callClassifier();
+    }
 
     if (!res.ok) {
       console.error("[NL_CLASSIFY] Gemini call failed:", res.status);
