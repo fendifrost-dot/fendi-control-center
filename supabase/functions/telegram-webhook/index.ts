@@ -1405,6 +1405,7 @@ const AGENT_TOOLS: ToolDef[] = [
         return JSON.stringify({ error: `Failed to reach CC Tax: ${msg}` });
       }
     },
+  },
   {
     name: "scan_drive_overview" as const,
     description: "Read-only scan of Google Drive client folders. Returns client names, file counts, and file types â does NOT read file contents. Call this first in autonomous mode to understand what's in Drive. Safe to call without approval.",
