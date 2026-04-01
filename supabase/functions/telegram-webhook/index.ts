@@ -105,6 +105,82 @@ function _formatNoMatch(workflows: WorkflowEntry[]): string {
   return `â No matching workflow for that request.\n\nRun /workflows to see everything available.\n\nSuggestions:\n${suggestions}`;
 }
 
+async function classifyNaturalLanguageIntent(
+  userMessage: string,
+  workflows: WorkflowEntry[]
+): Promise<WorkflowEntry | null> {
+  try {
+    const implemented = workflows
+      .filter((w) => IMPLEMENTED_WORKFLOW_KEYS.has(w.key))
+      .map((w) => ({
+        key: w.key,
+        name: w.name,
+        triggers: w.trigger_phrases.slice(0, 4).join(", "),
+        description: w.description,
+      }));
+
+    if (implemented.length === 0) return null;
+
+    const workflowList = implemented
+      .map((w) => `- ${w.key}: ${w.name} (triggers: ${w.triggers}) — ${w.description}`)
+      .join("\n");
+
+    const prompt = `You are an intent classifier. Given the user message, determine if they want to EXECUTE an action.
+If yes, respond with ONLY the matching workflow key. If it is just a question or conversation, respond NONE.
+
+Rules:
+- "pitch X to playlists" or "pitch X" → playlist_pitch_workflow
+- "analyze credit" or "run credit analysis" → analyze_credit_strategy
+- "generate dispute" or "send dispute" → credit_analysis_and_disputes
+- "check system status" or "system status" → system_status
+- "retry failed" or "resend failed" → resend_failed
+- "sync drive" or "pull from drive" → drive_sync
+- "show clients" or "list clients" → client_overview
+- Greetings, questions, "what is", "how does", "explain" → NONE
+
+Available workflows:
+${workflowList}
+
+User message: "${userMessage}"
+
+Respond with ONLY the workflow key or NONE.`;
+
+    const res = await fetch(
+      `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${GEMINI_KEY}`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          contents: [{ parts: [{ text: prompt }] }],
+          generationConfig: { temperature: 0, maxOutputTokens: 50 },
+        }),
+      }
+    );
+
+    if (!res.ok) {
+      console.error("[NL_CLASSIFY] Gemini call failed:", res.status);
+      return null;
+    }
+
+    const json = await res.json();
+    const rawText =
+      json?.candidates?.[0]?.content?.parts?.[0]?.text?.trim() || "";
+    const cleaned = rawText.replace(/[^a-zA-Z0-9_]/g, "");
+
+    if (!cleaned || cleaned.toUpperCase() === "NONE") return null;
+
+    const match = workflows.find(
+      (w) => w.key.toLowerCase() === cleaned.toLowerCase()
+    );
+    if (match && IMPLEMENTED_WORKFLOW_KEYS.has(match.key)) return match;
+
+    return null;
+  } catch (e) {
+    console.error("[NL_CLASSIFY] Error:", e);
+    return null;
+  }
+}
+
 async function fetchWorkflowRegistry(): Promise<WorkflowEntry[]> {
   try {
     const { data, error } = await supabase.rpc("list_workflows");
@@ -3463,6 +3539,55 @@ serve(async (req) => {
       }
       _currentTaskId = null;
       return new Response("ok");
+    }
+
+    // ══════════════════════════════════════════════════════════
+    // NL INTENT CLASSIFICATION — auto-promote to Lane 1 if Gemini detects execution intent
+    // ══════════════════════════════════════════════════════════
+    if (!text.startsWith("/") && !hasExecutionIntent && !isAutonomousRequest) {
+      const nlWorkflows = await fetchWorkflowRegistry();
+      const nlMatch = await classifyNaturalLanguageIntent(text, nlWorkflows);
+      if (nlMatch) {
+        console.log(`[NL_CLASSIFY] Auto-promoting to Lane 1: workflow=${nlMatch.key} taskId=${taskId}`);
+        await supabase.from("tasks").update({
+          status: "running",
+          selected_workflow: nlMatch.key,
+          result_json: {
+            execution_lane: "lane1_do",
+            nl_classified: true,
+            selected_workflow: nlMatch.key,
+          },
+        }).eq("id", taskId);
+
+        try {
+          await Promise.race([
+            executeAgenticLoop(chatId, text, {
+              taskId,
+              lane: "lane1_do",
+              allowTools: true,
+              workflowKey: nlMatch.key,
+              sessionModel: session.active_model as "grok" | "gemini" | "chatgpt",
+            }),
+            new Promise<never>((_, reject) =>
+              setTimeout(() => reject(new Error("TIMEOUT")), 55000)
+            ),
+          ]);
+        } catch (nlErr) {
+          const errMsg = nlErr instanceof Error ? nlErr.message : String(nlErr);
+          const failResult = buildFailureResultJson(
+            { execution_lane: "lane1_do", nl_classified: true },
+            errMsg
+          );
+          await supabase.from("tasks").update({
+            status: "failed",
+            error: errMsg.slice(0, 300),
+            result_json: failResult,
+          }).eq("id", taskId);
+          await sendMessage(chatId, `\u274c Failed: \`${taskId}\` \u2014 ${errMsg.slice(0, 200)}`, {}, `task:${taskId}:failed`);
+        }
+        _currentTaskId = null;
+        return new Response("ok");
+      }
     }
 
     // ââââââââââââââââââââââââââââââââââââââââââââââââââââââââââ
