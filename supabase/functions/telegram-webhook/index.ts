@@ -100,6 +100,13 @@ function _resolveWorkflowKey(key: string): string {
   return WORKFLOW_KEY_ALIASES[key] || key;
 }
 
+const SYNTHETIC_PLAYLIST_PITCH_WORKFLOW: WorkflowEntry = {
+  key: "playlist_pitch_workflow",
+  name: "Playlist Pitch Workflow",
+  description: "Research playlist opportunities, draft a pitch, and send after approval.",
+  trigger_phrases: ["research playlists", "playlist pitch workflow", "generate pitch"],
+  tools: ["research_playlists", "generate_pitch", "send_pitch"],
+};
 
 function _normalizeText(s: string): string {
   return (s ?? "").trim().toLowerCase();
@@ -650,8 +657,3508 @@ interface ToolDef {
   execute: (args: any, context?: ToolExecuteContext) => Promise<string>;
 }
 
+/** Infer track title from /do text + recent chat. */
+function extractPlaylistTrackName(userMessage: string, conversationContext: string): string | null {
+  const combined = `${userMessage}\n${conversationContext}`;
+  const byMatch = combined.match(/\b([A-Za-z0-9][^\n]{0,100}?)\s+by\s+[A-Za-z]/i);
+  if (byMatch) {
+    const t = byMatch[1].trim().replace(/^["']|["']$/g, "");
+    if (t.length >= 1 && t.length <= 120) return t;
+  }
+  const forMatch = userMessage.match(/(?:for|about)\s+["']?([^"'\n]+?)["']?(?:\s+by|\s*$|,)/i);
+  if (forMatch) {
+    const t = forMatch[1].trim();
+    if (t.length >= 1 && t.length <= 120 && !/^(me|the|a|an)$/i.test(t)) return t;
+  }
+  const opp = combined.match(/playlist\s+opportunities?\s+for\s+["']?([^"'\n]+?)["']?(?:\s+by|\s*$|,|\s+)/i);
+  if (opp) {
+    const t = opp[1].trim();
+    if (t.length >= 1 && t.length <= 120) return t;
+  }
+  const opp2 = combined.match(/find\s+playlist\s+opportunities\s+for\s+["']?([^"'\n]+?)["']?/i);
+  if (opp2) {
+    const t = opp2[1].trim();
+    if (t.length >= 1 && t.length <= 120) return t;
+  }
+  return null;
+}
+
+/** Resolve track title for find_playlist_opportunities when the model omits or sends placeholder track_name. */
+async function resolvePlaylistTrackName(
+  args: { track_name?: string; user_vibe?: string },
+  context?: ToolExecuteContext,
+): Promise<string> {
+  let raw = (args?.track_name || "").trim();
+  if (raw && !/^unknown$/i.test(raw) && raw.toLowerCase() !== "unknown track") {
+    return raw;
+  }
+  const um = context?.userMessage || "";
+  const cc = context?.conversationContext || "";
+  const fromExtract = extractPlaylistTrackName(um, cc);
+  if (fromExtract) return fromExtract;
+  if (context?.chatId) {
+    const conv = cc || (await buildConversationContext(context.chatId));
+    const fromConv = extractPlaylistTrackName(um, conv);
+    if (fromConv) return fromConv;
+  }
+  return "";
+}
+
+/** Guess a vibe/mood keyword from the track name. */
+function inferVibeFromTrack(trackName: string): string {
+  const lower = trackName.toLowerCase();
+  if (/chill|vibe|wave|float|drift|ease/i.test(lower)) return "chill / lo-fi";
+  if (/fire|lit|heat|bang|hype|turn/i.test(lower)) return "energetic / hype";
+  if (/rain|cry|pain|hurt|blue|lone|miss/i.test(lower)) return "melancholic / emotional";
+  if (/love|kiss|heart|babe|honey/i.test(lower)) return "romantic / R&B";
+  if (/grind|hustle|money|boss|drip/i.test(lower)) return "motivational / trap";
+  if (/night|dark|shadow|smoke|fog/i.test(lower)) return "dark / atmospheric";
+  return "chill / melodic";
+}
+
+/** Store a pending playlist confirmation in bot_settings. */
+async function setPlaylistConfirm(chatId: string, data: { track_name: string; inferred_vibe: string; created_at: string }) {
+  await supabase.from("bot_settings").upsert(
+    {
+      setting_key: `pending_playlist:${chatId}`,
+      setting_value: JSON.stringify(data),
+      updated_at: new Date().toISOString(),
+    },
+    { onConflict: "setting_key" },
+  );
+}
+
+/** Retrieve a pending playlist confirmation from bot_settings, or null. */
+async function getPlaylistConfirm(chatId: string): Promise<{ track_name: string; inferred_vibe: string; created_at: string } | null> {
+  const { data } = await supabase
+    .from("bot_settings")
+    .select("setting_value")
+    .eq("setting_key", `pending_playlist:${chatId}`)
+    .maybeSingle();
+  if (!data) return null;
+  try {
+    return JSON.parse(data.setting_value);
+  } catch {
+    return null;
+  }
+}
+
+/** Remove a pending playlist confirmation from bot_settings. */
+async function clearPlaylistConfirm(chatId: string) {
+  await supabase.from("bot_settings").delete().eq("setting_key", `pending_playlist:${chatId}`);
+}
+
+type LastPlaylistResearch = {
+  track_name: string; user_vibe: string; ranked_playlist_ids: string[]; ts: string;
+};
+function lastPlaylistResearchKey(chatId: string) { return `last_playlist_research:${chatId}`; }
+function pendingPitchBulkKey(chatId: string) { return `pending_pitch_bulk:${chatId}`; }
+function pendingPitchTier3Key(chatId: string) { return `pending_pitch_tier3:${chatId}`; }
+async function saveLastPlaylistResearch(chatId: string, data: LastPlaylistResearch) {
+  await supabase.from("bot_settings").upsert({ setting_key: lastPlaylistResearchKey(chatId), setting_value: JSON.stringify(data), updated_at: new Date().toISOString() }, { onConflict: "setting_key" });
+}
+async function getLastPlaylistResearch(chatId: string): Promise<LastPlaylistResearch | null> {
+  const { data } = await supabase.from("bot_settings").select("setting_value").eq("setting_key", lastPlaylistResearchKey(chatId)).maybeSingle();
+  if (!data?.setting_value) return null;
+  try { const p = JSON.parse(data.setting_value); if (p?.track_name && Array.isArray(p.ranked_playlist_ids)) return p; } catch {}
+  return null;
+}
+type PendingPitchBulk = { track_name: string; playlist_ids: string[]; ts: string };
+type PendingPitchTier3 = { playlist_id: string; track_name: string; ts: string };
+async function setPendingPitchBulk(chatId: string, state: PendingPitchBulk) {
+  await supabase.from("bot_settings").upsert({ setting_key: pendingPitchBulkKey(chatId), setting_value: JSON.stringify(state), updated_at: new Date().toISOString() }, { onConflict: "setting_key" });
+}
+async function getPendingPitchBulk(chatId: string): Promise<PendingPitchBulk | null> {
+  const { data } = await supabase.from("bot_settings").select("setting_value").eq("setting_key", pendingPitchBulkKey(chatId)).maybeSingle();
+  if (!data?.setting_value) return null;
+  try { const p = JSON.parse(data.setting_value); if (p?.track_name && Array.isArray(p.playlist_ids)) return p; } catch {}
+  return null;
+}
+async function clearPendingPitchBulk(chatId: string) {
+  await supabase.from("bot_settings").delete().eq("setting_key", pendingPitchBulkKey(chatId));
+}
+async function setPendingPitchTier3(chatId: string, state: PendingPitchTier3) {
+  await supabase.from("bot_settings").upsert({ setting_key: pendingPitchTier3Key(chatId), setting_value: JSON.stringify(state), updated_at: new Date().toISOString() }, { onConflict: "setting_key" });
+}
+async function getPendingPitchTier3(chatId: string): Promise<PendingPitchTier3 | null> {
+  const { data } = await supabase.from("bot_settings").select("setting_value").eq("setting_key", pendingPitchTier3Key(chatId)).maybeSingle();
+  if (!data?.setting_value) return null;
+  try { const p = JSON.parse(data.setting_value); if (p?.playlist_id && p?.track_name) return p; } catch {}
+  return null;
+}
+async function clearPendingPitchTier3(chatId: string) {
+  await supabase.from("bot_settings").delete().eq("setting_key", pendingPitchTier3Key(chatId));
+}
+async function hubPlaylistBatch(playlistIds: string[]): Promise<any[]> {
+  if (!playlistIds.length) return [];
+  const r = await callFanFuelHub("playlist-batch", { playlist_ids: playlistIds });
+  return Array.isArray(r?.playlists) ? r.playlists : [];
+}
 
 
+/** Execute the actual playlist research via FanFuel Hub. */
+/**
+ * Calls FanFuel Hub playlist research. Prefer the dedicated playlist-research edge function.
+ * Override edge name with FANFUEL_HUB_PLAYLIST_FN if your project uses a different function name.
+ */
+async function runPlaylistHubResearch(trackName: string, userVibe: string, chatId?: string): Promise<string> {
+  const body = { track_name: trackName, user_vibe: userVibe };
+  const edgeName = (Deno.env.get("FANFUEL_HUB_PLAYLIST_FN") || "playlist-research").trim();
+  let result: any;
+  try {
+    result = await callFanFuelHub(edgeName, body);
+  } catch (e1) {
+    const m = e1 instanceof Error ? e1.message : String(e1);
+    if (/404|not found|Unknown action|FunctionsHttpError|502|503/i.test(m)) {
+      try {
+        result = await callFanFuelHub("control-center-api", {
+          action: "playlist_research",
+          track_name: trackName,
+          user_vibe: userVibe,
+        });
+      } catch {
+        console.error("[runPlaylistHubResearch] primary failed:", m);
+        throw e1;
+      }
+    } else {
+      throw e1;
+    }
+  }
+  if (result && result.playlists && Array.isArray(result.playlists) && result.playlists.length > 0) {
+    const lines = result.playlists
+      .slice(0, 20)
+      .map((p: any, i: number) =>
+        (i + 1) + ". " + (p.name || p.playlist_name) + " â " +
+        (typeof p.followers === "number" ? p.followers.toLocaleString() : (p.followers || "?")) + " followers"
+      )
+      .join("\n");
+  if (chatId && result?.playlists) {
+    const rankedIds = result.playlists.slice(0, 20).map((p: any) => p.playlist_id || p.id);
+    await saveLastPlaylistResearch(chatId, { track_name: trackName, user_vibe: userVibe, ranked_playlist_ids: rankedIds, ts: new Date().toISOString() });
+  }
+
+    return 'Found ' + result.playlists.length + ' playlist opportunities for "' + trackName + '":\n\n' + lines;
+  }
+  return 'Playlist research complete for "' + trackName + '" (vibe: ' + userVibe + '). Results stored. Check back with "show pitch report".';
+}
+
+const AGENT_TOOLS: ToolDef[] = [
+  {
+    name: "get_system_status",
+    description: "Get overall system status: document counts, pending approvals, active/failed jobs, and current AI model.",
+    parameters: { type: "object", properties: {}, required: [] },
+    destructive: false,
+    execute: async (_args: any, context?: { chatId?: string }) => {
+      const errors: { table: string; query: string; error_message: string }[] = [];
+
+      const q1 = await supabase.from("documents").select("*", { count: "exact", head: true }).eq("status", "completed");
+      if (q1.error) { console.error("get_system_status: documents query error:", q1.error.message); errors.push({ table: "documents", query: "count completed", error_message: q1.error.message }); }
+
+      const q2 = await supabase.from("telegram_approval_queue").select("*", { count: "exact", head: true }).eq("status", "pending");
+      if (q2.error) { console.error("get_system_status: telegram_approval_queue query error:", q2.error.message); errors.push({ table: "telegram_approval_queue", query: "count pending", error_message: q2.error.message }); }
+
+      const q3 = await supabase.from("ingestion_jobs").select("*", { count: "exact", head: true }).in("status", ["queued", "processing", "retrying"]);
+      if (q3.error) { console.error("get_system_status: ingestion_jobs active query error:", q3.error.message); errors.push({ table: "ingestion_jobs", query: "count active", error_message: q3.error.message }); }
+
+      const q4 = await supabase.from("ingestion_jobs").select("*", { count: "exact", head: true }).eq("status", "failed");
+      if (q4.error) { console.error("get_system_status: ingestion_jobs failed query error:", q4.error.message); errors.push({ table: "ingestion_jobs", query: "count failed", error_message: q4.error.message }); }
+
+      const oneHourAgo = new Date(Date.now() - 60 * 60 * 1000).toISOString();
+      const q5 = await supabase.from("tool_execution_logs").select("*", { count: "exact", head: true }).gte("started_at", oneHourAgo);
+      if (q5.error) { console.error("get_system_status: tool_execution_logs query error:", q5.error.message); errors.push({ table: "tool_execution_logs", query: "count recent 1h", error_message: q5.error.message }); }
+
+      const modelResult = await getActiveModel(context?.chatId);
+
+      const result: Record<string, any> = {
+        documents_processed: q1.count ?? 0,
+        pending_approvals: q2.count ?? 0,
+        active_jobs: q3.count ?? 0,
+        failed_jobs: q4.count ?? 0,
+        recent_tool_calls_1h: q5.count ?? 0,
+        active_model: modelResult.model,
+      };
+      if (modelResult.session_created) result.session_created = true;
+      if (errors.length > 0) result.errors = errors;
+      return JSON.stringify(result);
+    },
+  },
+  {
+    name: "list_pending_approvals",
+    description: "List documents waiting for approval with client names and observation counts.",
+    parameters: { type: "object", properties: {}, required: [] },
+    destructive: false,
+    execute: async () => {
+      const { data: pending } = await supabase
+        .from("telegram_approval_queue")
+        .select("*, documents(file_name), clients(name)")
+        .eq("status", "pending")
+        .order("created_at", { ascending: false })
+        .limit(10);
+      return JSON.stringify(pending?.map((p: any) => ({
+        id: p.id,
+        file_name: (p.documents as any)?.file_name,
+        client: (p.clients as any)?.name,
+        observation_count: p.observation_count,
+      })) || []);
+    },
+  },
+  {
+    name: "list_failed_jobs",
+    description: "List failed ingestion jobs with file names, error messages, and attempt counts.",
+    parameters: { type: "object", properties: {}, required: [] },
+    destructive: false,
+    execute: async () => {
+      const { data: failed } = await supabase
+        .from("ingestion_jobs")
+        .select("*, documents(file_name), clients(name)")
+        .eq("status", "failed")
+        .order("completed_at", { ascending: false })
+        .limit(10);
+      return JSON.stringify(failed?.map((j: any) => ({
+        id: j.id,
+        file_name: (j.documents as any)?.file_name,
+        client: (j.clients as any)?.name,
+        attempt_count: j.attempt_count,
+        last_error: j.last_error,
+      })) || []);
+    },
+  },
+  {
+    name: "retry_failed_job",
+    description: "Retry a specific failed ingestion job by re-queuing it and triggering processing. Requires job_id.",
+    parameters: { type: "object", properties: { job_id: { type: "string", description: "The UUID of the failed job to retry" } }, required: ["job_id"] },
+    destructive: true,
+    execute: async (args: any) => {
+      const { data: job, error } = await supabase
+        .from("ingestion_jobs")
+        .select("*, documents(file_name)")
+        .eq("id", args.job_id)
+        .single();
+      if (error || !job) return "â Job not found.";
+      if (job.status !== "failed") return `Job is currently ${job.status}, can only retry failed jobs.`;
+      await supabase.from("ingestion_jobs").update({ status: "queued", last_error: null, started_at: null, completed_at: null }).eq("id", args.job_id);
+      if (job.document_id) await supabase.from("documents").update({ status: "pending" }).eq("id", job.document_id);
+      try {
+        const ANON_KEY = Deno.env.get("SUPABASE_PUBLISHABLE_KEY") || SUPABASE_SERVICE_ROLE_KEY;
+        await fetch(`${SUPABASE_URL}/functions/v1/process-document`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json", Authorization: `Bearer ${ANON_KEY}` },
+          body: JSON.stringify({ job_id: args.job_id }),
+        });
+      } catch (e) { console.error("Retry trigger failed:", e); }
+      const doc = job.documents as any;
+      return `Retry initiated for "${doc?.file_name || "Unknown"}".`;
+    },
+  },
+  {
+    name: "archive_job",
+    description: "Archive a job so it won't be retried. Requires job_id.",
+    parameters: { type: "object", properties: { job_id: { type: "string", description: "The UUID of the job to archive" } }, required: ["job_id"] },
+    destructive: true,
+    execute: async (args: any) => {
+      const { data: job, error } = await supabase.from("ingestion_jobs").select("*, documents(file_name)").eq("id", args.job_id).single();
+      if (error || !job) return "â Job not found.";
+      await supabase.from("ingestion_jobs").update({ status: "archived", completed_at: new Date().toISOString() }).eq("id", args.job_id);
+      return `Archived "${(job.documents as any)?.file_name || "Unknown"}".`;
+    },
+  },
+  {
+    name: "approve_document",
+    description: "Approve a pending document, verifying all its observations. Requires queue_id.",
+    parameters: { type: "object", properties: { queue_id: { type: "string", description: "The UUID of the approval queue entry" } }, required: ["queue_id"] },
+    destructive: true,
+    execute: async (args: any) => {
+      const { data: queue, error } = await supabase.from("telegram_approval_queue").select("*").eq("id", args.queue_id).single();
+      if (error || !queue) return "â Approval record not found.";
+      if (queue.status !== "pending") return "Already processed.";
+      const now = new Date().toISOString();
+      await supabase.from("observations").update({ is_verified: true, verified_at: now, verified_via: "telegram" }).eq("document_id", queue.document_id).eq("client_id", queue.client_id);
+      await supabase.from("telegram_approval_queue").update({ status: "approved", resolved_at: now }).eq("id", args.queue_id);
+      return `Approved: ${queue.observation_count} observations verified.`;
+    },
+  },
+  {
+    name: "reject_document",
+    description: "Reject a pending document, leaving observations unverified. Requires queue_id.",
+    parameters: { type: "object", properties: { queue_id: { type: "string", description: "The UUID of the approval queue entry" } }, required: ["queue_id"] },
+    destructive: true,
+    execute: async (args: any) => {
+      const { data: queue, error } = await supabase.from("telegram_approval_queue").select("*").eq("id", args.queue_id).single();
+      if (error || !queue) return "â Approval record not found.";
+      if (queue.status !== "pending") return "Already processed.";
+      await supabase.from("telegram_approval_queue").update({ status: "rejected", resolved_at: new Date().toISOString() }).eq("id", args.queue_id);
+      return `Rejected. Observations remain unverified for manual review.`;
+    },
+  },
+  {
+    name: "switch_ai_model",
+    description: "Switch the active AI model between 'gemini' and 'grok'. This is only allowed when the user explicitly requests a switch.",
+    parameters: { type: "object", properties: { model: { type: "string", enum: ["gemini", "grok"], description: "The model to switch to" } }, required: ["model"] },
+    destructive: true,
+    execute: async (args: any) => {
+      const nextModel = args.model === "grok" ? "grok" : "gemini";
+      await supabase.from("bot_settings").upsert({ setting_key: "ai_model", setting_value: nextModel, updated_at: new Date().toISOString() }, { onConflict: "setting_key" });
+      return `Switched to ${nextModel}.`;
+    },
+  },
+  {
+    name: "list_connected_projects",
+    description: "List all connected external projects with their status.",
+    parameters: { type: "object", properties: {}, required: [] },
+    destructive: false,
+    execute: async () => {
+      const projects = await getConnectedProjects();
+      return JSON.stringify(projects.map((p: any) => ({ name: p.name, description: p.description, is_active: p.is_active })));
+    },
+  },
+  {
+    name: "get_project_stats",
+    description: "Get table record counts from a connected project. Provide project_name or leave empty for all.",
+    parameters: { type: "object", properties: { project_name: { type: "string", description: "Name of the project (partial match). Leave empty for all projects." } }, required: [] },
+    destructive: false,
+    execute: async (args: any) => {
+      const projects = await getConnectedProjects();
+      if (projects.length === 0) return "No connected projects.";
+      const target = args.project_name
+        ? projects.filter((p: any) => p.name.toLowerCase().includes(args.project_name.toLowerCase()))
+        : projects;
+      if (target.length === 0) return `No project matching "${args.project_name}".`;
+      const results: any[] = [];
+      for (const p of target) {
+        const stats = await fetchProjectStats(p);
+        results.push({ name: p.name, stats: stats?.tables || null, reachable: !!stats });
+      }
+      return JSON.stringify(results);
+    },
+  },
+  {
+    name: "get_recent_documents",
+    description: "Get recently processed documents with their details.",
+    parameters: { type: "object", properties: { limit: { type: "number", description: "Number of documents to fetch (max 20)" } }, required: [] },
+    destructive: false,
+    execute: async (args: any) => {
+      const limit = Math.min(args.limit || 5, 20);
+      const { data: docs } = await supabase
+        .from("documents")
+        .select("id, file_name, doc_type, bureau, status, created_at, clients(name)")
+        .order("updated_at", { ascending: false })
+        .limit(limit);
+      return JSON.stringify(docs?.map((d: any) => ({
+        id: d.id, file_name: d.file_name, doc_type: d.doc_type, bureau: d.bureau,
+        status: d.status, client: (d.clients as any)?.name, created_at: d.created_at,
+      })) || []);
+    },
+  },
+  {
+    name: "trigger_drive_sync",
+    description: "Trigger a Google Drive sync to scan for new or updated files in the shared Drive folder. This will discover new documents and queue them for processing.",
+    parameters: { type: "object", properties: {}, required: [] },
+    destructive: false,
+    execute: async () => {
+      try {
+        const ANON_KEY = Deno.env.get("SUPABASE_PUBLISHABLE_KEY") || SUPABASE_SERVICE_ROLE_KEY;
+        const resp = await fetch(`${SUPABASE_URL}/functions/v1/drive-sync`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json", Authorization: `Bearer ${ANON_KEY}` },
+          body: JSON.stringify({}),
+        });
+        if (!resp.ok) {
+          const errText = await resp.text();
+          return `â Drive sync failed (${resp.status}): ${errText}`;
+        }
+        const result = await resp.json();
+        return `â Drive sync complete! Scanned ${result.folders_scanned || 0} folders, processed ${result.total_processed || 0} files, ${result.total_errors || 0} errors. Run ID: ${result.run_id}`;
+      } catch (e) {
+        return `â Drive sync error: ${String(e)}`;
+      }
+    },
+  },
+  {
+    name: "list_drive_files",
+    description: "List files stored in the system from Google Drive, optionally filtered by client name. Shows file name, status, type, and client.",
+    parameters: { type: "object", properties: { client_name: { type: "string", description: "Filter by client name (partial match). Leave empty for all." }, status: { type: "string", description: "Filter by status: pending, processing, completed, failed. Leave empty for all." }, limit: { type: "number", description: "Number of files to return (max 50)" } }, required: [] },
+    destructive: false,
+    execute: async (args: any) => {
+      const limit = Math.min(args.limit || 20, 50);
+      let query = supabase
+        .from("documents")
+        .select("id, file_name, doc_type, bureau, status, mime_type, drive_file_id, created_at, updated_at, clients(name)")
+        .eq("is_deleted", false)
+        .order("updated_at", { ascending: false })
+        .limit(limit);
+      if (args.status) query = query.eq("status", args.status);
+      const { data: docs } = await query;
+      let results = docs?.map((d: any) => ({
+        id: d.id, file_name: d.file_name, doc_type: d.doc_type, bureau: d.bureau,
+        status: d.status, mime_type: d.mime_type, client: (d.clients as any)?.name,
+        created_at: d.created_at, updated_at: d.updated_at,
+      })) || [];
+      if (args.client_name) {
+        results = results.filter((r: any) => r.client?.toLowerCase().includes(args.client_name.toLowerCase()));
+      }
+      if (results.length === 0) return "No files found matching your criteria.";
+      return JSON.stringify(results);
+    },
+  },
+  {
+    name: "get_client_summary",
+    description: "Get a summary of all clients with document counts and processing status.",
+    parameters: { type: "object", properties: {}, required: [] },
+    destructive: false,
+    execute: async () => {
+      const { data: clients } = await supabase.from("clients").select("id, name, drive_folder_id");
+      if (!clients || clients.length === 0) return "No clients found.";
+      const summaries = [];
+      for (const client of clients) {
+        const { data: docs } = await supabase.from("documents").select("id, status").eq("client_id", client.id).eq("is_deleted", false);
+        const statusCounts: Record<string, number> = {};
+        (docs || []).forEach((d: any) => { statusCounts[d.status] = (statusCounts[d.status] || 0) + 1; });
+        summaries.push({ name: client.name, total_documents: docs?.length || 0, by_status: statusCounts });
+      }
+      return JSON.stringify(summaries);
+    },
+  },
+
+  {
+    name: "get_active_jobs_summary",
+    description: "Get a structured breakdown of active (processing/queued) ingestion jobs: counts by status, job type, age buckets, top errors, and example rows. Use when the user asks 'what are the active jobs', 'describe the jobs', or 'summarize the N jobs'.",
+    parameters: {
+      type: "object",
+      properties: {
+        status_filter: { type: "string", enum: ["processing", "queued", "failed", "archived"], description: "Filter to a specific status. Default: shows processing+queued." },
+        hours_back: { type: "number", description: "Only include jobs created in the last N hours. Default: 24." },
+        limit: { type: "number", description: "Max example rows to return. Default: 50, max: 50." },
+      },
+      required: [],
+    },
+    destructive: false,
+    execute: async (args: any) => {
+      const hoursBack = args.hours_back ?? 24;
+      const limit = Math.min(args.limit ?? 50, 50);
+      const cutoff = new Date(Date.now() - hoursBack * 60 * 60 * 1000).toISOString();
+
+      const statusFilter: string[] = args.status_filter
+        ? [args.status_filter]
+        : ["processing", "queued"];
+
+      // Main query â fetch rows (capped at limit)
+      const { data: jobs, error } = await supabase
+        .from("ingestion_jobs")
+        .select("id, job_type, status, attempt_count, started_at, heartbeat_at, completed_at, created_at, drive_file_id, document_id, last_error")
+        .in("status", statusFilter)
+        .gte("created_at", cutoff)
+        .order("created_at", { ascending: false })
+        .limit(limit);
+
+      if (error) {
+        const errMsg = `HARD ERROR: ingestion_jobs query failed â ${error.message}`;
+        console.error("get_active_jobs_summary:", errMsg);
+        return JSON.stringify({ error: errMsg });
+      }
+
+      // Total count (may exceed limit)
+      const { count: totalCount, error: countErr } = await supabase
+        .from("ingestion_jobs")
+        .select("*", { count: "exact", head: true })
+        .in("status", statusFilter)
+        .gte("created_at", cutoff);
+
+      if (countErr) {
+        console.error("get_active_jobs_summary count error:", countErr.message);
+      }
+
+      const total = totalCount ?? jobs.length;
+      const allJobs = jobs || [];
+
+      // by_status
+      const byStatus: Record<string, number> = { processing: 0, queued: 0, failed: 0, archived: 0 };
+      for (const j of allJobs) { byStatus[j.status] = (byStatus[j.status] || 0) + 1; }
+
+      // by_job_type
+      const jobTypeCounts: Record<string, number> = {};
+      for (const j of allJobs) { jobTypeCounts[j.job_type] = (jobTypeCounts[j.job_type] || 0) + 1; }
+      const byJobType = Object.entries(jobTypeCounts).map(([job_type, count]) => ({ job_type, count }));
+
+      // age_buckets based on COALESCE(heartbeat_at, started_at, created_at)
+      const buckets = { "0-15m": 0, "15-60m": 0, "1-6h": 0, "6-24h": 0, "24h+": 0 };
+      const now = Date.now();
+      for (const j of allJobs) {
+        const ref = new Date(j.heartbeat_at || j.started_at || j.created_at).getTime();
+        const ageMin = (now - ref) / 60000;
+        if (ageMin <= 15) buckets["0-15m"]++;
+        else if (ageMin <= 60) buckets["15-60m"]++;
+        else if (ageMin <= 360) buckets["1-6h"]++;
+        else if (ageMin <= 1440) buckets["6-24h"]++;
+        else buckets["24h+"]++;
+      }
+      const ageBuckets = Object.entries(buckets).map(([bucket, count]) => ({ bucket, count }));
+
+      // top_errors (from rows that have last_error)
+      const errCounts: Record<string, number> = {};
+      for (const j of allJobs) {
+        if (j.last_error) {
+          const key = j.last_error.slice(0, 200);
+          errCounts[key] = (errCounts[key] || 0) + 1;
+        }
+      }
+      const topErrors = Object.entries(errCounts)
+        .map(([last_error, count]) => ({ last_error, count }))
+        .sort((a, b) => b.count - a.count)
+        .slice(0, 5);
+
+      // examples (first 5 rows)
+      const examples = allJobs.slice(0, 5).map((j: any) => ({
+        id: j.id, job_type: j.job_type, status: j.status,
+        attempt_count: j.attempt_count, started_at: j.started_at,
+        heartbeat_at: j.heartbeat_at, completed_at: j.completed_at,
+        drive_file_id: j.drive_file_id, document_id: j.document_id,
+      }));
+
+      return JSON.stringify({
+        active_definition: "status IN (" + statusFilter.map(s => `'${s}'`).join(",") + ")",
+        hours_back: hoursBack,
+        total,
+        by_status: byStatus,
+        by_job_type: byJobType,
+        age_buckets: ageBuckets,
+        top_errors: topErrors,
+        examples,
+      });
+    },
+  },
+
+  // âââ Instagram Messaging Tools ââââââââââââââââââââââââââââââââ
+  {
+    name: "instagram_send_dm",
+    description: "Send an Instagram Direct Message to a user. Requires recipient_id (Instagram-scoped user ID) and message text. [DESTRUCTIVE - requires user confirmation]",
+    parameters: { type: "object", properties: { recipient_id: { type: "string", description: "Instagram-scoped user ID (IGSID) of the recipient" }, message: { type: "string", description: "The message text to send" } }, required: ["recipient_id", "message"] },
+    destructive: true,
+    execute: async (args: any) => {
+      const ANON_KEY = Deno.env.get("SUPABASE_PUBLISHABLE_KEY") || SUPABASE_SERVICE_ROLE_KEY;
+      const resp = await fetch(`${SUPABASE_URL}/functions/v1/instagram-messaging`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${ANON_KEY}` },
+        body: JSON.stringify({ action: "send_dm", recipient_id: args.recipient_id, message: args.message }),
+      });
+      const data = await resp.json();
+      if (!resp.ok || !data.success) return `â DM failed: ${data.error || "Unknown error"}`;
+      return `â Instagram DM sent to ${args.recipient_id}.`;
+    },
+  },
+  {
+    name: "instagram_reply_comment",
+    description: "Reply to a comment on an Instagram post. Requires comment_id and reply_text. [DESTRUCTIVE - requires user confirmation]",
+    parameters: { type: "object", properties: { comment_id: { type: "string", description: "The ID of the Instagram comment to reply to" }, reply_text: { type: "string", description: "The reply text" } }, required: ["comment_id", "reply_text"] },
+    destructive: true,
+    execute: async (args: any) => {
+      const ANON_KEY = Deno.env.get("SUPABASE_PUBLISHABLE_KEY") || SUPABASE_SERVICE_ROLE_KEY;
+      const resp = await fetch(`${SUPABASE_URL}/functions/v1/instagram-messaging`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${ANON_KEY}` },
+        body: JSON.stringify({ action: "reply_comment", comment_id: args.comment_id, reply_text: args.reply_text }),
+      });
+      const data = await resp.json();
+      if (!resp.ok || !data.success) return `â Comment reply failed: ${data.error || "Unknown error"}`;
+      return `â Replied to Instagram comment ${args.comment_id}.`;
+    },
+  },
+  {
+    name: "instagram_reply_story_mention",
+    description: "Reply to someone who mentioned you in their Instagram story via DM. Requires recipient_id and message. [DESTRUCTIVE - requires user confirmation]",
+    parameters: { type: "object", properties: { recipient_id: { type: "string", description: "Instagram-scoped user ID of the person who mentioned you" }, message: { type: "string", description: "The reply message" } }, required: ["recipient_id", "message"] },
+    destructive: true,
+    execute: async (args: any) => {
+      const ANON_KEY = Deno.env.get("SUPABASE_PUBLISHABLE_KEY") || SUPABASE_SERVICE_ROLE_KEY;
+      const resp = await fetch(`${SUPABASE_URL}/functions/v1/instagram-messaging`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${ANON_KEY}` },
+        body: JSON.stringify({ action: "reply_story_mention", recipient_id: args.recipient_id, message: args.message }),
+      });
+      const data = await resp.json();
+      if (!resp.ok || !data.success) return `â Story mention reply failed: ${data.error || "Unknown error"}`;
+      return `â Replied to story mention from ${args.recipient_id}.`;
+    },
+  },
+  {
+    name: "instagram_get_recent_comments",
+    description: "Fetch recent comments on your latest Instagram posts to see what people are saying.",
+    parameters: { type: "object", properties: {}, required: [] },
+    destructive: false,
+    execute: async () => {
+      const ANON_KEY = Deno.env.get("SUPABASE_PUBLISHABLE_KEY") || SUPABASE_SERVICE_ROLE_KEY;
+      const resp = await fetch(`${SUPABASE_URL}/functions/v1/instagram-messaging`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${ANON_KEY}` },
+        body: JSON.stringify({ action: "get_recent_comments" }),
+      });
+      const data = await resp.json();
+      if (!resp.ok || !data.success) return `â Could not fetch comments: ${data.error || "Unknown error"}`;
+      return JSON.stringify(data.data);
+    },
+  },
+  {
+    name: "instagram_get_conversations",
+    description: "List recent Instagram DM conversations with latest messages.",
+    parameters: { type: "object", properties: {}, required: [] },
+    destructive: false,
+    execute: async () => {
+      const ANON_KEY = Deno.env.get("SUPABASE_PUBLISHABLE_KEY") || SUPABASE_SERVICE_ROLE_KEY;
+      const resp = await fetch(`${SUPABASE_URL}/functions/v1/instagram-messaging`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${ANON_KEY}` },
+        body: JSON.stringify({ action: "get_conversations" }),
+      });
+      const data = await resp.json();
+      if (!resp.ok || !data.success) return `â Could not fetch conversations: ${data.error || "Unknown error"}`;
+      return JSON.stringify(data.data);
+    },
+  },
+  {
+    name: "ingest_drive_clients" as const,
+    description: "Scans Google Drive for all client folders, reads every document, extracts forensic credit timeline events using AI, and imports them into Credit Guardian. WRITE operation â always call propose_plan first in autonomous mode.",
+    destructive: false,
+    parameters: {
+      type: "object" as const,
+      properties: {
+        client_name: {
+          type: "string",
+          description: "Optional: only process one specific client folder by name. Omit to process all clients.",
+        },
+      },
+      required: [],
+    },
+    execute: async (args: { client_name?: string }) => {
+      const INGEST_URL = `${Deno.env.get("SUPABASE_URL")}/functions/v1/ingest-drive-clients`;
+      const resp = await fetch(INGEST_URL, {
+        method: "POST",
+        headers: {
+          "Authorization": `Bearer ${Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ client_name: args.client_name }),
+      });
+      if (!resp.ok) throw new Error(`Drive ingestion failed: ${resp.status} â ${await resp.text()}`);
+      return JSON.stringify(await resp.json());
+    },
+  },
+  {
+    name: "query_credit_guardian" as const,
+    description:
+      "Read-only query of Fairway Fixer (Credit Guardian) via cross-project-api. Uses get_clients, get_client_detail (includes timeline events), get_documents, get_recent_activity. For legacy prompts, session_id is treated as Fairway client UUID.",
+    destructive: false,
+    parameters: {
+      type: "object" as const,
+      properties: {
+        action: {
+          type: "string",
+          enum: [
+            "get_clients",
+            "get_client_detail",
+            "get_documents",
+            "get_recent_activity",
+            "get_assessments",
+            "get_timeline_events",
+            "get_assessment_detail",
+            "get_report",
+          ],
+          description:
+            "Fairway actions: get_clients, get_client_detail, get_documents, get_recent_activity. Legacy names map to get_clients or get_client_detail (use client_id).",
+        },
+        client_id: {
+          type: "string",
+          description: "Fairway client UUID — required for get_client_detail, get_documents; optional filter for get_recent_activity.",
+        },
+        session_id: {
+          type: "string",
+          description: "Alias for client_id (legacy). Used when client_id omitted.",
+        },
+        limit: { type: "number", description: "For get_recent_activity (max 100)." },
+      },
+      required: ["action"],
+    },
+    execute: async (args: {
+      action: string;
+      client_id?: string;
+      session_id?: string;
+      limit?: number;
+    }) => {
+      const cid = args.client_id || args.session_id;
+      let body: Record<string, unknown>;
+
+      switch (args.action) {
+        case "get_clients":
+        case "get_assessments":
+          body = { action: "get_clients" };
+          break;
+        case "get_timeline_events":
+        case "get_assessment_detail":
+        case "get_report":
+        case "get_client_detail":
+          if (!cid) {
+            throw new Error("client_id or session_id (Fairway client UUID) required for this action");
+          }
+          body = { action: "get_client_detail", params: { client_id: cid } };
+          break;
+        case "get_documents":
+          if (!cid) throw new Error("client_id or session_id required");
+          body = { action: "get_documents", params: { client_id: cid } };
+          break;
+        case "get_recent_activity": {
+          const params: Record<string, unknown> = {};
+          if (typeof args.limit === "number") params.limit = args.limit;
+          if (cid) params.client_id = cid;
+          body = { action: "get_recent_activity", params };
+          break;
+        }
+        default:
+          throw new Error(`Unknown action: ${args.action}`);
+      }
+
+      const resp = await fetchCreditGuardian(body);
+      const text = await resp.text();
+      if (!resp.ok) throw new Error(`Credit Guardian query failed: ${resp.status} — ${text.slice(0, 300)}`);
+      return text;
+    },
+  },
+  {
+    name: "query_credit_compass" as const,
+    description:
+      "Query Credit Compass (same Supabase/Lovable project as Credit Guardian — GitHub: fairway-fixer-18; Lovable may show the Credit Compass name) for credit assessment data, client records, dispute sessions, and strategy context. Use when the user asks about credit assessments, battle plans, or Credit Compass specifically.",
+    parameters: {
+      type: "object" as const,
+      properties: {
+        action: {
+          type: "string",
+          enum: [
+            "get_clients",
+            "get_client_detail",
+            "get_assessment",
+            "create_assessment",
+            "get_dispute_letters",
+            "generate_dispute_letters",
+          ],
+          description: "The Credit Compass action to perform",
+        },
+        client_name: {
+          type: "string",
+          description: "Client name to look up",
+        },
+        client_id: {
+          type: "string",
+          description: "Client ID for specific record lookups",
+        },
+        assessment_id: {
+          type: "string",
+          description: "Assessment ID for detailed queries",
+        },
+      },
+      required: ["action"],
+    },
+    destructive: false,
+    execute: async (params: {
+      action: string;
+      client_name?: string;
+      client_id?: string;
+      assessment_id?: string;
+    }) => {
+      const { action, client_name, client_id, assessment_id } = params;
+      // Credit Compass = fairway-fixer-18 / Credit Guardian (same project); Lovable display name may say Credit Compass.
+      // Secrets: often same host as CREDIT_GUARDIAN_URL. This path uses Bearer → control-center-api (legacy shape).
+      // Fairway’s control-center-api handler is the same as cross-project-api and expects x-api-key — if CREDIT_COMPASS_URL
+      // points at Fairway and you get 401, align with CREDIT_GUARDIAN_KEY or refactor this tool to fetchCreditGuardian().
+      const CREDIT_COMPASS_URL = Deno.env.get("CREDIT_COMPASS_URL");
+      if (!CREDIT_COMPASS_URL) {
+        return JSON.stringify({ error: "CREDIT_COMPASS_URL secret is not set in this project" });
+      }
+      // Service role or shared secret for the Credit Compass / Fairway project (CREDIT_COMPASS_KEY in CC Edge secrets).
+      const compassKey = Deno.env.get("CREDIT_COMPASS_KEY") ?? "";
+      if (!compassKey) {
+        return JSON.stringify({
+          error:
+            "CREDIT_COMPASS_KEY is not set — add it to Control Center Edge Function secrets",
+        });
+      }
+      // Auth strategy: try x-api-key first (matches Fairway cross-project-api contract),
+      // fall back to Bearer if that returns 401/403.
+      const payload = JSON.stringify({ action, client_name, client_id, assessment_id });
+      const endpoint = `${CREDIT_COMPASS_URL}/functions/v1/control-center-api`;
+      try {
+        let resp = await fetch(endpoint, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "x-api-key": compassKey,
+          },
+          body: payload,
+        });
+        // Fallback: if x-api-key rejected, try Bearer auth
+        if (resp.status === 401 || resp.status === 403) {
+          console.log("[query_credit_compass] x-api-key auth failed, trying Bearer fallback");
+          resp = await fetch(endpoint, {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+              Authorization: `Bearer ${compassKey}`,
+            },
+            body: payload,
+          });
+        }
+        if (!resp.ok) {
+          const detail = (await resp.text()).slice(0, 2000);
+          return JSON.stringify({
+            error: `Credit Compass returned ${resp.status} (tried x-api-key then Bearer)`,
+            detail,
+          });
+        }
+        return JSON.stringify(await resp.json());
+      } catch (err: unknown) {
+        const msg = err instanceof Error ? err.message : String(err);
+        return JSON.stringify({ error: `Failed to reach Credit Compass: ${msg}` });
+      }
+    },
+  },
+  {
+    name: "query_cc_tax" as const,
+    description:
+      "Query CC Tax (taxgenerator project) for tax data — workflow status, tax year configuration, documents, transactions, evidence, invoices, income reconciliation, and discrepancies. Use when the user asks about tax filings, tax year progress, tax documents, expenses, or anything CC Tax-related.",
+    parameters: {
+      type: "object" as const,
+      properties: {
+        action: {
+          type: "string",
+          enum: [
+            "get_workflow_status",
+            "get_year_config",
+            "get_documents",
+            "get_transactions",
+            "get_evidence",
+            "get_invoices",
+            "get_reconciliations",
+            "get_discrepancies",
+            "get_pl_report",
+          ],
+          description: "The CC Tax action to perform",
+        },
+        tax_year: {
+          type: "number",
+          description: "The tax year to query (e.g. 2024). Defaults to current/most recent year if omitted.",
+        },
+        status_filter: {
+          type: "string",
+          description: "Optional filter — e.g. 'unresolved', 'missing', 'critical', 'pending'",
+        },
+        limit: {
+          type: "number",
+          description: "Max number of records to return (default 20)",
+        },
+      },
+      required: ["action"],
+    },
+    destructive: false,
+    execute: async (params: {
+      action: string;
+      tax_year?: number;
+      status_filter?: string;
+      limit?: number;
+    }) => {
+      const { action, tax_year, status_filter, limit } = params;
+      const CC_TAX_URL = Deno.env.get("CC_TAX_URL");
+      if (!CC_TAX_URL) {
+        return JSON.stringify({
+          error: "CC_TAX_URL secret is not set in this project. CC Tax integration is not yet connected.",
+        });
+      }
+      const ccTaxKey = Deno.env.get("CC_TAX_KEY") ?? "";
+      if (!ccTaxKey) {
+        return JSON.stringify({
+          error: "CC_TAX_KEY is not set — add taxgenerator service role to Control Center Edge Function secrets",
+        });
+      }
+      try {
+        const resp = await fetch(`${CC_TAX_URL}/functions/v1/control-center-api`, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: `Bearer ${ccTaxKey}`,
+          },
+          body: JSON.stringify({ action, tax_year, status_filter, limit }),
+        });
+        if (!resp.ok) {
+          return JSON.stringify({
+            error: `CC Tax returned ${resp.status}`,
+            detail: (await resp.text()).slice(0, 2000),
+          });
+        }
+        return JSON.stringify(await resp.json());
+      } catch (err: unknown) {
+        const msg = err instanceof Error ? err.message : String(err);
+        return JSON.stringify({ error: `Failed to reach CC Tax: ${msg}` });
+      }
+    },
+  {
+    name: "scan_drive_overview" as const,
+    description: "Read-only scan of Google Drive client folders. Returns client names, file counts, and file types â does NOT read file contents. Call this first in autonomous mode to understand what's in Drive. Safe to call without approval.",
+    destructive: false,
+    parameters: {
+      type: "object" as const,
+      properties: {},
+      required: [],
+    },
+    execute: async () => {
+      const GOOGLE_API_KEY = Deno.env.get("Google_Cloud_Key")!;
+      const rawFolder = Deno.env.get("DRIVE_FOLDER_ID")!;
+      const rootFolderId = rawFolder.includes("/folders/")
+        ? rawFolder.split("/folders/").pop()!.split("?")[0]
+        : rawFolder;
+      const q = `'${rootFolderId}' in parents and mimeType = 'application/vnd.google-apps.folder' and trashed = false`;
+      const foldersResp = await fetch(
+        `https://www.googleapis.com/drive/v3/files?q=${encodeURIComponent(q)}&fields=files(id,name)&key=${GOOGLE_API_KEY}`
+      );
+      if (!foldersResp.ok) throw new Error(`Drive API error: ${foldersResp.status}`);
+      const { files: clientFolders } = await foldersResp.json();
+      const overview: Array<{ client: string; folder_id: string; file_count: number; file_types: string[] }> = [];
+      for (const folder of (clientFolders || []).slice(0, 30)) {
+        const filesQ = `'${folder.id}' in parents and trashed = false`;
+        const filesResp = await fetch(
+          `https://www.googleapis.com/drive/v3/files?q=${encodeURIComponent(filesQ)}&fields=files(id,name,mimeType)&key=${GOOGLE_API_KEY}`
+        );
+        const { files } = await filesResp.json();
+        const fileList: any[] = files || [];
+        const mimeShort = (m: string) =>
+          m.includes("google-apps.document") ? "Google Doc"
+          : m.includes("google-apps.spreadsheet") ? "Sheet"
+          : m.includes("pdf") ? "PDF"
+          : m.includes("word") ? "Word"
+          : "Other";
+        overview.push({
+          client: folder.name,
+          folder_id: folder.id,
+          file_count: fileList.length,
+          file_types: [...new Set(fileList.map(f => mimeShort(f.mimeType)))] as string[],
+        });
+      }
+      return JSON.stringify({ total_clients: clientFolders?.length ?? 0, clients: overview });
+    },
+  },
+  {
+    name: "propose_plan" as const,
+    description: "MANDATORY before any write operation in autonomous mode. Presents a step-by-step plan to the user via Telegram and waits for approval. After calling this you MUST stop â do not call any write tools until the user sends an approval word in their next message.",
+    destructive: false,
+    parameters: {
+      type: "object" as const,
+      properties: {
+        goal: { type: "string", description: "One sentence: what you are trying to accomplish." },
+        steps: {
+          type: "array",
+          items: { type: "string" },
+          description: "Ordered list of actions you will take.",
+        },
+        reads: {
+          type: "array",
+          items: { type: "string" },
+          description: "Data sources you will read from.",
+        },
+        writes: {
+          type: "array",
+          items: { type: "string" },
+          description: "Systems you will write to. Empty if read-only.",
+        },
+        risk_level: {
+          type: "string",
+          enum: ["low", "medium", "high"],
+          description: "low=read-only. medium=writes new data. high=modifies existing data.",
+        },
+      },
+      required: ["goal", "steps", "risk_level"],
+    },
+    execute: async (args: {
+      goal: string;
+      steps: string[];
+      reads?: string[];
+      writes?: string[];
+      risk_level: "low" | "medium" | "high";
+    }) => {
+      const riskEmoji = { low: "ð¢", medium: "ð¡", high: "ð´" }[args.risk_level] ?? "âª";
+      const stepsList = (args.steps || []).map((s, i) => `  ${i + 1}. ${s}`).join("\n");
+      const readsList = args.reads?.length ? `\nð *Reads:* ${args.reads.join(", ")}` : "";
+      const writesList = args.writes?.length ? `\nâï¸ *Writes to:* ${args.writes.join(", ")}` : "";
+      const planMsg = [
+        `ð¤ *Autonomous Plan* â ${riskEmoji} ${args.risk_level.toUpperCase()} risk`,
+        ``,
+        `*Goal:* ${args.goal}`,
+        ``,
+        `*Steps:*`,
+        stepsList,
+        readsList,
+        writesList,
+        ``,
+        `Reply *yes*, *go*, or *approved* to execute.`,
+        `Reply *no* or *cancel* to abort.`,
+      ].join("\n");
+      const planId = crypto.randomUUID();
+      await supabase.from("bot_settings").upsert(
+        {
+          setting_key: `pending_plan:${planId}`,
+          setting_value: JSON.stringify({ goal: args.goal, steps: args.steps, planId, created_at: new Date().toISOString() }),
+          updated_at: new Date().toISOString(),
+        },
+        { onConflict: "setting_key" }
+      );
+      return JSON.stringify({
+        plan_presented: true,
+        plan_id: planId,
+        telegram_message: planMsg,
+        awaiting_approval: true,
+        instruction: "Send telegram_message to the user via sendMessage and STOP. Do NOT call any write tools. Wait for user approval.",
+      });
+    },
+  },
+  {
+    name: "find_playlist_opportunities",
+    description:
+      "Research playlist opportunities for a track (FanFuel Hub). If the user has not confirmed a vibe yet, the tool will ask them to confirm in Telegram â do not invent results. When the user already confirmed or provided a vibe, pass user_vibe.",
+    parameters: {
+      type: "object",
+      properties: {
+        track_name: {
+          type: "string",
+          description:
+            "Track title to research. Omit if the user already named the track in the message â the tool infers from the user message and conversation.",
+        },
+        user_vibe: {
+          type: "string",
+          description:
+            "Optional. Confirmed vibe (e.g. west coast chill). Omit on first call if unknown â user will confirm in chat.",
+        },
+      },
+      required: [] as string[],
+    },
+    destructive: false,
+    execute: async (args: { track_name?: string; user_vibe?: string }, context?: ToolExecuteContext) => {
+      const trackName = await resolvePlaylistTrackName(args, context);
+      const explicitVibe = args?.user_vibe?.trim();
+
+      if (!trackName) {
+        return [
+          `ð§ *Playlist opportunities*`,
+          ``,
+          `I couldn’t detect a track name from your message.`,
+          `Try: \`/do find_playlist_opportunities\` with the track (e.g. *Meditate by Fendi Frost*) or name the track in your next message.`,
+        ].join("\n");
+      }
+
+      if (explicitVibe) {
+        return await runPlaylistHubResearch(trackName, explicitVibe, context?.chatId);
+      }
+
+      const chatId = context?.chatId;
+      if (!chatId) {
+        const inferred = inferVibeFromTrack(trackName);
+        return await runPlaylistHubResearch(trackName, inferred);
+      }
+
+      const inferred = inferVibeFromTrack(trackName);
+      await setPlaylistConfirm(chatId, {
+        track_name: trackName,
+        inferred_vibe: inferred,
+        created_at: new Date().toISOString(),
+      });
+
+      return [
+        `ð§ *Confirm vibe before playlist search*`,
+        ``,
+        `Track: *${trackName}*`,
+        `Suggested vibe: *${inferred}*`,
+        ``,
+        `Reply *yes*, *y*, or *ok* to use this vibe, or type your own vibe in one message.`,
+        `Send *cancel* to abort.`,
+      ].join("\n");
+    },
+  },
+  {
+    name: "get_pitch_report" as const,
+    description: "Get a report of all playlist pitches sent, replied, and placed.",
+    parameters: { type: "object", properties: { track_name: { type: "string" } }, required: [] },
+    destructive: false,
+    execute: async (args: { track_name?: string }) => {
+      const result = await callFanFuelHub("pitch-status", { track_name: args?.track_name ?? "" });
+      const entries = result?.entries ?? [];
+      if (!Array.isArray(entries) || entries.length === 0) return "No pitches logged yet.";
+      const lines = entries.slice(0, 25).map((p: any) =>
+        `• ${p.playlist_id} — ${p.track_name} — ${p.status} (${p.method ?? "?"})`
+      ).join("\n");
+      const cap = result?.summary?.email_pitches_last_24h;
+      const capLine = typeof cap === "number" ? `\nEmail pitches (last 24h): ${cap}/10` : "";
+      return `Pitch log (${entries.length} shown):\n\n${lines}${capLine}`;
+    },
+  },
+  {
+    name: "send_playlist_pitch",
+    description: "Execute one pitch for a playlist via FanFuel Hub (email or instructions). Pass playlist_id and track_name.",
+    parameters: {
+      type: "object",
+      properties: {
+        playlist_id: { type: "string" },
+        track_name: { type: "string" },
+        tier_confirmed: { type: "boolean", description: "Set true if user confirmed a tier-3 target." },
+      },
+      required: ["playlist_id", "track_name"],
+    },
+    destructive: true,
+    execute: async (args: any) => {
+      const res = await callFanFuelHub("execute-pitch", {
+        playlist_id: args.playlist_id,
+        track_name: args.track_name,
+        tier_confirmed: Boolean(args.tier_confirmed),
+      });
+      return typeof res?.message_to_user === "string" ? res.message_to_user : JSON.stringify(res ?? {});
+    },
+  },
+  {
+    name: "update_pitch_status",
+    description: "Update curator response for a pitch (responded or rejected) in pitch_log.",
+    parameters: {
+      type: "object",
+      properties: {
+        playlist_id: { type: "string" },
+        playlist_name: { type: "string", description: "If playlist_id unknown, pass name to resolve." },
+        track_name: { type: "string" },
+        status: { type: "string", description: "responded | rejected" },
+        notes: { type: "string" },
+      },
+      required: ["track_name", "status"],
+    },
+    destructive: false,
+    execute: async (args: any) => {
+      const res = await callFanFuelHub("update-pitch-status", {
+        playlist_id: args.playlist_id,
+        playlist_name: args.playlist_name,
+        track_name: args.track_name,
+        status: args.status,
+        notes: args.notes,
+      });
+      return typeof res?.message_to_user === "string" ? res.message_to_user : JSON.stringify(res ?? {});
+    },
+  },
+  {
+    name: "analyze_credit_strategy",
+    description: "Analyze a client's credit timeline and generate prioritized dispute strategy via Claude.",
+    parameters: {
+      type: "object",
+      properties: {
+        client_id: { type: "string" },
+        client_name: { type: "string" },
+      },
+      required: [],
+    },
+    destructive: false,
+    execute: async (args: any) => {
+      const ANON_KEY = Deno.env.get("SUPABASE_PUBLISHABLE_KEY") || SUPABASE_SERVICE_ROLE_KEY;
+      const resp = await fetch(`${SUPABASE_URL}/functions/v1/analyze-credit-strategy`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${ANON_KEY}` },
+        body: JSON.stringify({ client_id: args.client_id, client_name: args.client_name }),
+      });
+      const raw = await resp.text();
+      if (!resp.ok) throw new Error(`analyze-credit-strategy failed (${resp.status}): ${raw.slice(0, 400)}`);
+      return raw;
+    },
+  },
+  {
+    name: "generate_dispute_letter",
+    description: "Generate an FCRA-aligned dispute letter draft for one dispute item via Claude.",
+    parameters: {
+      type: "object",
+      properties: {
+        client_id: { type: "string" },
+        dispute_item: { type: "object" },
+        analysis_id: { type: "string" },
+      },
+      required: ["client_id", "dispute_item"],
+    },
+    destructive: true,
+    execute: async (args: any) => {
+      const ANON_KEY = Deno.env.get("SUPABASE_PUBLISHABLE_KEY") || SUPABASE_SERVICE_ROLE_KEY;
+      const resp = await fetch(`${SUPABASE_URL}/functions/v1/generate-dispute-letters`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${ANON_KEY}` },
+        body: JSON.stringify({ action: "generate", client_id: args.client_id, dispute_item: args.dispute_item, analysis_id: args.analysis_id }),
+      });
+      const raw = await resp.text();
+      if (!resp.ok) throw new Error(`generate-dispute-letters failed (${resp.status}): ${raw.slice(0, 400)}`);
+      return raw;
+    },
+  },
+  {
+    name: "send_dispute_letter",
+    description: "Mark a generated dispute letter approved for send.",
+    parameters: {
+      type: "object",
+      properties: {
+        letter_id: { type: "string" },
+      },
+      required: ["letter_id"],
+    },
+    destructive: true,
+    execute: async (args: any) => {
+      const ANON_KEY = Deno.env.get("SUPABASE_PUBLISHABLE_KEY") || SUPABASE_SERVICE_ROLE_KEY;
+      const resp = await fetch(`${SUPABASE_URL}/functions/v1/generate-dispute-letters`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${ANON_KEY}` },
+        body: JSON.stringify({ action: "send", letter_id: args.letter_id }),
+      });
+      const raw = await resp.text();
+      if (!resp.ok) throw new Error(`send_dispute_letter failed (${resp.status}): ${raw.slice(0, 400)}`);
+      return raw;
+    },
+  },
+  {
+    name: "research_playlists",
+    description: "Research playlist opportunities for a track via ChatGPT and FanFuel context.",
+    parameters: {
+      type: "object",
+      properties: {
+        track_name: { type: "string" },
+        genre: { type: "string" },
+        mood: { type: "string" },
+        bpm: { type: "number" },
+        similar_artists: { type: "array", items: { type: "string" } },
+      },
+      required: ["track_name"],
+    },
+    destructive: false,
+    execute: async (args: any) => {
+      const ANON_KEY = Deno.env.get("SUPABASE_PUBLISHABLE_KEY") || SUPABASE_SERVICE_ROLE_KEY;
+      const resp = await fetch(`${SUPABASE_URL}/functions/v1/playlist-research`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${ANON_KEY}` },
+        body: JSON.stringify(args),
+      });
+      const raw = await resp.text();
+      if (!resp.ok) throw new Error(`playlist-research failed (${resp.status}): ${raw.slice(0, 400)}`);
+      return raw;
+    },
+  },
+  {
+    name: "generate_pitch",
+    description: "Generate a personalized playlist pitch email draft via ChatGPT.",
+    parameters: {
+      type: "object",
+      properties: {
+        playlist_id: { type: "string" },
+        track_id: { type: "string" },
+        research_id: { type: "string" },
+      },
+      required: ["playlist_id", "track_id"],
+    },
+    destructive: false,
+    execute: async (args: any) => {
+      const ANON_KEY = Deno.env.get("SUPABASE_PUBLISHABLE_KEY") || SUPABASE_SERVICE_ROLE_KEY;
+      const resp = await fetch(`${SUPABASE_URL}/functions/v1/generate-pitch-email`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${ANON_KEY}` },
+        body: JSON.stringify({ action: "generate", ...args }),
+      });
+      const raw = await resp.text();
+      if (!resp.ok) throw new Error(`generate-pitch-email failed (${resp.status}): ${raw.slice(0, 400)}`);
+      return raw;
+    },
+  },
+  {
+    name: "send_pitch",
+    description: "Mark a generated pitch draft approved for send.",
+    parameters: {
+      type: "object",
+      properties: {
+        pitch_id: { type: "string" },
+      },
+      required: ["pitch_id"],
+    },
+    destructive: true,
+    execute: async (args: any) => {
+      const ANON_KEY = Deno.env.get("SUPABASE_PUBLISHABLE_KEY") || SUPABASE_SERVICE_ROLE_KEY;
+      const resp = await fetch(`${SUPABASE_URL}/functions/v1/generate-pitch-email`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${ANON_KEY}` },
+        body: JSON.stringify({ action: "send", pitch_id: args.pitch_id }),
+      });
+      const raw = await resp.text();
+      if (!resp.ok) throw new Error(`send_pitch failed (${resp.status}): ${raw.slice(0, 400)}`);
+      return raw;
+    },
+  },
+  {
+    name: "analyze_client_credit",
+    description: "Sync Google Drive files for a client and run the full credit analysis pipeline. Use when Fendi asks to analyze, check, process, or run credit reports for a client like Nicholas, Corey, or Lamonze.",
+    parameters: {
+      client_name: { type: "string", description: "Client name (e.g. 'Nicholas', 'Corey', 'Lamonze')" },
+    },
+    destructive: false,
+    execute: async (params: any) => {
+      const { client_name } = params;
+      const ANON_KEY = Deno.env.get("SUPABASE_PUBLISHABLE_KEY") || SUPABASE_SERVICE_ROLE_KEY;
+      // 1. Trigger drive-sync to pull latest files from Google Drive
+      const syncResp = await fetch(SUPABASE_URL + "/functions/v1/drive-sync", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: "Bearer " + ANON_KEY },
+        body: JSON.stringify({}),
+      });
+      const syncResult = syncResp.ok ? await syncResp.json() : { error: await syncResp.text() };
+      // 2. Find client by name
+      const { data: clients } = await supabase
+        .from("clients")
+        .select("id, name")
+        .ilike("name", "%" + client_name + "%")
+        .limit(5);
+      if (!clients || clients.length === 0) {
+        return JSON.stringify({ error: "No client found matching '" + client_name + "'. Drive sync ran: " + JSON.stringify(syncResult) });
+      }
+      const client = clients[0];
+      // 3. Count and trigger process-document for queued jobs
+      const { count: queuedCount } = await supabase
+        .from("ingestion_jobs")
+        .select("id", { count: "exact", head: true })
+        .eq("client_id", client.id)
+        .eq("status", "queued");
+      let processed = 0;
+      const toProcess = Math.min(queuedCount || 0, 8);
+      for (let i = 0; i < toProcess; i++) {
+        const procResp = await fetch(SUPABASE_URL + "/functions/v1/process-document", {
+          method: "POST",
+          headers: { "Content-Type": "application/json", Authorization: "Bearer " + ANON_KEY },
+          body: JSON.stringify({}),
+        });
+        if (procResp.ok) processed++;
+      }
+      // 4. Return summary
+      const { count: obsCount } = await supabase
+        .from("observations")
+        .select("id", { count: "exact", head: true })
+        .eq("client_id", client.id);
+      const { data: docs } = await supabase
+        .from("documents")
+        .select("file_name, status, bureau, doc_type")
+        .eq("client_id", client.id)
+        .order("updated_at", { ascending: false })
+        .limit(10);
+      return JSON.stringify({
+        client: client.name,
+        client_id: client.id,
+        drive_sync_result: syncResult,
+        processing_jobs_triggered: processed,
+        jobs_queued_before_sync: queuedCount || 0,
+        total_observations_on_file: obsCount || 0,
+        recent_documents: (docs || []).map((d: any) => ({ name: d.file_name, status: d.status, bureau: d.bureau, type: d.doc_type })),
+      });
+    },
+  },
+  {
+    name: "get_client_report",
+    description: "Get a full credit analysis summary for a client - negative tradelines, hard inquiries, public records, bureaus covered. Use when asked to show, read, or summarize a client's credit data.",
+    parameters: {
+      type: "object" as const,
+      properties: {
+        client_name: { type: "string", description: "Client name (e.g. 'Nicholas', 'Corey', 'Lamonze')" },
+        bureau: { type: "string", description: "Optional: filter by bureau - equifax, experian, transunion" },
+      },
+      required: ["client_name"],
+    },
+    destructive: false,
+    execute: async (params: any) => {
+      const { client_name, bureau } = params;
+      const { data: clients } = await supabase
+        .from("clients")
+        .select("id, name")
+        .ilike("name", "%" + client_name + "%")
+        .limit(3);
+      if (!clients || clients.length === 0) {
+        return JSON.stringify({ error: "No client found matching '" + client_name + "'. Run analyze_client_credit first." });
+      }
+      const client = clients[0];
+      let docsQuery = supabase
+        .from("documents")
+        .select("id, file_name, bureau, doc_type, status, report_date")
+        .eq("client_id", client.id)
+        .eq("doc_type", "credit_report");
+      if (bureau) docsQuery = (docsQuery as any).eq("bureau", bureau.toLowerCase());
+      const { data: docs } = await (docsQuery as any).order("report_date", { ascending: false });
+      const { data: negTradelines } = await supabase
+        .from("observations")
+        .select("object_key, field_name, field_value_text, evidence_snippet")
+        .eq("client_id", client.id)
+        .eq("object_type", "tradeline")
+        .or("field_value_text.ilike.%late%,field_value_text.ilike.%charge off%,field_value_text.ilike.%collection%,field_value_text.ilike.%derogatory%,field_value_text.ilike.%past due%")
+        .limit(40);
+      const { count: hardInqCount } = await supabase
+        .from("observations")
+        .select("id", { count: "exact", head: true })
+        .eq("client_id", client.id)
+        .eq("object_type", "inquiry")
+        .eq("field_name", "inquiry_type")
+        .eq("field_value_text", "hard");
+      const { data: pubRecs } = await supabase
+        .from("observations")
+        .select("object_key, field_name, field_value_text")
+        .eq("client_id", client.id)
+        .eq("object_type", "public_record")
+        .limit(10);
+      const negByAccount: Record<string, any[]> = {};
+      for (const obs of negTradelines || []) {
+        if (!negByAccount[obs.object_key]) negByAccount[obs.object_key] = [];
+        negByAccount[obs.object_key].push({ field: obs.field_name, value: obs.field_value_text });
+      }
+      return JSON.stringify({
+        client: client.name,
+        documents_processed: docs?.length || 0,
+        bureaus_covered: [...new Set((docs || []).map((d: any) => d.bureau).filter(Boolean))],
+        negative_tradeline_count: Object.keys(negByAccount).length,
+        negative_tradelines: Object.entries(negByAccount).slice(0, 20).map(([key, items]) => ({ account: key, issues: items })),
+        hard_inquiries: hardInqCount || 0,
+        public_records_count: pubRecs?.length || 0,
+        public_record_details: pubRecs || [],
+        documents: docs || [],
+      });
+    },
+  },
+  {
+    name: "generate_dispute_letters",
+    description: "Generate professional FCRA-compliant credit dispute letters for a client based on their analyzed credit data. Creates one letter per bureau targeting all negative items found.",
+    parameters: {
+      client_name: { type: "string", description: "Client name (e.g. 'Nicholas', 'Corey', 'Lamonze')" },
+      bureau: { type: "string", description: "Optional: target one bureau - equifax, experian, transunion. Leave blank for all bureaus." },
+    },
+    destructive: false,
+    execute: async (params: any) => {
+      const { client_name, bureau } = params;
+      const { data: clients } = await supabase
+        .from("clients")
+        .select("id, name")
+        .ilike("name", "%" + client_name + "%")
+        .limit(3);
+      if (!clients || clients.length === 0) {
+        return JSON.stringify({ error: "No client found matching '" + client_name + "'" });
+      }
+      const client = clients[0];
+      const { data: personalObs } = await supabase
+        .from("observations")
+        .select("field_name, field_value_text")
+        .eq("client_id", client.id)
+        .eq("object_type", "personal_info")
+        .in("field_name", ["full_name", "address", "dob"]);
+      const personalInfo: Record<string, string> = {};
+      for (const obs of personalObs || []) personalInfo[obs.field_name] = obs.field_value_text;
+      const { data: negObs } = await supabase
+        .from("observations")
+        .select("object_key, field_name, field_value_text, document_id")
+        .eq("client_id", client.id)
+        .eq("object_type", "tradeline")
+        .or("field_value_text.ilike.%late%,field_value_text.ilike.%charge off%,field_value_text.ilike.%collection%,field_value_text.ilike.%derogatory%,field_value_text.ilike.%past due%")
+        .limit(60);
+      const { data: creditDocs } = await supabase
+        .from("documents")
+        .select("id, bureau")
+        .eq("client_id", client.id)
+        .eq("doc_type", "credit_report");
+      const docBureau: Record<string, string> = {};
+      for (const d of creditDocs || []) docBureau[d.id] = d.bureau;
+      const byBureau: Record<string, Record<string, string[]>> = {};
+      for (const obs of negObs || []) {
+        const b = docBureau[obs.document_id] || "unknown";
+        if (bureau && b !== bureau.toLowerCase()) continue;
+        if (!byBureau[b]) byBureau[b] = {};
+        if (!byBureau[b][obs.object_key]) byBureau[b][obs.object_key] = [];
+        byBureau[b][obs.object_key].push(obs.field_name + ": " + obs.field_value_text);
+      }
+      if (Object.keys(byBureau).length === 0) {
+        return JSON.stringify({ error: "No negative items found. Run analyze_client_credit first to process credit files." });
+      }
+      const bureauAddresses: Record<string, string> = {
+        equifax: "Equifax Information Services LLC\nP.O. Box 740256\nAtlanta, GA 30374-0256",
+        experian: "Experian\nP.O. Box 4500\nAllen, TX 75013",
+        transunion: "TransUnion LLC Consumer Dispute Center\nP.O. Box 2000\nChester, PA 19016",
+      };
+      const letters: any[] = [];
+      for (const [bur, accountMap] of Object.entries(byBureau)) {
+        const disputeItems = Object.entries(accountMap)
+          .map(([acct, issues]) => "Account: " + acct + "\n  Issues: " + issues.join(", "))
+          .join("\n\n");
+        const clientName = personalInfo.full_name || client.name;
+        const clientAddress = personalInfo.address || "[Client Address]";
+        const today = new Date().toLocaleDateString("en-US", { year: "numeric", month: "long", day: "numeric" });
+        const prompt = "Generate a professional credit dispute letter.\n\nClient: " + clientName + "\nClient Address: " + clientAddress + "\nDate: " + today + "\n\nBureau: " + bur.toUpperCase() + "\nBureau Address:\n" + (bureauAddresses[bur] || "[Bureau Address]") + "\n\nNegative items to dispute:\n" + disputeItems + "\n\nInstructions: Write a firm, professional dispute letter citing the Fair Credit Reporting Act (FCRA) Section 611. State that each item is being disputed as inaccurate or unverifiable. Request investigation and removal or correction of each item. Request written response within 30 days. Format as a complete ready-to-send letter.";
+        const geminiUrl = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=" + GEMINI_KEY;
+        const geminiResp = await fetch(geminiUrl, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            contents: [{ role: "user", parts: [{ text: prompt }] }],
+            generationConfig: { maxOutputTokens: 2048 },
+          }),
+        });
+        if (geminiResp.ok) {
+          const geminiData = await geminiResp.json();
+          const letterText = geminiData.candidates?.[0]?.content?.parts?.[0]?.text || "Failed to generate letter";
+          letters.push({ bureau: bur, accounts_disputed: Object.keys(accountMap).length, letter: letterText });
+        } else {
+          letters.push({ bureau: bur, error: "Gemini error: " + geminiResp.status });
+        }
+      }
+      return JSON.stringify({ client: client.name, letters_generated: letters.length, letters });
+    },
+  },
+
+  {
+    name: "analyze_credit_strategy",
+    description: "Analyze a client's credit timeline and generate prioritized dispute strategy via Claude.",
+    parameters: { type: "object", properties: { client_id: { type: "string" }, client_name: { type: "string" } }, required: [] },
+    destructive: false,
+    execute: async (args: any) => {
+      const ANON_KEY = Deno.env.get("SUPABASE_PUBLISHABLE_KEY") || SUPABASE_SERVICE_ROLE_KEY;
+      const resp = await fetch(`${SUPABASE_URL}/functions/v1/analyze-credit-strategy`, { method: "POST", headers: { "Content-Type": "application/json", Authorization: `Bearer ${ANON_KEY}` }, body: JSON.stringify({ client_id: args.client_id, client_name: args.client_name }) });
+      const raw = await resp.text();
+      if (!resp.ok) throw new Error(`analyze-credit-strategy failed (${resp.status}): ${raw.slice(0, 400)}`);
+      return raw;
+    },
+  },
+  {
+    name: "generate_dispute_letter",
+    description: "Generate an FCRA-aligned dispute letter draft for one dispute item via Claude.",
+    parameters: { type: "object", properties: { client_id: { type: "string" }, dispute_item: { type: "object" }, analysis_id: { type: "string" } }, required: ["client_id", "dispute_item"] },
+    destructive: true,
+    execute: async (args: any) => {
+      const ANON_KEY = Deno.env.get("SUPABASE_PUBLISHABLE_KEY") || SUPABASE_SERVICE_ROLE_KEY;
+      const resp = await fetch(`${SUPABASE_URL}/functions/v1/generate-dispute-letters`, { method: "POST", headers: { "Content-Type": "application/json", Authorization: `Bearer ${ANON_KEY}` }, body: JSON.stringify({ action: "generate", client_id: args.client_id, dispute_item: args.dispute_item, analysis_id: args.analysis_id }) });
+      const raw = await resp.text();
+      if (!resp.ok) throw new Error(`generate-dispute-letters failed (${resp.status}): ${raw.slice(0, 400)}`);
+      return raw;
+    },
+  },
+  {
+    name: "send_dispute_letter",
+    description: "Mark a generated dispute letter approved for send.",
+    parameters: { type: "object", properties: { letter_id: { type: "string" } }, required: ["letter_id"] },
+    destructive: true,
+    execute: async (args: any) => {
+      const ANON_KEY = Deno.env.get("SUPABASE_PUBLISHABLE_KEY") || SUPABASE_SERVICE_ROLE_KEY;
+      const resp = await fetch(`${SUPABASE_URL}/functions/v1/generate-dispute-letters`, { method: "POST", headers: { "Content-Type": "application/json", Authorization: `Bearer ${ANON_KEY}` }, body: JSON.stringify({ action: "send", letter_id: args.letter_id }) });
+      const raw = await resp.text();
+      if (!resp.ok) throw new Error(`send_dispute_letter failed (${resp.status}): ${raw.slice(0, 400)}`);
+      return raw;
+    },
+  },
+  {
+    name: "research_playlists",
+    description: "Research playlist opportunities for a track via ChatGPT and FanFuel context.",
+    parameters: { type: "object", properties: { track_name: { type: "string" }, genre: { type: "string" }, mood: { type: "string" }, bpm: { type: "number" }, similar_artists: { type: "array", items: { type: "string" } } }, required: ["track_name"] },
+    destructive: false,
+    execute: async (args: any) => {
+      const ANON_KEY = Deno.env.get("SUPABASE_PUBLISHABLE_KEY") || SUPABASE_SERVICE_ROLE_KEY;
+      const resp = await fetch(`${SUPABASE_URL}/functions/v1/playlist-research`, { method: "POST", headers: { "Content-Type": "application/json", Authorization: `Bearer ${ANON_KEY}` }, body: JSON.stringify(args) });
+      const raw = await resp.text();
+      if (!resp.ok) throw new Error(`playlist-research failed (${resp.status}): ${raw.slice(0, 400)}`);
+      return raw;
+    },
+  },
+  {
+    name: "generate_pitch",
+    description: "Generate a personalized playlist pitch email draft via ChatGPT.",
+    parameters: { type: "object", properties: { playlist_id: { type: "string" }, track_id: { type: "string" }, research_id: { type: "string" } }, required: ["playlist_id", "track_id"] },
+    destructive: false,
+    execute: async (args: any) => {
+      const ANON_KEY = Deno.env.get("SUPABASE_PUBLISHABLE_KEY") || SUPABASE_SERVICE_ROLE_KEY;
+      const resp = await fetch(`${SUPABASE_URL}/functions/v1/generate-pitch-email`, { method: "POST", headers: { "Content-Type": "application/json", Authorization: `Bearer ${ANON_KEY}` }, body: JSON.stringify({ action: "generate", ...args }) });
+      const raw = await resp.text();
+      if (!resp.ok) throw new Error(`generate-pitch-email failed (${resp.status}): ${raw.slice(0, 400)}`);
+      return raw;
+    },
+  },
+  {
+    name: "send_pitch",
+    description: "Mark a generated pitch draft approved for send.",
+    parameters: { type: "object", properties: { pitch_id: { type: "string" } }, required: ["pitch_id"] },
+    destructive: true,
+    execute: async (args: any) => {
+      const ANON_KEY = Deno.env.get("SUPABASE_PUBLISHABLE_KEY") || SUPABASE_SERVICE_ROLE_KEY;
+      const resp = await fetch(`${SUPABASE_URL}/functions/v1/generate-pitch-email`, { method: "POST", headers: { "Content-Type": "application/json", Authorization: `Bearer ${ANON_KEY}` }, body: JSON.stringify({ action: "send", pitch_id: args.pitch_id }) });
+      const raw = await resp.text();
+      if (!resp.ok) throw new Error(`send_pitch failed (${resp.status}): ${raw.slice(0, 400)}`);
+      return raw;
+    },
+  },
+];
+
+// âââ Build tool schemas for AI models âââââââââââââââââââââââââââ
+
+function getToolsForWorkflow(workflowKey: string): ToolDef[] {
+  // Find the workflow's declared tools from the registry cache or AGENT_TOOLS
+  // This is called after fetchWorkflowRegistry, so we filter AGENT_TOOLS by the workflow's tool list
+  return AGENT_TOOLS; // Filtered at call site using workflowToolNames
+}
+
+function getGeminiToolDeclarations(allowedToolNames?: string[]) {
+  const tools = allowedToolNames
+    ? AGENT_TOOLS.filter(t => allowedToolNames.includes(t.name))
+    : AGENT_TOOLS;
+  return tools.map(t => ({
+    name: t.name,
+    description: t.description + (t.destructive ? " [DESTRUCTIVE - requires user confirmation]" : ""),
+    parameters: t.parameters,
+  }));
+}
+
+function getGrokToolSchemas(allowedToolNames?: string[]) {
+  const tools = allowedToolNames
+    ? AGENT_TOOLS.filter(t => allowedToolNames.includes(t.name))
+    : AGENT_TOOLS;
+  return tools.map(t => ({
+    type: "function" as const,
+    function: {
+      name: t.name,
+      description: t.description + (t.destructive ? " [DESTRUCTIVE - requires user confirmation]" : ""),
+      parameters: t.parameters,
+    },
+  }));
+}
+
+// âââ Pending confirmations store (in-memory per invocation, persisted via DB) ââ
+// We'll store pending actions in bot_settings with a special key pattern
+
+async function storePendingAction(actionId: string, toolName: string, args: any) {
+  await supabase.from("bot_settings").upsert({
+    setting_key: `pending_action:${actionId}`,
+    setting_value: JSON.stringify({ tool: toolName, args }),
+    updated_at: new Date().toISOString(),
+  }, { onConflict: "setting_key" });
+}
+
+async function getPendingAction(actionId: string): Promise<{ tool: string; args: any } | null> {
+  const { data } = await supabase
+    .from("bot_settings")
+    .select("setting_value")
+    .eq("setting_key", `pending_action:${actionId}`)
+    .single();
+  if (!data) return null;
+  try { return JSON.parse(data.setting_value); } catch { return null; }
+}
+
+async function deletePendingAction(actionId: string) {
+  await supabase.from("bot_settings").delete().eq("setting_key", `pending_action:${actionId}`);
+}
+
+// ─── Playlist vibe confirmation (two-step) — persisted per chat ───
+function playlistConfirmKey(chatId: string): string {
+  return `playlist_confirm:${chatId}`;
+}
+
+interface PlaylistConfirmState {
+  track_name: string;
+  inferred_vibe: string;
+  created_at: string;
+}
+
+async function getPlaylistConfirm(chatId: string): Promise<PlaylistConfirmState | null> {
+  const { data } = await supabase
+    .from("bot_settings")
+    .select("setting_value")
+    .eq("setting_key", playlistConfirmKey(chatId))
+    .maybeSingle();
+  if (!data?.setting_value) return null;
+  try {
+    return JSON.parse(data.setting_value) as PlaylistConfirmState;
+  } catch {
+    return null;
+  }
+}
+
+async function setPlaylistConfirm(chatId: string, state: PlaylistConfirmState): Promise<void> {
+  await supabase.from("bot_settings").upsert(
+    {
+      setting_key: playlistConfirmKey(chatId),
+      setting_value: JSON.stringify(state),
+      updated_at: new Date().toISOString(),
+    },
+    { onConflict: "setting_key" },
+  );
+}
+
+async function clearPlaylistConfirm(chatId: string): Promise<void> {
+  await supabase.from("bot_settings").delete().eq("setting_key", playlistConfirmKey(chatId));
+}
+
+// ─── Last playlist research (pitch report / pitch N) ─────────────────
+type LastPlaylistResearch = {
+  track_name: string;
+  user_vibe: string;
+  ranked_playlist_ids: string[];
+  ts: string;
+};
+
+function lastPlaylistResearchKey(chatId: string): string {
+  return `last_playlist_research:${chatId}`;
+}
+
+function pendingPitchBulkKey(chatId: string): string {
+  return `pending_pitch_bulk:${chatId}`;
+}
+
+function pendingPitchTier3Key(chatId: string): string {
+  return `pending_pitch_tier3:${chatId}`;
+}
+
+async function saveLastPlaylistResearch(chatId: string, data: LastPlaylistResearch): Promise<void> {
+  await supabase.from("bot_settings").upsert(
+    {
+      setting_key: lastPlaylistResearchKey(chatId),
+      setting_value: JSON.stringify(data),
+      updated_at: new Date().toISOString(),
+    },
+    { onConflict: "setting_key" },
+  );
+}
+
+async function getLastPlaylistResearch(chatId: string): Promise<LastPlaylistResearch | null> {
+  const { data } = await supabase
+    .from("bot_settings")
+    .select("setting_value")
+    .eq("setting_key", lastPlaylistResearchKey(chatId))
+    .maybeSingle();
+  if (!data?.setting_value) return null;
+  try {
+    const p = JSON.parse(data.setting_value);
+    if (p && typeof p.track_name === "string" && Array.isArray(p.ranked_playlist_ids)) {
+      return p as LastPlaylistResearch;
+    }
+  } catch { /* ignore */ }
+  return null;
+}
+
+type PendingPitchBulk = { track_name: string; playlist_ids: string[]; ts: string };
+type PendingPitchTier3 = { playlist_id: string; track_name: string; ts: string };
+
+async function setPendingPitchBulk(chatId: string, state: PendingPitchBulk): Promise<void> {
+  await supabase.from("bot_settings").upsert(
+    {
+      setting_key: pendingPitchBulkKey(chatId),
+      setting_value: JSON.stringify(state),
+      updated_at: new Date().toISOString(),
+    },
+    { onConflict: "setting_key" },
+  );
+}
+
+async function getPendingPitchBulk(chatId: string): Promise<PendingPitchBulk | null> {
+  const { data } = await supabase
+    .from("bot_settings")
+    .select("setting_value")
+    .eq("setting_key", pendingPitchBulkKey(chatId))
+    .maybeSingle();
+  if (!data?.setting_value) return null;
+  try {
+    const p = JSON.parse(data.setting_value);
+    if (p?.track_name && Array.isArray(p.playlist_ids)) return p as PendingPitchBulk;
+  } catch { /* ignore */ }
+  return null;
+}
+
+async function clearPendingPitchBulk(chatId: string): Promise<void> {
+  await supabase.from("bot_settings").delete().eq("setting_key", pendingPitchBulkKey(chatId));
+}
+
+async function setPendingPitchTier3(chatId: string, state: PendingPitchTier3): Promise<void> {
+  await supabase.from("bot_settings").upsert(
+    {
+      setting_key: pendingPitchTier3Key(chatId),
+      setting_value: JSON.stringify(state),
+      updated_at: new Date().toISOString(),
+    },
+    { onConflict: "setting_key" },
+  );
+}
+
+async function getPendingPitchTier3(chatId: string): Promise<PendingPitchTier3 | null> {
+  const { data } = await supabase
+    .from("bot_settings")
+    .select("setting_value")
+    .eq("setting_key", pendingPitchTier3Key(chatId))
+    .maybeSingle();
+  if (!data?.setting_value) return null;
+  try {
+    const p = JSON.parse(data.setting_value);
+    if (p?.playlist_id && p?.track_name) return p as PendingPitchTier3;
+  } catch { /* ignore */ }
+  return null;
+}
+
+async function clearPendingPitchTier3(chatId: string): Promise<void> {
+  await supabase.from("bot_settings").delete().eq("setting_key", pendingPitchTier3Key(chatId));
+}
+
+const NON_BULK_PITCH_METHODS = new Set(["algorithmic", "distributor_pitch"]);
+
+async function hubPlaylistBatch(playlistIds: string[]): Promise<any[]> {
+  if (!playlistIds.length) return [];
+  const r = await callFanFuelHub("playlist-batch", { playlist_ids: playlistIds });
+  return Array.isArray(r?.playlists) ? r.playlists : [];
+}
+
+/** Heuristic vibe label from track title (no external API). */
+function inferVibeFromTrack(trackName: string): string {
+  const t = (trackName || "").toLowerCase();
+  if (/meditat|zen|calm|peace|sleep|ambient|lofi/.test(t)) return "calm / chill / ambient-adjacent";
+  if (/grind|hustle|motivat|money|boss/.test(t)) return "motivational hip-hop / street energy";
+  if (/love|heart|soul|slow/.test(t)) return "R&B / soulful / late-night";
+  return "West Coast hip-hop / smooth soulful lane (Larry June–adjacent)";
+}
+
+/**
+ * Calls FanFuel Hub playlist research. Prefer the dedicated `playlist-research` edge function with body
+ * `{ track_name, user_vibe }` only — do NOT route this through control-center-api using the tool name as
+ * `action` (Hub reports "Unknown action: findplaylistopportunities" when misrouted).
+ * Override edge name with FANFUEL_HUB_PLAYLIST_FN if your project uses a different function name.
+ */
+async function runPlaylistHubResearch(trackName: string, userVibe: string, chatId?: string): Promise<string> {
+  const body = { track_name: trackName, user_vibe: userVibe };
+  const edgeName = (Deno.env.get("FANFUEL_HUB_PLAYLIST_FN") || "playlist-research").trim();
+
+  let result: any;
+  try {
+    result = await callFanFuelHub(edgeName, body);
+  } catch (e1) {
+    const m = e1 instanceof Error ? e1.message : String(e1);
+    // Some Hub deployments only expose playlist via control-center-api with a fixed action name.
+    if (/404|not found|Unknown action|FunctionsHttpError|502|503/i.test(m)) {
+      try {
+        result = await callFanFuelHub("control-center-api", {
+          action: "playlist_research",
+          track_name: trackName,
+          user_vibe: userVibe,
+        });
+      } catch {
+        console.error("[runPlaylistHubResearch] primary failed:", m, "fallback playlist_research failed");
+        throw e1;
+      }
+    } else {
+      throw e1;
+    }
+  }
+
+  if (result?.playlists && Array.isArray(result.playlists) && result.playlists.length > 0) {
+    const rankedIds = result.playlists.map((p: { playlist_id?: string }) => p.playlist_id).filter(Boolean) as string[];
+    if (chatId && rankedIds.length > 0) {
+      await saveLastPlaylistResearch(chatId, {
+        track_name: trackName,
+        user_vibe: userVibe,
+        ranked_playlist_ids: rankedIds,
+        ts: new Date().toISOString(),
+      });
+    }
+    const lines = result.playlists
+      .slice(0, 20)
+      .map((p: any, i: number) => {
+        const mid =
+          p.followers_label ??
+          (typeof p.followers === "number"
+            ? p.followers.toLocaleString()
+            : p.follower_count != null
+              ? p.follower_count.toLocaleString()
+              : "?");
+        const suffix = mid === "editorial" || mid === "N/A" ? "" : " followers";
+        return `${i + 1}. ${p.name ?? p.playlist_name} — ${mid}${suffix}`;
+      })
+      .join("\n");
+    return `Found ${result.playlists.length} playlist opportunities for "${trackName}":\n\n${lines}`;
+  }
+  return `Playlist research complete for "${trackName}" (vibe: ${userVibe}). Results stored. Check back with "show pitch report".`;
+}
+
+/** Infer track title from /do text + recent chat (so /do find_playlist_opportunities still works). */
+function extractPlaylistTrackName(userMessage: string, conversationContext: string): string | null {
+  const combined = `${userMessage}\n${conversationContext}`;
+  // "Title by Artist" (e.g. Meditate by Fendi Frost)
+  const byMatch = combined.match(/\b([A-Za-z0-9][^\n]{0,100}?)\s+by\s+[A-Za-z]/i);
+  if (byMatch) {
+    const t = byMatch[1].trim().replace(/^["']|["']$/g, "");
+    if (t.length >= 1 && t.length <= 120) return t;
+  }
+  // "... for Meditate" / "for TRACK" (end of line, comma, or before by)
+  const forMatch = userMessage.match(
+    /(?:for|about)\s+["']?([^"'\n]+?)["']?(?:\s+by|\s*$|,)/i,
+  );
+  if (forMatch) {
+    let t = forMatch[1].trim();
+    // Normalize common casual phrasing: "for my new song Meditate" -> "Meditate"
+    t = t.replace(/^(my|our)\s+(new\s+)?(song|track)\s+/i, "").trim();
+    if (t.length >= 1 && t.length <= 120 && !/^(me|the|a|an)$/i.test(t)) return t;
+  }
+  const opp = combined.match(
+    /playlist\s+opportunities?\s+for\s+["']?([^"'\n]+?)["']?(?:\s+by|\s*$|,|\s+)/i,
+  );
+  if (opp) {
+    const t = opp[1].trim();
+    if (t.length >= 1 && t.length <= 120) return t;
+  }
+  const opp2 = combined.match(/find\s+playlist\s+opportunities\s+for\s+["']?([^"'\n]+?)["']?/i);
+  if (opp2) {
+    const t = opp2[1].trim();
+    if (t.length >= 1 && t.length <= 120) return t;
+  }
+  return null;
+}
+
+function extractClientNameForCreditCommand(userMessage: string, conversationContext: string): string | null {
+  const combined = `${userMessage}\n${conversationContext}`;
+  const explicit = userMessage.match(/\banaly[sz]e\s+(.+?)\s+(?:new\s+)?(?:equifax|experian|transunion)?\s*credit\s+report\b/i);
+  if (explicit?.[1]) {
+    const name = explicit[1].replace(/\b(my|the|a)\b/gi, "").trim();
+    if (name.length >= 2 && name.length <= 80) return name;
+  }
+  const shorter = combined.match(/\banaly[sz]e\s+(.+?)\s+credit\b/i);
+  if (shorter?.[1]) {
+    const name = shorter[1].replace(/\b(my|the|a|new)\b/gi, "").trim();
+    if (name.length >= 2 && name.length <= 80) return name;
+  }
+  return null;
+}
+
+function isNewClientCreditIntent(lowerText: string): boolean {
+  return (
+    /\bblank\s+client\b/i.test(lowerText) ||
+    /\bnew\s+client\b/i.test(lowerText) ||
+    /\bbuild(ing)?\s+(a\s+)?file\b/i.test(lowerText) ||
+    /\bcreate\s+(a\s+)?(client\s+)?(credit\s+)?summary\b/i.test(lowerText)
+  );
+}
+
+function isExistingClientProgressIntent(lowerText: string): boolean {
+  return (
+    /\bupdated?\s+(equifax|experian|transunion)\b/i.test(lowerText) ||
+    /\bnew\s+(equifax|experian|transunion)\b/i.test(lowerText) ||
+    /\bexisting\s+client\b/i.test(lowerText) ||
+    /\bclient'?s?\s+(updated?|new)\s+(equifax|experian|transunion)\b/i.test(lowerText)
+  );
+}
+
+function isTaxIntent(lowerText: string): boolean {
+  return (
+    /\btax\b/i.test(lowerText) ||
+    /\bcc\s*tax\b/i.test(lowerText) ||
+    /\btax\s+generator\b/i.test(lowerText) ||
+    /\bdiscrepanc(y|ies)\b/i.test(lowerText)
+  );
+}
+
+/** Resolve track title for find_playlist_opportunities when the model omits or sends placeholder track_name. */
+async function resolvePlaylistTrackName(
+  args: { track_name?: string; user_vibe?: string },
+  context?: ToolExecuteContext,
+): Promise<string> {
+  let raw = (args?.track_name || "").trim();
+  if (raw && !/^unknown$/i.test(raw) && raw.toLowerCase() !== "unknown track") {
+    return raw;
+  }
+  const um = context?.userMessage || "";
+  const cc = context?.conversationContext || "";
+  const fromExtract = extractPlaylistTrackName(um, cc);
+  if (fromExtract) return fromExtract;
+  if (context?.chatId) {
+    const conv = cc || (await buildConversationContext(context.chatId));
+    const fromConv = extractPlaylistTrackName(um, conv);
+    if (fromConv) return fromConv;
+  }
+  return "";
+}
+
+function playlistWorkflowSystemAddendum(): string {
+  return `
+PLAYLIST WORKFLOW (ACTIVE — this run is restricted to find_playlist_opportunities):
+- You MUST call the tool find_playlist_opportunities with track_name set to a real song title.
+- If the user only sent a workflow key (e.g. "find_playlist_opportunities"), infer track_name from the Conversation Context below (e.g. messages like "Meditate by Fendi Frost" → track_name "Meditate").
+- Do NOT refuse. Do NOT say you have no tool — find_playlist_opportunities IS available in this workflow.
+- If track_name is truly impossible to infer, call find_playlist_opportunities with track_name "unknown" and the tool will prompt the user.
+`;
+}
+
+// ─── Agentic AI call with tool use ─────────────────────────────
+
+async function agenticGeminiCall(
+  userMessage: string,
+  docContext: string,
+  conversationContext: string,
+  allowedToolNames?: string[],
+  workflowKey?: string,
+): Promise<{ text: string; toolCalls: Array<{ name: string; args: any }> }> {
+  const playlistBlock = workflowKey === "find_playlist_opportunities" ? playlistWorkflowSystemAddendum() : "";
+  const systemPrompt = `You are the ${SYSTEM_IDENTITY}. You serve Fendi Frost as a personal command center assistant.
+${playlistBlock}
+CRITICAL RULES — MANDATORY:
+1. NO TOOL, NO CLAIM: You MUST use your available tools to fulfill requests. NEVER describe what you would do — actually call the function. If the user asks to see comments, call the tool. Do NOT respond with text saying "I'll do X" without calling the corresponding function.
+2. NO WORKFLOW, NO ACTION: If the user's request does not correspond to ANY of your available tools, respond with a short message suggesting they run /workflows to see available commands. Never invent workflows.
+3. EVIDENCE OVER CLAIMS: All data must come from tool calls. Never invent counts, names, or metrics.
+4. For destructive actions (retry, archive, approve, reject, Instagram DMs/replies), ALWAYS call the tool — the system will handle confirmation.
+
+Available capabilities via tools:
+- System status, job management (active jobs summary, failed jobs), document approvals
+- Instagram: send DMs, reply to comments, reply to story mentions, view conversations & comments
+- Drive sync, file listing, client summaries
+- Connected project stats
+- FanFuel / playlists: find_playlist_opportunities (research playlists for a track — FanFuel Hub)
+- Credit strategy: analyze_credit_strategy, generate_dispute_letter, send_dispute_letter
+- Playlist email workflow: research_playlists, generate_pitch, send_pitch
+
+Be concise, professional, and use emoji sparingly.
+
+Recent Documents Context:
+${docContext}
+
+Conversation Context (shared across all models):
+${conversationContext}`;
+
+  const resp = await fetch(
+    `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${GEMINI_KEY}`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        contents: [{ role: "user", parts: [{ text: userMessage }] }],
+        systemInstruction: { parts: [{ text: systemPrompt }] },
+        tools: [{ functionDeclarations: getGeminiToolDeclarations(allowedToolNames) }],
+        toolConfig: { functionCallingConfig: { mode: "AUTO" } },
+        generationConfig: { maxOutputTokens: 1024 },
+      }),
+    }
+  );
+
+  if (!resp.ok) {
+    console.error("Gemini agentic error:", resp.status, await resp.text());
+    return { text: "â ï¸ AI unavailable. Try again shortly.", toolCalls: [] };
+  }
+
+  const data = await resp.json();
+  const parts = data.candidates?.[0]?.content?.parts || [];
+
+  const toolCalls: Array<{ name: string; args: any }> = [];
+  let textResponse = "";
+
+  for (const part of parts) {
+    if (part.functionCall) {
+      toolCalls.push({ name: part.functionCall.name, args: part.functionCall.args || {} });
+    }
+    if (part.text) {
+      textResponse += part.text;
+    }
+  }
+
+  return { text: textResponse, toolCalls };
+}
+
+async function agenticGrokCall(
+  userMessage: string,
+  docContext: string,
+  conversationContext: string,
+  allowedToolNames?: string[],
+  workflowKey?: string,
+): Promise<{ text: string; toolCalls: Array<{ name: string; args: any }> }> {
+  const isAutonomousLane = workflowKey === "free_agent";
+  const autonomousPrefix = isAutonomousLane
+    ? `ð¤ AUTONOMOUS AGENT MODE ACTIVE
+You have full tool access. Your rules:
+READ tools â run immediately, no approval needed:
+  â¢ scan_drive_overview
+  â¢ query_credit_guardian
+  â¢ get_system_status, list_failed_jobs, list_pending_approvals, list_connected_projects
+WRITE tools â ALWAYS call propose_plan first, then STOP (EXCEPTION: analyze_client_credit runs directly without propose_plan):
+  â¢ ingest_drive_clients
+WORKFLOW:
+1. Call scan_drive_overview and/or query_credit_guardian to understand current state
+2. If a write is needed: call propose_plan with your full plan and STOP
+3. After user sends an approval word (yes/go/approved/confirmed), execute the plan step by step
+4. Send short progress updates as you work
+5. Send a clear summary when done
+Systems:
+  â¢ Google Drive â client folders with dispute documents
+  â¢ Credit Guardian â dispute sessions, accounts, timeline events
+  â¢ Fendi Control Center â tasks, jobs, settings
+HARD RULE: For analyze_client_credit, execute it DIRECTLY without propose_plan. For standalone ingest_drive_clients, call propose_plan first then stop.
+`
+    : "";
+  const playlistBlock = workflowKey === "find_playlist_opportunities" ? playlistWorkflowSystemAddendum() : "";
+  const systemPrompt = `${autonomousPrefix}${playlistBlock}You are the ${SYSTEM_IDENTITY}. You serve Fendi Frost as a personal command center assistant.
+
+CRITICAL RULES â MANDATORY:
+1. NO TOOL, NO CLAIM: You MUST use your available tools to fulfill requests. NEVER describe what you would do â actually call the function. If the user asks to see comments, call the tool. Do NOT respond with text saying "I'll do X" without calling the corresponding function.
+2. NO WORKFLOW, NO ACTION: If the user's request does not correspond to ANY of your available tools, respond with a short message suggesting they run /workflows to see available commands. Never invent workflows.
+3. EVIDENCE OVER CLAIMS: All data must come from tool calls. Never invent counts, names, or metrics.
+4. For destructive actions (retry, archive, approve, reject, Instagram DMs/replies), ALWAYS call the tool â the system will handle confirmation.
+
+Available capabilities via tools:
+- System status, job management (active jobs summary, failed jobs), document approvals
+- Instagram: send DMs, reply to comments, reply to story mentions, view conversations & comments
+- Drive sync, file listing, client summaries
+- Connected project stats
+- FanFuel / playlists: find_playlist_opportunities (research playlists for a track)
+- Credit strategy: analyze_credit_strategy, generate_dispute_letter, send_dispute_letter
+- Playlist email workflow: research_playlists, generate_pitch, send_pitch
+
+Be witty, direct, and concise. Use emoji sparingly.
+
+Recent Documents Context:
+${docContext}
+
+Conversation Context (shared across all models):
+${conversationContext}`;
+
+  const resp = await fetch("https://api.x.ai/v1/chat/completions", {
+    method: "POST",
+    headers: { Authorization: `Bearer ${GROK_KEY}`, "Content-Type": "application/json" },
+    body: JSON.stringify({
+      model: "grok-3-mini-fast",
+      messages: [
+        { role: "system", content: systemPrompt },
+        { role: "user", content: userMessage },
+      ],
+      tools: getGrokToolSchemas(allowedToolNames),
+      tool_choice: "auto",
+      max_tokens: 1024,
+    }),
+  });
+
+  if (!resp.ok) {
+    console.error("Grok agentic error:", resp.status, await resp.text());
+    return { text: "â ï¸ AI unavailable. Try again shortly.", toolCalls: [] };
+  }
+
+  const data = await resp.json();
+  const choice = data.choices?.[0];
+  const toolCalls: Array<{ name: string; args: any }> = [];
+
+  if (choice?.message?.tool_calls) {
+    for (const tc of choice.message.tool_calls) {
+      let args = {};
+      try { args = JSON.parse(tc.function.arguments || "{}"); } catch {}
+      toolCalls.push({ name: tc.function.name, args });
+    }
+  }
+
+  return { text: choice?.message?.content || "", toolCalls };
+}
+
+// âââ Execution logging helpers âââââââââââââââââââââââââââââââââ
+
+async function logToolAttempt(requestId: string, toolName: string, args: any, model: string, chatId: string, userMessage: string): Promise<string> {
+  const { data, error } = await supabase.from("tool_execution_logs").insert({
+    request_id: requestId,
+    tool_name: toolName,
+    args,
+    status: "attempted",
+    model,
+    chat_id: chatId,
+    user_message: userMessage,
+    started_at: new Date().toISOString(),
+  }).select("id").single();
+  if (error || !data) {
+    console.error("FATAL: Failed to create tool_execution_logs row", error);
+    throw new Error(`Execution logging failed for ${toolName}: no log row created`);
+  }
+  return data.id;
+}
+
+async function logToolSuccess(logId: string, result: string, startedAt: number, httpStatus?: number) {
+  const elapsed = Date.now() - startedAt;
+  let responseJson: any = null;
+  try { responseJson = JSON.parse(result); } catch { responseJson = { text: result.slice(0, 2000) }; }
+  await supabase.from("tool_execution_logs").update({
+    status: "succeeded",
+    elapsed_ms: elapsed,
+    completed_at: new Date().toISOString(),
+    http_status: httpStatus ?? 200,
+    response_json: responseJson,
+  }).eq("id", logId);
+}
+
+async function logToolFailure(logId: string, error: string, startedAt: number) {
+  const elapsed = Date.now() - startedAt;
+  await supabase.from("tool_execution_logs").update({
+    status: "failed",
+    elapsed_ms: elapsed,
+    completed_at: new Date().toISOString(),
+    error: error.slice(0, 5000),
+  }).eq("id", logId);
+}
+
+// âââ Structured log helper âââââââââââââââââââââââââââââââââââââ
+function logEvent(e: Record<string, any>) {
+  console.log(JSON.stringify({ ts: Date.now(), ...e }));
+}
+
+// âââ Execute agentic loop ââââââââââââââââââââââââââââââââââââââ
+
+async function executeAgenticLoop(chatId: string, userMessage: string, opts: { taskId: string; sessionModel: "grok" | "gemini" | "chatgpt"; lane?: "lane1_do" | "lane2_assistant" | "lane3_autonomous"; allowTools?: boolean; workflowKey?: string }): Promise<void> {
+  // ── Resolve deprecated workflow key aliases ──
+  if (opts.workflowKey) opts.workflowKey = _resolveWorkflowKey(opts.workflowKey);
+
+  // ── STEP 1: EXECUTION METRICS ──
+  const executionStart = Date.now();
+
+  // ââ HARD EXECUTION GUARD ââ
+  if ((opts.lane !== "lane1_do" && opts.lane !== "lane3_autonomous") || opts.allowTools !== true) {
+    console.error(JSON.stringify({ ts: Date.now(), event: "tools_blocked", taskId: opts.taskId, lane: opts.lane, allowTools: opts.allowTools }));
+    throw new Error("TOOLS_BLOCKED: agentic loop cannot run outside /do execution lane");
+  }
+
+  // ââ EXECUTION CONTEXT ASSERTION ââ
+  logEvent({ event: "execution_context", lane: opts.lane, allowTools: opts.allowTools, workflowKey: opts.workflowKey, taskId: opts.taskId });
+
+  if (opts.lane !== "lane1_do" && opts.lane !== "lane3_autonomous") {
+    throw new Error("EXECUTION_CONTEXT_INVALID_LANE");
+  }
+
+  // ââ REQUIRE WORKFLOW KEY ââ
+  if (!opts.workflowKey) {
+    throw new Error("WORKFLOW_REQUIRED_FOR_EXECUTION");
+  }
+
+  // ââ EXECUTION LOCK: prevent duplicate execution ââ
+  const lockId = crypto.randomUUID();
+  const { data: locked } = await supabase
+    .from("tasks")
+    .update({
+      status: "running",
+      selected_workflow: opts.workflowKey,
+      result_json: {
+        execution_lane: "lane1_do",
+        selected_workflow: opts.workflowKey,
+        model_used: opts.sessionModel,
+        execution_lock: lockId,
+        execution_lock_ts: Date.now(),
+      },
+    })
+    .eq("id", opts.taskId)
+    .in("status", ["queued", "running"])
+    .is("result_json->execution_lock", null)
+    .select("id")
+    .maybeSingle();
+
+  if (!locked) {
+    console.warn(JSON.stringify({ ts: Date.now(), event: "duplicate_execution_blocked", taskId: opts.taskId }));
+    throw new Error("TASK_LOCK_NOT_ACQUIRED");
+  }
+
+  logEvent({ event: "lane1_execution_start", workflow: opts.workflowKey, taskId: opts.taskId, model: opts.sessionModel, lockId });
+
+  // ââ LOAD TOOLS FROM WORKFLOW ââ
+  const workflows = await fetchWorkflowRegistry();
+  let matchedWorkflow = workflows.find(w => w.key === opts.workflowKey);
+
+  // Allow known implemented workflows when registry doesn't have them (e.g. find_playlist_opportunities in Lovable)
+  if (!matchedWorkflow && opts.workflowKey === "find_playlist_opportunities" && IMPLEMENTED_WORKFLOW_KEYS.has("find_playlist_opportunities")) {
+    matchedWorkflow = SYNTHETIC_FIND_PLAYLIST_OPPORTUNITIES;
+    console.log(JSON.stringify({ ts: Date.now(), event: "workflow_synthetic_fallback", key: opts.workflowKey, taskId: opts.taskId }));
+  }
+  if (!matchedWorkflow && opts.workflowKey === "analyze_credit_strategy" && IMPLEMENTED_WORKFLOW_KEYS.has("analyze_credit_strategy")) {
+    matchedWorkflow = SYNTHETIC_ANALYZE_CREDIT_STRATEGY;
+    console.log(JSON.stringify({ ts: Date.now(), event: "workflow_synthetic_fallback", key: opts.workflowKey, taskId: opts.taskId }));
+  }
+  if (!matchedWorkflow && opts.workflowKey === "playlist_pitch_workflow" && IMPLEMENTED_WORKFLOW_KEYS.has("playlist_pitch_workflow")) {
+    matchedWorkflow = SYNTHETIC_PLAYLIST_PITCH_WORKFLOW;
+    console.log(JSON.stringify({ ts: Date.now(), event: "workflow_synthetic_fallback", key: opts.workflowKey, taskId: opts.taskId }));
+  }
+  if (!matchedWorkflow && opts.workflowKey === "query_credit_compass" && IMPLEMENTED_WORKFLOW_KEYS.has("query_credit_compass")) {
+    matchedWorkflow = SYNTHETIC_QUERY_CREDIT_COMPASS;
+    console.log(JSON.stringify({ ts: Date.now(), event: "workflow_synthetic_fallback", key: opts.workflowKey, taskId: opts.taskId }));
+  }
+  if (!matchedWorkflow && opts.workflowKey === "query_cc_tax" && IMPLEMENTED_WORKFLOW_KEYS.has("query_cc_tax")) {
+    matchedWorkflow = SYNTHETIC_QUERY_CC_TAX;
+    console.log(JSON.stringify({ ts: Date.now(), event: "workflow_synthetic_fallback", key: opts.workflowKey, taskId: opts.taskId }));
+  }
+  // Synthetic fallback â if registry missing analyze_client_credit, use built-in constant
+  if (!matchedWorkflow && opts.workflowKey === "analyze_client_credit" && IMPLEMENTED_WORKFLOW_KEYS.has("analyze_client_credit")) {
+    matchedWorkflow = SYNTHETIC_ANALYZE_CLIENT_CREDIT as any;
+    console.log(JSON.stringify({ ts: Date.now(), event: "workflow_synthetic_fallback", key: opts.workflowKey, taskId: opts.taskId }));
+  }
+
+  // ââ VALIDATE WORKFLOW EXISTS ââ
+  if (!matchedWorkflow) {
+    console.error(JSON.stringify({ ts: Date.now(), event: "workflow_invalid", key: opts.workflowKey }));
+    throw new Error("WORKFLOW_NOT_FOUND_IN_REGISTRY");
+  }
+
+  const workflowToolNames: string[] | undefined = matchedWorkflow.tools?.length
+    ? matchedWorkflow.tools
+    : undefined;
+
+  logEvent({ event: "workflow_tools_loaded", workflow: opts.workflowKey, tools: workflowToolNames || "all", taskId: opts.taskId });
+
+  const model: "grok" | "gemini" = opts.sessionModel === "chatgpt" ? "grok" : opts.sessionModel as "grok" | "gemini";
+  const docContext = await getRecentDocContext();
+  const requestId = crypto.randomUUID();
+
+  await appendConversationTurn(chatId, {
+    role: "user",
+    content: userMessage,
+    model,
+    at: new Date().toISOString(),
+  });
+
+  const conversationContext = await buildConversationContext(chatId);
+
+  // Step 1: Get AI response with workflow-scoped tool calls
+  logEvent({ event: "ai_call_start", taskId: opts.taskId, model, workflow: opts.workflowKey });
+
+  // Deterministic playlist run: if we can infer track from chat, skip LLM refusal paths
+  let result: { text: string; toolCalls: Array<{ name: string; args: any }> };
+  if (opts.workflowKey === "find_playlist_opportunities") {
+    const inferredTrack = extractPlaylistTrackName(userMessage, conversationContext);
+    if (inferredTrack) {
+      logEvent({ event: "playlist_track_inferred", taskId: opts.taskId, inferredTrack });
+      result = {
+        text: "",
+        toolCalls: [{ name: "find_playlist_opportunities", args: { track_name: inferredTrack } }],
+      };
+    } else {
+      result = model === "grok"
+        ? await agenticGrokCall(userMessage, docContext, conversationContext, workflowToolNames, opts.workflowKey)
+        : await agenticGeminiCall(userMessage, docContext, conversationContext, workflowToolNames, opts.workflowKey);
+    }
+  } else if (opts.workflowKey === "analyze_credit_strategy") {
+    const inferredClient = extractClientNameForCreditCommand(userMessage, conversationContext);
+    if (inferredClient) {
+      logEvent({ event: "credit_client_inferred", taskId: opts.taskId, inferredClient });
+      result = {
+        text: "",
+        toolCalls: [{ name: "analyze_credit_strategy", args: { client_name: inferredClient } }],
+      };
+    } else {
+      result = model === "grok"
+        ? await agenticGrokCall(userMessage, docContext, conversationContext, workflowToolNames, opts.workflowKey)
+        : await agenticGeminiCall(userMessage, docContext, conversationContext, workflowToolNames, opts.workflowKey);
+    }
+  } else {
+    result = model === "grok"
+      ? await agenticGrokCall(userMessage, docContext, conversationContext, workflowToolNames, opts.workflowKey)
+      : await agenticGeminiCall(userMessage, docContext, conversationContext, workflowToolNames, opts.workflowKey);
+  }
+  logEvent({ event: "ai_response", taskId: opts.taskId, workflow: opts.workflowKey, model, toolCalls: result.toolCalls.length, hasText: !!result.text });
+  await supabase.from("tasks").update({ result_json: { progress_step: "E_ai_done", tool_count: result.toolCalls.length, execution_lock: lockId } }).eq("id", opts.taskId);
+
+  // Step 2: If no tool calls, just send the text response
+  if (result.toolCalls.length === 0) {
+    const responseText = result.text || "I'm not sure how to help with that. Try /workflows for available commands.";
+    const reply = formatAssistantMessage(model, responseText);
+    await sendMessage(chatId, reply);
+    await appendConversationTurn(chatId, {
+      role: "assistant",
+      content: reply,
+      model,
+      at: new Date().toISOString(),
+    });
+
+    const executionDuration = Date.now() - executionStart;
+    await supabase.from("tasks").update({
+      status: "succeeded",
+      selected_tools: [],
+      result_json: { execution_complete: true, workflow: opts.workflowKey, text_response: responseText.slice(0, 2000), model_used: opts.sessionModel, execution_duration_ms: executionDuration, execution_lock: null, execution_lock_released_ts: Date.now() },
+    }).eq("id", opts.taskId);
+    await sendMessage(chatId, `â Done: \`${opts.taskId}\``, {}, `task:${opts.taskId}:done`);
+    return;
+  }
+
+  // Step 3: Execute tool calls with mandatory logging
+  const toolResults: string[] = [];
+  const confirmationButtons: Array<{ text: string; callback_data: string }> = [];
+
+  for (const tc of result.toolCalls) {
+    // WORKFLOW-SCOPED GUARDRAIL: block tools not in this workflow's declared tool list
+    if (workflowToolNames && !workflowToolNames.includes(tc.name)) {
+      console.error(JSON.stringify({ ts: Date.now(), event: "workflow_tool_blocked", tool: tc.name, workflow: opts.workflowKey, taskId: opts.taskId }));
+      toolResults.push(`ð« Tool '${tc.name}' is not allowed for workflow '${opts.workflowKey}'.`);
+      continue;
+    }
+
+    const tool = AGENT_TOOLS.find(t => t.name === tc.name);
+    if (!tool) {
+      console.error(`GUARDRAIL: AI tried to call unregistered tool '${tc.name}' â blocked.`);
+      toolResults.push(`ð« Tool '${tc.name}' is not in the tool registry. Run /workflows to see available commands.`);
+      continue;
+    }
+
+    // HARD BLOCK: switch_ai_model is NEVER allowed inside the agentic loop.
+    // Model switching is handled exclusively by /model command before the loop runs.
+    if (tc.name === "switch_ai_model") {
+      toolResults.push("ð Model switching is blocked inside the execution loop. Use `/model grok` or `/model gemini` explicitly.");
+      continue;
+    }
+
+    // Log attempt BEFORE execution â hard rule: no log = fail loudly
+    let logId: string;
+    const startedAt = Date.now();
+    try {
+      logId = await logToolAttempt(requestId, tc.name, tc.args, model, chatId, userMessage);
+    } catch (logErr) {
+      const errMsg = `ð¨ FATAL: Tool execution logging failed for ${tc.name}. Aborting tool call.`;
+      console.error(errMsg, logErr);
+      await sendMessage(chatId, formatAssistantMessage(model, errMsg));
+      return;
+    }
+
+    if (tool.destructive) {
+      // Store pending action and create confirmation button
+      const actionId = crypto.randomUUID().slice(0, 8);
+      await storePendingAction(actionId, tc.name, tc.args);
+
+      const label = tc.name.replace(/_/g, " ").replace(/\b\w/g, c => c.toUpperCase());
+      const targetId = tc.args.job_id || tc.args.queue_id || "";
+      const shortId = targetId.slice(0, 8);
+      confirmationButtons.push(
+        { text: `â ${label}${shortId ? ` (${shortId}â¦)` : ""}`, callback_data: `agent_confirm:${actionId}` },
+        { text: `â Cancel`, callback_data: `agent_cancel:${actionId}` },
+      );
+      toolResults.push(`â³ *${label}* â Awaiting your confirmation.`);
+      // Update log to succeeded (destructive actions are deferred, logging the intent)
+      await logToolSuccess(logId, "Awaiting confirmation", startedAt);
+    } else {
+      // Execute immediately with telemetry
+      const toolStart = Date.now();
+      try {
+        const output = await tool.execute(tc.args, { chatId, userMessage, conversationContext });
+        const toolDuration = Date.now() - toolStart;
+        await logToolSuccess(logId, output, startedAt);
+        console.log(JSON.stringify({ event: "tool_execution", tool: tc.name, workflow: opts.workflowKey, duration_ms: toolDuration, taskId: opts.taskId, ts: Date.now() }));
+        toolResults.push(output);
+      } catch (e) {
+        const toolDuration = Date.now() - toolStart;
+        const errStr = e instanceof Error ? e.message : String(e);
+        await logToolFailure(logId, errStr, startedAt);
+        console.error(JSON.stringify({ event: "tool_execution_failed", tool: tc.name, workflow: opts.workflowKey, taskId: opts.taskId, duration_ms: toolDuration, error: errStr, ts: Date.now() }));
+        toolResults.push(`â Error executing ${tc.name}: ${errStr}`);
+      }
+    }
+  }
+
+  // Step 4: If we have tool results, feed them back to AI for a final summary
+  const executedToolNames = result.toolCalls.map(tc => tc.name);
+
+  if (toolResults.length > 0 && confirmationButtons.length === 0) {
+    // All tools were non-destructive, get a summary
+    const summaryPrompt = `The user asked: "${userMessage}"
+
+You called these tools and got these results:
+${result.toolCalls.map((tc, i) => `- ${tc.name}: ${toolResults[i]}`).join("\n")}
+
+Now provide a clear, concise summary for the user based on the results. Use markdown formatting.`;
+
+    let summary: string;
+    if (model === "grok") {
+      const resp = await fetch("https://api.x.ai/v1/chat/completions", {
+        method: "POST",
+        headers: { Authorization: `Bearer ${GROK_KEY}`, "Content-Type": "application/json" },
+        body: JSON.stringify({
+          model: "grok-3-mini-fast",
+          messages: [
+            { role: "system", content: `You are the ${SYSTEM_IDENTITY}. Summarize tool results concisely. Be witty and direct.` },
+            { role: "user", content: summaryPrompt },
+          ],
+          max_tokens: 1024,
+        }),
+      });
+      const data = await resp.json();
+      summary = data.choices?.[0]?.message?.content || toolResults.join("\n\n");
+    } else {
+      const resp = await fetch(
+        `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${GEMINI_KEY}`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            contents: [{ role: "user", parts: [{ text: summaryPrompt }] }],
+            systemInstruction: { parts: [{ text: `You are the ${SYSTEM_IDENTITY}. Summarize tool results concisely and clearly.` }] },
+            generationConfig: { maxOutputTokens: 1024 },
+          }),
+        }
+      );
+      const data = await resp.json();
+      summary = data.candidates?.[0]?.content?.parts?.[0]?.text || toolResults.join("\n\n");
+    }
+
+    const finalSummary = formatAssistantMessage(model, summary);
+    logEvent({ event: "sending_summary", taskId: opts.taskId, workflow: opts.workflowKey });
+    await sendMessage(chatId, finalSummary, {}, `task:${opts.taskId}:summary`);
+    await appendConversationTurn(chatId, {
+      role: "assistant",
+      content: finalSummary,
+      model,
+      at: new Date().toISOString(),
+    });
+
+    // ââ TASK LIFECYCLE: mark succeeded with duration ââ
+    const executionDuration = Date.now() - executionStart;
+    await supabase.from("tasks").update({
+      status: "succeeded",
+      selected_tools: executedToolNames,
+      result_json: { execution_complete: true, workflow: opts.workflowKey, progress_step: "F_succeeded", summary: summary.slice(0, 2000), toolResults: toolResults.map(r => r.slice(0, 500)), model_used: opts.sessionModel, execution_duration_ms: executionDuration, execution_lock: null, execution_lock_released_ts: Date.now() },
+    }).eq("id", opts.taskId);
+    logEvent({ event: "task_succeeded", taskId: opts.taskId, workflow: opts.workflowKey, execution_duration_ms: executionDuration });
+      await flushTelegramOutbox(chatId, 10);
+    await sendMessage(chatId, `â Done: \`${opts.taskId}\``, {}, `task:${opts.taskId}:done`);
+
+  } else if (confirmationButtons.length > 0) {
+    // Has destructive actions needing confirmation
+    const nonDestructiveResults = toolResults.filter(r => !r.startsWith("â³"));
+    let message = "";
+
+    if (result.text) message += result.text + "\n\n";
+    if (nonDestructiveResults.length > 0) message += nonDestructiveResults.join("\n\n") + "\n\n";
+    message += toolResults.filter(r => r.startsWith("â³")).join("\n");
+
+    // Group confirmation buttons into rows of 2
+    const keyboard: Array<Array<{ text: string; callback_data: string }>> = [];
+    for (let i = 0; i < confirmationButtons.length; i += 2) {
+      keyboard.push(confirmationButtons.slice(i, i + 2));
+    }
+
+    const confirmationMessage = formatAssistantMessage(model, message.trim());
+    await sendMessage(chatId, confirmationMessage, {
+      reply_markup: { inline_keyboard: keyboard },
+    }, `task:${opts.taskId}:confirm`);
+    await appendConversationTurn(chatId, {
+      role: "assistant",
+      content: confirmationMessage,
+      model,
+      at: new Date().toISOString(),
+    });
+
+    // ââ TASK LIFECYCLE: mark succeeded (awaiting user confirmation for destructive actions) ââ
+    const executionDuration = Date.now() - executionStart;
+    await supabase.from("tasks").update({
+      status: "succeeded",
+      selected_tools: executedToolNames,
+      result_json: { execution_complete: true, workflow: opts.workflowKey, awaiting_confirmation: true, toolResults: toolResults.map(r => r.slice(0, 500)), model_used: opts.sessionModel, execution_duration_ms: executionDuration, execution_lock: null, execution_lock_released_ts: Date.now() },
+    }).eq("id", opts.taskId);
+      await flushTelegramOutbox(chatId, 10);
+    await sendMessage(chatId, `â Done: \`${opts.taskId}\``, {}, `task:${opts.taskId}:done`);
+
+  } else {
+    // No tool calls at all â mark succeeded with text-only result
+    const executionDuration = Date.now() - executionStart;
+    await supabase.from("tasks").update({
+      status: "succeeded",
+      selected_tools: [],
+      result_json: { execution_complete: true, workflow: opts.workflowKey, text_response: (result.text || "").slice(0, 2000), model_used: opts.sessionModel, execution_duration_ms: executionDuration, execution_lock: null, execution_lock_released_ts: Date.now() },
+    }).eq("id", opts.taskId);
+      await flushTelegramOutbox(chatId, 10);
+    await sendMessage(chatId, `â Done: \`${opts.taskId}\``, {}, `task:${opts.taskId}:done`);
+  }
+}
+
+// âââ Handle agent confirmation callbacks ââââââââââââââââââââââââ
+
+async function handleAgentConfirm(actionId: string): Promise<string> {
+  const pending = await getPendingAction(actionId);
+  if (!pending) return "â Action expired or not found.";
+
+  const tool = AGENT_TOOLS.find(t => t.name === pending.tool);
+  if (!tool) return "â Unknown action.";
+
+  await deletePendingAction(actionId);
+
+  try {
+    const result = await tool.execute(pending.args);
+    const label = pending.tool.replace(/_/g, " ").replace(/\b\w/g, c => c.toUpperCase());
+    return `â *${SYSTEM_IDENTITY} â ${label} Executed*\n\n${result}`;
+  } catch (e) {
+    console.error("Agent confirm execution error:", e);
+    return "â Failed to execute action.";
+  }
+}
+
+async function handleAgentCancel(actionId: string): Promise<string> {
+  await deletePendingAction(actionId);
+  return `ð« *${SYSTEM_IDENTITY}* â Action cancelled.`;
+}
+
+// âââ Legacy callback handlers (for existing approval/retry buttons) ââ
+
+async function handleApproval(queueId: string, approved: boolean) {
+  const { data: queue, error: qErr } = await supabase
+    .from("telegram_approval_queue")
+    .select("*")
+    .eq("id", queueId)
+    .single();
+
+  if (qErr || !queue) return "â Approval record not found.";
+  if (queue.status !== "pending") return "â³ Already processed.";
+
+  const now = new Date().toISOString();
+
+  if (approved) {
+    const { error: obsErr } = await supabase
+      .from("observations")
+      .update({ is_verified: true, verified_at: now, verified_via: "telegram" })
+      .eq("document_id", queue.document_id)
+      .eq("client_id", queue.client_id);
+
+    if (obsErr) return "â Failed to verify observations.";
+
+    await supabase.from("telegram_approval_queue").update({ status: "approved", resolved_at: now }).eq("id", queueId);
+    return `â *${SYSTEM_IDENTITY} â Verified.* ${queue.observation_count} observations confirmed.`;
+  } else {
+    await supabase.from("telegram_approval_queue").update({ status: "rejected", resolved_at: now }).eq("id", queueId);
+    return `â *${SYSTEM_IDENTITY} â Rejected.* Observations remain unverified.`;
+  }
+}
+
+async function handleRetry(jobId: string): Promise<string> {
+  const tool = AGENT_TOOLS.find(t => t.name === "retry_failed_job")!;
+  return await tool.execute({ job_id: jobId });
+}
+
+async function handleArchive(jobId: string): Promise<string> {
+  const tool = AGENT_TOOLS.find(t => t.name === "archive_job")!;
+  return await tool.execute({ job_id: jobId });
+}
+
+async function handleExplainMore(jobId: string): Promise<string> {
+  const { data: job, error } = await supabase
+    .from("ingestion_jobs")
+    .select("*, documents(file_name, mime_type)")
+    .eq("id", jobId)
+    .single();
+  if (error || !job) return "â Job not found.";
+  const doc = job.documents as any;
+  const prompt = `A document processing job failed. File: ${doc?.file_name || "Unknown"}, MIME: ${doc?.mime_type || "Unknown"}, Attempts: ${job.attempt_count}, Error: ${job.last_error || "No error"}. Explain what went wrong and how to fix it in plain English.`;
+  const { model } = await getActiveModel();
+  const docContext = await getRecentDocContext();
+
+  let response: string;
+  if (model === "grok") {
+    const resp = await fetch("https://api.x.ai/v1/chat/completions", {
+      method: "POST",
+      headers: { Authorization: `Bearer ${GROK_KEY}`, "Content-Type": "application/json" },
+      body: JSON.stringify({ model: "grok-3-mini-fast", messages: [{ role: "system", content: `You are the ${SYSTEM_IDENTITY}.` }, { role: "user", content: prompt }], max_tokens: 1024 }),
+    });
+    const data = await resp.json();
+    response = data.choices?.[0]?.message?.content || "No response.";
+  } else {
+    const resp = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${GEMINI_KEY}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ contents: [{ role: "user", parts: [{ text: prompt }] }], generationConfig: { maxOutputTokens: 1024 } }),
+    });
+    const data = await resp.json();
+    response = data.candidates?.[0]?.content?.parts?.[0]?.text || "No response.";
+  }
+  return `ð¬ *${SYSTEM_IDENTITY} â Troubleshooting*\n\nð *File:* ${doc?.file_name || "Unknown"}\n\n${response}`;
+}
+
+// âââ Main Webhook Handler âââââââââââââââââââââââââââââââââââââââ
+serve(async (req) => {
+  try {
+    const update = await req.json();
+    console.log("ð¨ Update:", JSON.stringify(update).slice(0, 500));
+    _currentTaskId = null;
+
+    // ââ Callback queries (inline button presses) ââ
+    if (update.callback_query) {
+      const cb = update.callback_query;
+      const cbChatId = String(cb.message.chat.id);
+      if (cbChatId !== CHAT_ID) return new Response("ok");
+
+      // Create task for callback observability + outbox routing
+      try {
+        const cbSession = await resolveSession(cbChatId);
+        const cbTaskId = await createTaskRow(cbSession.id, `callback:${cb.data}`, null);
+        _currentTaskId = cbTaskId;
+      } catch (e) {
+        console.error("Callback task creation failed:", e);
+      }
+
+      const [action, ...idParts] = cb.data.split(":");
+      const targetId = idParts.join(":");
+      await answerCallbackQuery(cb.id, "Processing...");
+
+      let result: string;
+
+      switch (action) {
+        case "approve": result = await handleApproval(targetId, true); break;
+        case "reject": result = await handleApproval(targetId, false); break;
+        case "retry": result = await handleRetry(targetId); break;
+        case "archive": result = await handleArchive(targetId); break;
+        case "explain": result = await handleExplainMore(targetId); break;
+        case "agent_confirm": result = await handleAgentConfirm(targetId); break;
+        case "agent_cancel": result = await handleAgentCancel(targetId); break;
+        default: result = "â Unknown action.";
+      }
+
+      await editMessageReplyMarkup(cbChatId, cb.message.message_id);
+      await sendMessage(cbChatId, result);
+      if (_currentTaskId) {
+        await supabase.from("tasks").update({ status: "succeeded", result_json: { action: `callback:${action}` } }).eq("id", _currentTaskId);
+      }
+      _currentTaskId = null;
+      return new Response("ok");
+    }
+
+    // ── Text messages ──
+    const message = update.message;
+    if (!message?.text) return new Response("ok");
+
+    const chatId = String(message.chat.id);
+    const text = message.text.trim();
+
+    if (chatId !== CHAT_ID) {
+      console.log(`🚫 Blocked message from unauthorized chat: ${chatId}`);
+      return new Response("ok");
+    }
+
+    // ─── DETERMINISTIC SPINE: resolve session + create task ───
+    let session: { id: string; active_model: string };
+    let taskId: string;
+
+    try {
+      session = await resolveSession(chatId);
+    } catch (sessionErr) {
+      console.error("FATAL: session resolution failed:", sessionErr);
+      await sendMessage(chatId, `🚨 *${SYSTEM_IDENTITY}* — Session resolution failed: ${String(sessionErr)}`);
+      return new Response("ok");
+    }
+
+    // Determine if this is an explicit model request (for requested_model field only — no mutation)
+    const modelRequestMatch = text.match(/^\/model\s+(grok|gemini|chatgpt)$/i);
+    const requestedModel = modelRequestMatch ? modelRequestMatch[1].toLowerCase() : null;
+
+    const routingClearAndContinue =
+      text.toLowerCase().trim().startsWith("/do ") ||
+      text.toLowerCase().trim() === "/start" ||
+      text.toLowerCase().trim().startsWith("/workflows") ||
+      text.toLowerCase().trim().startsWith("/metrics") ||
+      text.toLowerCase().trim().startsWith("/triage") ||
+      text.toLowerCase().trim().startsWith("/status") ||
+      text.toLowerCase().trim().startsWith("/help") ||
+      text.toLowerCase().trim() === "/ping" ||
+      text.toLowerCase().trim().startsWith("/resend") ||
+      text.toLowerCase().trim().startsWith("/model");
+
+    // ── Pending bulk pitch (confirm all) ────────────────────────────────
+    const pendingBulkEarly = await getPendingPitchBulk(chatId);
+    if (pendingBulkEarly) {
+      const lower = text.toLowerCase().trim();
+      if (routingClearAndContinue) {
+        await clearPendingPitchBulk(chatId);
+      } else if (lower === "cancel" || lower === "no") {
+        try {
+          taskId = await createTaskRow(session.id, text, requestedModel);
+          _currentTaskId = taskId;
+        } catch (taskErr) {
+          console.error("FATAL: task creation failed:", taskErr);
+          await sendMessage(chatId, `🚨 *${SYSTEM_IDENTITY}* — Task creation failed: ${String(taskErr)}`);
+          return new Response("ok");
+        }
+        await sendMessage(chatId, `📋 Queued: \`${taskId}\``, {}, `task:${taskId}:queued`);
+        await clearPendingPitchBulk(chatId);
+        await sendMessage(chatId, "Bulk pitch cancelled.", {}, `task:${taskId}:bulk-cancel`);
+        await supabase.from("tasks").update({ status: "succeeded", result_json: { shortcut: "pitch_bulk_cancel" } }).eq("id", taskId);
+        await sendMessage(chatId, `✅ Done: \`${taskId}\``, {}, `task:${taskId}:done`);
+        _currentTaskId = null;
+        return new Response("ok");
+      } else if (/^confirm\s+all$/i.test(text.trim())) {
+        try {
+          taskId = await createTaskRow(session.id, text, requestedModel);
+          _currentTaskId = taskId;
+        } catch (taskErr) {
+          console.error("FATAL: task creation failed:", taskErr);
+          await sendMessage(chatId, `🚨 *${SYSTEM_IDENTITY}* — Task creation failed: ${String(taskErr)}`);
+          return new Response("ok");
+        }
+        await sendMessage(chatId, `📋 Queued: \`${taskId}\``, {}, `task:${taskId}:queued`);
+        const modelForPitch = (session.active_model === "grok" ? "grok" : "gemini") as "grok" | "gemini";
+        const ids = [...pendingBulkEarly.playlist_ids];
+        await clearPendingPitchBulk(chatId);
+        for (const pid of ids) {
+          try {
+            const res = await callFanFuelHub("execute-pitch", {
+              playlist_id: pid,
+              track_name: pendingBulkEarly.track_name,
+              bulk: true,
+            });
+            const msg = typeof res?.message_to_user === "string" ? res.message_to_user : JSON.stringify(res ?? {});
+            await sendMessage(chatId, formatAssistantMessage(modelForPitch, msg), {}, `task:${taskId}:bulk-pitch`);
+          } catch (e) {
+            const errStr = e instanceof Error ? e.message : String(e);
+            await sendMessage(chatId, formatAssistantMessage(modelForPitch, `❌ ${errStr}`), {}, `task:${taskId}:bulk-pitch-err`);
+          }
+        }
+        await supabase.from("tasks").update({
+          status: "succeeded",
+          result_json: { shortcut: "pitch_bulk_done", count: ids.length },
+        }).eq("id", taskId);
+        await sendMessage(chatId, `✅ Done: \`${taskId}\``, {}, `task:${taskId}:done`);
+        _currentTaskId = null;
+        return new Response("ok");
+      } else {
+        await sendMessage(chatId, "Reply *confirm all* to pitch the listed playlists, or *cancel*.");
+        return new Response("ok");
+      }
+    }
+
+    // ── Pending tier-3 pitch confirm ────────────────────────────────────
+    const pendingTier3Early = await getPendingPitchTier3(chatId);
+    if (pendingTier3Early) {
+      const lower = text.toLowerCase().trim();
+      if (routingClearAndContinue) {
+        await clearPendingPitchTier3(chatId);
+      } else if (lower === "cancel" || lower === "no") {
+        try {
+          taskId = await createTaskRow(session.id, text, requestedModel);
+          _currentTaskId = taskId;
+        } catch (taskErr) {
+          console.error("FATAL: task creation failed:", taskErr);
+          await sendMessage(chatId, `🚨 *${SYSTEM_IDENTITY}* — Task creation failed: ${String(taskErr)}`);
+          return new Response("ok");
+        }
+        await sendMessage(chatId, `📋 Queued: \`${taskId}\``, {}, `task:${taskId}:queued`);
+        await clearPendingPitchTier3(chatId);
+        await sendMessage(chatId, "Tier-3 pitch cancelled.", {}, `task:${taskId}:t3-cancel`);
+        await supabase.from("tasks").update({ status: "succeeded", result_json: { shortcut: "pitch_t3_cancel" } }).eq("id", taskId);
+        await sendMessage(chatId, `✅ Done: \`${taskId}\``, {}, `task:${taskId}:done`);
+        _currentTaskId = null;
+        return new Response("ok");
+      } else if (/^confirm$/i.test(text.trim())) {
+        try {
+          taskId = await createTaskRow(session.id, text, requestedModel);
+          _currentTaskId = taskId;
+        } catch (taskErr) {
+          console.error("FATAL: task creation failed:", taskErr);
+          await sendMessage(chatId, `🚨 *${SYSTEM_IDENTITY}* — Task creation failed: ${String(taskErr)}`);
+          return new Response("ok");
+        }
+        await sendMessage(chatId, `📋 Queued: \`${taskId}\``, {}, `task:${taskId}:queued`);
+        const modelForPitch = (session.active_model === "grok" ? "grok" : "gemini") as "grok" | "gemini";
+        await clearPendingPitchTier3(chatId);
+        try {
+          const res = await callFanFuelHub("execute-pitch", {
+            playlist_id: pendingTier3Early.playlist_id,
+            track_name: pendingTier3Early.track_name,
+            tier_confirmed: true,
+          });
+          const msg = typeof res?.message_to_user === "string" ? res.message_to_user : JSON.stringify(res ?? {});
+          await sendMessage(chatId, formatAssistantMessage(modelForPitch, msg), {}, `task:${taskId}:t3-pitch`);
+        } catch (e) {
+          const errStr = e instanceof Error ? e.message : String(e);
+          await sendMessage(chatId, formatAssistantMessage(modelForPitch, `❌ ${errStr}`), {}, `task:${taskId}:t3-pitch-err`);
+        }
+        await supabase.from("tasks").update({ status: "succeeded", result_json: { shortcut: "pitch_tier3_confirmed" } }).eq("id", taskId);
+        await sendMessage(chatId, `✅ Done: \`${taskId}\``, {}, `task:${taskId}:done`);
+        _currentTaskId = null;
+        return new Response("ok");
+      } else {
+        await sendMessage(chatId, "Reply *confirm* to pitch this tier-3 playlist, or *cancel*.");
+        return new Response("ok");
+      }
+    }
+
+    // ── Pending playlist vibe: handle BEFORE task row + lane routing (so Lane 2 never steals yes/cancel) ──
+    const pendingPlaylistEarly = await getPlaylistConfirm(chatId);
+    if (pendingPlaylistEarly) {
+      const lower = text.toLowerCase().trim();
+      const clearAndContinue =
+        lower.startsWith("/do ") ||
+        lower === "/start" ||
+        lower.startsWith("/workflows") ||
+        lower.startsWith("/metrics") ||
+        lower.startsWith("/triage") ||
+        lower.startsWith("/status") ||
+        lower.startsWith("/help") ||
+        lower === "/ping" ||
+        lower.startsWith("/resend") ||
+        lower.startsWith("/model");
+
+      if (clearAndContinue) {
+        await clearPlaylistConfirm(chatId);
+        // fall through: one task + normal routing
+      } else if (lower === "cancel" || lower === "no" || lower === "/playlist_cancel") {
+        try {
+          taskId = await createTaskRow(session.id, text, requestedModel);
+          _currentTaskId = taskId;
+        } catch (taskErr) {
+          console.error("FATAL: task creation failed:", taskErr);
+          await sendMessage(chatId, `ð¨ *${SYSTEM_IDENTITY}* â Task creation failed: ${String(taskErr)}`);
+          return new Response("ok");
+        }
+        await sendMessage(chatId, `ð Queued: \`${taskId}\``, {}, `task:${taskId}:queued`);
+        await clearPlaylistConfirm(chatId);
+        await sendMessage(chatId, `ð§ Playlist search cancelled.`, {}, `task:${taskId}:playlist-cancel`);
+        await supabase.from("tasks").update({ status: "succeeded", result_json: { shortcut: "playlist_confirm_cancel" } }).eq("id", taskId);
+        await sendMessage(chatId, `â Done: \`${taskId}\``, {}, `task:${taskId}:done`);
+        _currentTaskId = null;
+        return new Response("ok");
+      } else {
+        const isYes = /^(yes|y|confirm|ok|go|approve)$/i.test(text.trim());
+        const userVibe = isYes ? pendingPlaylistEarly.inferred_vibe : text.trim();
+        try {
+          taskId = await createTaskRow(session.id, text, requestedModel);
+          _currentTaskId = taskId;
+        } catch (taskErr) {
+          console.error("FATAL: task creation failed:", taskErr);
+          await sendMessage(chatId, `ð¨ *${SYSTEM_IDENTITY}* â Task creation failed: ${String(taskErr)}`);
+          return new Response("ok");
+        }
+        await sendMessage(chatId, `ð Queued: \`${taskId}\``, {}, `task:${taskId}:queued`);
+        if (!userVibe) {
+          await sendMessage(chatId, "Reply *yes* to use the suggested vibe, or type your own vibe. Send *cancel* to abort.");
+          await supabase.from("tasks").update({ status: "succeeded", result_json: { shortcut: "playlist_confirm_prompt" } }).eq("id", taskId);
+          await sendMessage(chatId, `â Done: \`${taskId}\``, {}, `task:${taskId}:done`);
+          _currentTaskId = null;
+          return new Response("ok");
+        }
+        await clearPlaylistConfirm(chatId);
+        const modelForPlaylist = (session.active_model === "grok" ? "grok" : "gemini") as "grok" | "gemini";
+        try {
+          const out = await runPlaylistHubResearch(pendingPlaylistEarly.track_name, userVibe, chatId);
+          await sendMessage(chatId, formatAssistantMessage(modelForPlaylist, out), {}, `task:${taskId}:playlist-result`);
+        } catch (e) {
+          const errStr = e instanceof Error ? e.message : String(e);
+          await sendMessage(chatId, formatAssistantMessage(modelForPlaylist, `â ${errStr}`), {}, `task:${taskId}:playlist-err`);
+        }
+        await appendConversationTurn(chatId, {
+          role: "user",
+          content: text,
+          model: modelForPlaylist,
+          at: new Date().toISOString(),
+        });
+        await supabase.from("tasks").update({
+          status: "succeeded",
+          result_json: {
+            shortcut: "playlist_confirm_execute",
+            track: pendingPlaylistEarly.track_name,
+            user_vibe: userVibe,
+          },
+        }).eq("id", taskId);
+        await sendMessage(chatId, `â Done: \`${taskId}\``, {}, `task:${taskId}:done`);
+        _currentTaskId = null;
+        return new Response("ok");
+      }
+    }
+
+    // ââ Pitch routing ââââââââââââââââââââââââââââââââââââââââââ
+    let lowerText = text.toLowerCase().trim();
+
+    // "show pitch report"
+    if (lowerText === 'show pitch report' || lowerText === 'pitch report') {
+      const research = await getLastPlaylistResearch(chatId);
+      if (!research) {
+        await sendMessage(chatId, "No playlist research found. Run 'find playlist opportunities for [track]' first.");
+      } else {
+        const playlists = await hubPlaylistBatch(research.ranked_playlist_ids);
+        if (!playlists.length) {
+          await sendMessage(chatId, "Could not load playlist details. Try running research again.");
+        } else {
+          let report = "Pitch Report for \"" + research.track_name + "\":\n\n";
+          playlists.forEach((p: any, i: number) => {
+            const tier = p.tier || (i < 5 ? 1 : i < 12 ? 2 : 3);
+            const tierLabel = tier === 1 ? "Tier 1" : tier === 2 ? "Tier 2" : "Tier 3";
+            report += (i + 1) + ". " + (p.name || p.playlist_id) + " [" + tierLabel + "]";
+            if (p.followers) report += " (" + p.followers + " followers)";
+            if (p.pitch_status) report += " - " + p.pitch_status;
+            report += "\n";
+          });
+          report += "\nCommands: 'pitch N' to pitch one, 'pitch all tier 1' to batch pitch tier 1 playlists.";
+          await sendMessage(chatId, report);
+        }
+      }
+      return new Response("ok");
+    }
+
+    // "pitch N" â pitch a single playlist by index
+    const pitchMatch = lowerText.match(/^pitch\s+(\d+)$/);
+    if (pitchMatch) {
+      const idx = parseInt(pitchMatch[1], 10) - 1;
+      const research = await getLastPlaylistResearch(chatId);
+      if (!research) {
+        await sendMessage(chatId, "No playlist research found. Run research first.");
+        return new Response("ok");
+      }
+      if (idx < 0 || idx >= research.ranked_playlist_ids.length) {
+        await sendMessage(chatId, "Invalid playlist number. Use 1-" + research.ranked_playlist_ids.length);
+        return new Response("ok");
+      }
+      const playlistId = research.ranked_playlist_ids[idx];
+      const playlists = await hubPlaylistBatch([playlistId]);
+      const p = playlists[0];
+      const tier = p?.tier || (idx < 5 ? 1 : idx < 12 ? 2 : 3);
+      if (tier === 3) {
+        await setPendingPitchTier3(chatId, { playlist_id: playlistId, track_name: research.track_name, ts: new Date().toISOString() });
+        await sendMessage(chatId, "Playlist #" + (idx + 1) + " (" + (p?.name || playlistId) + ") is Tier 3. These have lower acceptance rates. Type 'confirm' to pitch anyway, or choose a different number.");
+        return new Response("ok");
+      }
+      const result = await callFanFuelHub("execute-pitch", { playlist_id: playlistId, track_name: research.track_name });
+      await sendMessage(chatId, result?.message || ("Pitch sent to " + (p?.name || playlistId)));
+      return new Response("ok");
+    }
+
+    // "pitch all tier 1"
+    if (lowerText === 'pitch all tier 1') {
+      const research = await getLastPlaylistResearch(chatId);
+      if (!research) {
+        await sendMessage(chatId, "No playlist research found. Run research first.");
+        return new Response("ok");
+      }
+      const playlists = await hubPlaylistBatch(research.ranked_playlist_ids);
+      const tier1 = playlists.filter((p: any, i: number) => (p.tier || (i < 5 ? 1 : 2)) === 1);
+      if (!tier1.length) {
+        await sendMessage(chatId, "No Tier 1 playlists found in your research results.");
+        return new Response("ok");
+      }
+      const tier1Ids = tier1.map((p: any) => p.playlist_id || p.id);
+      await setPendingPitchBulk(chatId, { track_name: research.track_name, playlist_ids: tier1Ids, ts: new Date().toISOString() });
+      let msg = "Ready to pitch " + tier1.length + " Tier 1 playlists for \"" + research.track_name + "\":\n";
+      tier1.forEach((p: any, i: number) => { msg += (i + 1) + ". " + (p.name || p.playlist_id) + "\n"; });
+      msg += "\nType 'confirm all' to send all pitches.";
+      await sendMessage(chatId, msg);
+      return new Response("ok");
+    }
+
+    // "confirm all" â execute bulk pitch
+    if (lowerText === 'confirm all') {
+      const pending = await getPendingPitchBulk(chatId);
+      if (!pending) {
+        await sendMessage(chatId, "Nothing pending. Use 'pitch all tier 1' first.");
+        return new Response("ok");
+      }
+      await clearPendingPitchBulk(chatId);
+      let sent = 0;
+      for (const pid of pending.playlist_ids) {
+        try {
+          await callFanFuelHub("execute-pitch", { playlist_id: pid, track_name: pending.track_name });
+          sent++;
+        } catch (e) { console.error("Pitch failed for", pid, e); }
+      }
+      await sendMessage(chatId, "Pitched " + sent + "/" + pending.playlist_ids.length + " Tier 1 playlists for \"" + pending.track_name + "\".");
+      return new Response("ok");
+    }
+
+    // "confirm" â confirm tier 3 single pitch
+    if (lowerText === 'confirm') {
+      const pending = await getPendingPitchTier3(chatId);
+      if (!pending) {
+        await sendMessage(chatId, "Nothing pending to confirm.");
+        return new Response("ok");
+      }
+      await clearPendingPitchTier3(chatId);
+      const result = await callFanFuelHub("execute-pitch", { playlist_id: pending.playlist_id, track_name: pending.track_name });
+      await sendMessage(chatId, result?.message || ("Pitch sent to " + pending.playlist_id));
+      return new Response("ok");
+    }
+
+    // "playlist X responded" / "playlist X rejected"
+    const statusMatch = lowerText.match(/^playlist\s+(.+?)\s+(responded|rejected|accepted)$/);
+    if (statusMatch) {
+      const playlistName = statusMatch[1];
+      const newStatus = statusMatch[2];
+      const result = await callFanFuelHub("update-pitch-status", { playlist_name: playlistName, status: newStatus });
+      await sendMessage(chatId, result?.message || ("Updated pitch status for " + playlistName + " to " + newStatus));
+      return new Response("ok");
+    }
+    // ââ End pitch routing ââââââââââââââââââââââââââââââââââââââ
+
+
+    try {
+      taskId = await createTaskRow(session.id, text, requestedModel);
+      _currentTaskId = taskId;
+    } catch (taskErr) {
+      console.error("FATAL: task creation failed:", taskErr);
+      await sendMessage(chatId, `ð¨ *${SYSTEM_IDENTITY}* â Task creation failed: ${String(taskErr)}`);
+      return new Response("ok");
+    }
+
+    // Send queued confirmation with task_id
+    await sendMessage(chatId, `ð Queued: \`${taskId}\``, {}, `task:${taskId}:queued`);
+
+    const modelPitch = (session.active_model === "grok" ? "grok" : "gemini") as "grok" | "gemini";
+
+    // ── Manual curator response → pitch_log ───────────────────────────
+    const plResp = text.match(/^playlist\s+(.+?)\s+responded\s*[—–-]\s*interested\s*$/i);
+    const plRej = text.match(/^playlist\s+(.+?)\s+rejected\s*$/i);
+    if (plResp || plRej) {
+      const lastRs = await getLastPlaylistResearch(chatId);
+      const trackForStatus = lastRs?.track_name?.trim() || "";
+      if (!trackForStatus) {
+        await sendMessage(
+          chatId,
+          formatAssistantMessage(modelPitch, "No recent research — run *find playlist opportunities for [track]* first."),
+          {},
+          `task:${taskId}:pitch-status-no-track`,
+        );
+        await supabase.from("tasks").update({ status: "succeeded", result_json: { shortcut: "pitch_status_no_track" } }).eq("id", taskId);
+        await sendMessage(chatId, `✅ Done: \`${taskId}\``, {}, `task:${taskId}:done`);
+        _currentTaskId = null;
+        return new Response("ok");
+      }
+      const namePart = (plResp ?? plRej)?.[1]?.trim() ?? "";
+      try {
+        const res = await callFanFuelHub("update-pitch-status", {
+          playlist_name: namePart,
+          track_name: trackForStatus,
+          status: plResp ? "responded" : "rejected",
+        });
+        const msg = typeof res?.message_to_user === "string" ? res.message_to_user : JSON.stringify(res ?? {});
+        await sendMessage(chatId, formatAssistantMessage(modelPitch, msg), {}, `task:${taskId}:pitch-manual-status`);
+      } catch (e) {
+        const errStr = e instanceof Error ? e.message : String(e);
+        await sendMessage(chatId, formatAssistantMessage(modelPitch, `❌ ${errStr}`), {}, `task:${taskId}:pitch-manual-err`);
+      }
+      await supabase.from("tasks").update({ status: "succeeded", result_json: { shortcut: "pitch_manual_status" } }).eq("id", taskId);
+      await sendMessage(chatId, `✅ Done: \`${taskId}\``, {}, `task:${taskId}:done`);
+      _currentTaskId = null;
+      return new Response("ok");
+    }
+
+    // ── pitch all tier 1 (max 5, confirm) ─────────────────────────────
+    if (/^pitch\s+all\s+(?:tier\s*1|t1)\s*$/i.test(text.trim())) {
+      const lastBulk = await getLastPlaylistResearch(chatId);
+      if (!lastBulk?.ranked_playlist_ids?.length) {
+        await sendMessage(
+          chatId,
+          formatAssistantMessage(modelPitch, "No recent research found. Try: *find playlist opportunities for [track name]*"),
+          {},
+          `task:${taskId}:pitch-all-no-research`,
+        );
+        await supabase.from("tasks").update({ status: "succeeded", result_json: { shortcut: "pitch_all_no_research" } }).eq("id", taskId);
+        await sendMessage(chatId, `✅ Done: \`${taskId}\``, {}, `task:${taskId}:done`);
+        _currentTaskId = null;
+        return new Response("ok");
+      }
+      const allPl = await hubPlaylistBatch(lastBulk.ranked_playlist_ids);
+      const tier1 = allPl
+        .filter((p: { tier?: number; submission_method?: string }) =>
+          p.tier === 1 && !NON_BULK_PITCH_METHODS.has(String(p.submission_method || "").toLowerCase())
+        )
+        .slice(0, 5);
+      if (!tier1.length) {
+        await sendMessage(
+          chatId,
+          formatAssistantMessage(
+            modelPitch,
+            "No tier *1* pitchable targets in your last results (or all are algorithmic/distributor). Run research again or pitch by number.",
+          ),
+          {},
+          `task:${taskId}:pitch-all-empty`,
+        );
+        await supabase.from("tasks").update({ status: "succeeded", result_json: { shortcut: "pitch_all_empty" } }).eq("id", taskId);
+        await sendMessage(chatId, `✅ Done: \`${taskId}\``, {}, `task:${taskId}:done`);
+        _currentTaskId = null;
+        return new Response("ok");
+      }
+      const lines = tier1
+        .map((p: { playlist_name?: string; playlist_id: string; submission_method?: string }, i: number) =>
+          `${i + 1}. *${p.playlist_name ?? p.playlist_id}* — ${p.submission_method ?? "?"}`
+        )
+        .join("\n");
+      await setPendingPitchBulk(chatId, {
+        track_name: lastBulk.track_name,
+        playlist_ids: tier1.map((p: { playlist_id: string }) => p.playlist_id),
+        ts: new Date().toISOString(),
+      });
+      const bulkMsg = [
+        `📣 *Pitch all tier 1* (max 5)`,
+        ``,
+        `Track: *${lastBulk.track_name}*`,
+        ``,
+        lines,
+        ``,
+        `Reply *confirm all* to run these pitches sequentially, or *cancel*.`,
+      ].join("\n");
+      await sendMessage(chatId, formatAssistantMessage(modelPitch, bulkMsg), {}, `task:${taskId}:pitch-all-confirm`);
+      await supabase.from("tasks").update({
+        status: "succeeded",
+        result_json: { shortcut: "pitch_all_await_confirm", count: tier1.length },
+      }).eq("id", taskId);
+      await sendMessage(chatId, `✅ Done: \`${taskId}\``, {}, `task:${taskId}:done`);
+      _currentTaskId = null;
+      return new Response("ok");
+    }
+
+    // ── show pitch report ─────────────────────────────────────────────
+    if (/^(?:show\s+)?pitch\s+report$/i.test(text.trim())) {
+      const lastRep = await getLastPlaylistResearch(chatId);
+      if (!lastRep?.ranked_playlist_ids?.length) {
+        await sendMessage(
+          chatId,
+          formatAssistantMessage(modelPitch, "No recent research found. Try: *find playlist opportunities for [track name]*"),
+          {},
+          `task:${taskId}:pitch-report-empty`,
+        );
+      } else {
+        const playlists = await hubPlaylistBatch(lastRep.ranked_playlist_ids.slice(0, 20));
+        const repLines = playlists
+          .map((p: { playlist_name?: string; playlist_id: string; tier?: number; submission_method?: string }, i: number) => {
+            const tier = p.tier != null ? `T${p.tier}` : "?";
+            const method = p.submission_method ?? "—";
+            return `${i + 1}. *${p.playlist_name ?? p.playlist_id}* — ${tier} — ${method}`;
+          })
+          .join("\n");
+        const reportMsg = [
+          `📋 *Pitch report* (last search: *${lastRep.track_name}*)`,
+          ``,
+          repLines,
+          ``,
+          `Reply *pitch 1* … *pitch 20*, *pitch [name]*, or *pitch all tier 1*.`,
+        ].join("\n");
+        await sendMessage(chatId, formatAssistantMessage(modelPitch, reportMsg), {}, `task:${taskId}:pitch-report`);
+      }
+      await supabase.from("tasks").update({ status: "succeeded", result_json: { shortcut: "pitch_report" } }).eq("id", taskId);
+      await sendMessage(chatId, `✅ Done: \`${taskId}\``, {}, `task:${taskId}:done`);
+      _currentTaskId = null;
+      return new Response("ok");
+    }
+
+    // ── pitch status / my pitches ─────────────────────────────────────
+    if (/^(?:pitch\s+status|my\s+pitches)$/i.test(text.trim())) {
+      try {
+        const lastSt = await getLastPlaylistResearch(chatId);
+        const r = await callFanFuelHub("pitch-status", { track_name: lastSt?.track_name ?? "" });
+        const entries = r?.entries ?? [];
+        const cap = r?.summary?.email_pitches_last_24h;
+        let body: string;
+        if (!entries.length) {
+          body = "No pitches logged yet.";
+        } else {
+          const lines = entries.slice(0, 25).map((p: Record<string, string>) =>
+            `• ${p.playlist_id} — ${p.track_name} — ${p.status} (${p.method ?? "?"})`
+          ).join("\n");
+          body = `*Pitch log* (${entries.length})\n\n${lines}`;
+          if (typeof cap === "number") body += `\n\n📧 Email pitches (last 24h): ${cap}/10`;
+        }
+        await sendMessage(chatId, formatAssistantMessage(modelPitch, body), {}, `task:${taskId}:pitch-status`);
+      } catch (e) {
+        const errStr = e instanceof Error ? e.message : String(e);
+        await sendMessage(chatId, formatAssistantMessage(modelPitch, `❌ ${errStr}`), {}, `task:${taskId}:pitch-status-err`);
+      }
+      await supabase.from("tasks").update({ status: "succeeded", result_json: { shortcut: "pitch_status_cmd" } }).eq("id", taskId);
+      await sendMessage(chatId, `✅ Done: \`${taskId}\``, {}, `task:${taskId}:done`);
+      _currentTaskId = null;
+      return new Response("ok");
+    }
+
+    // ── pitch [n] / pitch [name] ──────────────────────────────────────
+    const pitchNumMatch = text.match(/^pitch\s+#?(\d+)\s*$/i);
+    const pitchNameMatch = !pitchNumMatch && /^pitch\s+(.+)$/i.exec(text.trim());
+    if (pitchNumMatch || pitchNameMatch) {
+      const lastOne = await getLastPlaylistResearch(chatId);
+      if (!lastOne?.ranked_playlist_ids?.length) {
+        await sendMessage(
+          chatId,
+          formatAssistantMessage(modelPitch, "No recent research found. Try: *find playlist opportunities for [track name]*"),
+          {},
+          `task:${taskId}:pitch-single-no-research`,
+        );
+        await supabase.from("tasks").update({ status: "succeeded", result_json: { shortcut: "pitch_single_no_research" } }).eq("id", taskId);
+        await sendMessage(chatId, `✅ Done: \`${taskId}\``, {}, `task:${taskId}:done`);
+        _currentTaskId = null;
+        return new Response("ok");
+      }
+      let playlistId: string | null = null;
+      if (pitchNumMatch) {
+        const idx = Number(pitchNumMatch[1]);
+        if (!Number.isFinite(idx) || idx < 1 || idx > lastOne.ranked_playlist_ids.length) {
+          await sendMessage(
+            chatId,
+            formatAssistantMessage(modelPitch, `Pick a number between 1 and ${lastOne.ranked_playlist_ids.length}.`),
+            {},
+            `task:${taskId}:pitch-bad-index`,
+          );
+          await supabase.from("tasks").update({ status: "succeeded", result_json: { shortcut: "pitch_bad_index" } }).eq("id", taskId);
+          await sendMessage(chatId, `✅ Done: \`${taskId}\``, {}, `task:${taskId}:done`);
+          _currentTaskId = null;
+          return new Response("ok");
+        }
+        playlistId = lastOne.ranked_playlist_ids[idx - 1];
+      } else if (pitchNameMatch) {
+        const q = pitchNameMatch[1].trim().toLowerCase();
+        const allNm = await hubPlaylistBatch(lastOne.ranked_playlist_ids);
+        const hit = allNm.find((p: { playlist_name?: string; playlist_id?: string }) =>
+          String(p.playlist_name ?? "").toLowerCase().includes(q) ||
+          String(p.playlist_id ?? "").toLowerCase().includes(q)
+        );
+        if (!hit) {
+          await sendMessage(
+            chatId,
+            formatAssistantMessage(modelPitch, `No playlist in your last results matches "${pitchNameMatch[1].trim()}". Try *show pitch report*.`),
+            {},
+            `task:${taskId}:pitch-name-miss`,
+          );
+          await supabase.from("tasks").update({ status: "succeeded", result_json: { shortcut: "pitch_name_miss" } }).eq("id", taskId);
+          await sendMessage(chatId, `✅ Done: \`${taskId}\``, {}, `task:${taskId}:done`);
+          _currentTaskId = null;
+          return new Response("ok");
+        }
+        playlistId = hit.playlist_id;
+      }
+      if (playlistId) {
+        try {
+          const res = await callFanFuelHub("execute-pitch", {
+            playlist_id: playlistId,
+            track_name: lastOne.track_name,
+          });
+          if (res?.action_taken === "tier_gate" && res?.ok === false) {
+            await setPendingPitchTier3(chatId, {
+              playlist_id: playlistId,
+              track_name: lastOne.track_name,
+              ts: new Date().toISOString(),
+            });
+          }
+          const msg = typeof res?.message_to_user === "string" ? res.message_to_user : JSON.stringify(res ?? {});
+          await sendMessage(chatId, formatAssistantMessage(modelPitch, msg), {}, `task:${taskId}:pitch-one`);
+        } catch (e) {
+          const errStr = e instanceof Error ? e.message : String(e);
+          await sendMessage(chatId, formatAssistantMessage(modelPitch, `❌ ${errStr}`), {}, `task:${taskId}:pitch-one-err`);
+        }
+      }
+      await supabase.from("tasks").update({ status: "succeeded", result_json: { shortcut: "pitch_single" } }).eq("id", taskId);
+      await sendMessage(chatId, `✅ Done: \`${taskId}\``, {}, `task:${taskId}:done`);
+      _currentTaskId = null;
+      return new Response("ok");
+    }
+
+    // Normalized text for intent routing (auto-promote + autonomous mode). Must run before Lane 2.
+    // lowerText already declared in pitch routing section above
+
+    // ══════════════════════════════════════════════════════════
+    // PLAYLIST INTENT — deterministic (NO executeAgenticLoop / NO Lane 2 Grok)
+    // Natural language: extract track → setPlaylistConfirm → vibe question → return.
+    // /do find_playlist_opportunities is handled later in the /do → Lane 1 path.
+    // ══════════════════════════════════════════════════════════
+    const findPlaylistRequested =
+      /\bfind\s+playlist\s+opportunities\b/i.test(lowerText) ||
+      /\bfind\s+a\s+playlist\s+for\s+/i.test(lowerText) ||
+      /\bfind\s+playlist\s+for\s+/i.test(lowerText) ||
+      /\bsearch\s+playlist\s+opportunities\s+for\s+/i.test(lowerText) ||
+      /\bplaylist\s+opportunities\s+for\s+/i.test(lowerText) ||
+      (/\bplaylist\s+opportunities\b/i.test(lowerText) && /\bfor\s+\S+/i.test(lowerText)) ||
+      /\bfind\s+playlists?\s+for\s+/i.test(lowerText);
+
+    if (
+      findPlaylistRequested &&
+      IMPLEMENTED_WORKFLOW_KEYS.has("find_playlist_opportunities") &&
+      !lowerText.startsWith("/do")
+    ) {
+      const conv = await buildConversationContext(chatId);
+      const trackNl = extractPlaylistTrackName(text, conv);
+      const modelNl = (session.active_model === "grok" ? "grok" : "gemini") as "grok" | "gemini";
+
+      if (trackNl) {
+        const inferredNl = inferVibeFromTrack(trackNl);
+        console.log("[PLAYLIST_NL] execute-first (deterministic)", { taskId, track: trackNl, vibe: inferredNl });
+        const immediate = await runPlaylistHubResearch(trackNl, inferredNl, chatId);
+        await sendMessage(chatId, formatAssistantMessage(modelNl, immediate), {}, `task:${taskId}:playlist-immediate`);
+        await supabase.from("tasks").update({
+          status: "succeeded",
+          result_json: {
+            execution_lane: "playlist_nl",
+            shortcut: "playlist_execute_first_natural",
+            track: trackNl,
+            inferred_vibe: inferredNl,
+          },
+        }).eq("id", taskId);
+        await sendMessage(chatId, `✅ Done: \`${taskId}\``, {}, `task:${taskId}:done`);
+        _currentTaskId = null;
+        return new Response("ok");
+      }
+
+      const needTrack = [
+        `🎧 *Playlist opportunities*`,
+        ``,
+        `I need a *track name* in your message.`,
+        `Example: *Find playlist opportunities for Meditate by Fendi Frost*.`,
+      ].join("\n");
+      await sendMessage(chatId, formatAssistantMessage(modelNl, needTrack), {}, `task:${taskId}:playlist-need-track`);
+      await supabase.from("tasks").update({
+        status: "succeeded",
+        result_json: { execution_lane: "playlist_nl", shortcut: "playlist_need_track_natural" },
+      }).eq("id", taskId);
+      await sendMessage(chatId, `✅ Done: \`${taskId}\``, {}, `task:${taskId}:done`);
+      _currentTaskId = null;
+      return new Response("ok");
+    }
+
+    // ══════════════════════════════════════════════════════════
+    // INTENT-BASED LANE 1 AUTO-PROMOTION (early — before shortcuts/Lane 2)
+    // "Run / execute / start …" → other workflows (playlist NL handled above).
+    // ══════════════════════════════════════════════════════════
+    const EXECUTION_INTENT_PREFIXES = ["run ", "execute ", "trigger ", "start "];
+    const hasExecutionIntent = EXECUTION_INTENT_PREFIXES.some(p => lowerText.startsWith(p));
+
+    let autoPromotedWorkflow: WorkflowEntry | undefined;
+    const newClientIntent = isNewClientCreditIntent(lowerText);
+    const existingClientIntent = isExistingClientProgressIntent(lowerText);
+    const taxIntent = isTaxIntent(lowerText);
+    const creditIntent =
+      /\banalyze\b.*\bcredit\b/i.test(lowerText) ||
+      /\bcredit strategy\b/i.test(lowerText) ||
+      /\bdispute strategy\b/i.test(lowerText);
+    const playlistPitchIntent =
+      /\bresearch playlists?\b/i.test(lowerText) ||
+      /\bgenerate pitch\b/i.test(lowerText) ||
+      /\bplaylist pitch workflow\b/i.test(lowerText);
+    // Deterministic business routing:
+    // - new/blank client file build => Credit Compass
+    // - existing client progress/update => Credit Guardian strategy path
+    // - tax operations => CC Tax
+    if (taxIntent && IMPLEMENTED_WORKFLOW_KEYS.has("query_cc_tax")) {
+      autoPromotedWorkflow = SYNTHETIC_QUERY_CC_TAX;
+    } else if (newClientIntent && IMPLEMENTED_WORKFLOW_KEYS.has("query_credit_compass")) {
+      autoPromotedWorkflow = SYNTHETIC_QUERY_CREDIT_COMPASS;
+    } else if ((existingClientIntent || creditIntent) && IMPLEMENTED_WORKFLOW_KEYS.has("analyze_credit_strategy")) {
+      autoPromotedWorkflow = SYNTHETIC_ANALYZE_CREDIT_STRATEGY;
+    } else if (playlistPitchIntent && IMPLEMENTED_WORKFLOW_KEYS.has("playlist_pitch_workflow")) {
+      autoPromotedWorkflow = SYNTHETIC_PLAYLIST_PITCH_WORKFLOW;
+    }
+
+    if (hasExecutionIntent) {
+      const intentArg = lowerText.replace(/^(run|execute|trigger|start)\s+/, "").trim();
+      const intentWorkflows = await fetchWorkflowRegistry();
+      const { chosen: intentChosen } = _matchWorkflows(intentArg, intentWorkflows);
+      if (intentChosen && IMPLEMENTED_WORKFLOW_KEYS.has(intentChosen.key)) {
+        autoPromotedWorkflow = intentChosen;
+      }
+      if (!intentChosen && taxIntent && IMPLEMENTED_WORKFLOW_KEYS.has("query_cc_tax")) {
+        autoPromotedWorkflow = SYNTHETIC_QUERY_CC_TAX;
+      } else if (!intentChosen && newClientIntent && IMPLEMENTED_WORKFLOW_KEYS.has("query_credit_compass")) {
+        autoPromotedWorkflow = SYNTHETIC_QUERY_CREDIT_COMPASS;
+      } else if (!intentChosen && (existingClientIntent || creditIntent) && IMPLEMENTED_WORKFLOW_KEYS.has("analyze_credit_strategy")) {
+        autoPromotedWorkflow = SYNTHETIC_ANALYZE_CREDIT_STRATEGY;
+      } else if (!intentChosen && playlistPitchIntent && IMPLEMENTED_WORKFLOW_KEYS.has("playlist_pitch_workflow")) {
+        autoPromotedWorkflow = SYNTHETIC_PLAYLIST_PITCH_WORKFLOW;
+      }
+    }
+
+    if (autoPromotedWorkflow) {
+      console.log("[AUTO_PROMOTE] Routing to Lane 1", {
+        taskId,
+        workflowKey: autoPromotedWorkflow.key,
+      });
+      await supabase.from("tasks").update({
+        status: "running",
+        selected_workflow: autoPromotedWorkflow.key,
+        result_json: { execution_lane: "lane1_do", progress_step: "lane1_auto_promoted", auto_promoted: true },
+      }).eq("id", taskId);
+      try {
+        await Promise.race([
+          executeAgenticLoop(chatId, text, {
+            taskId,
+            lane: "lane1_do",
+            allowTools: true,
+            workflowKey: autoPromotedWorkflow.key,
+            sessionModel: session.active_model as "grok" | "gemini" | "chatgpt",
+          }),
+          new Promise<never>((_, reject) => setTimeout(() => reject(new Error("TIMEOUT")), 55000)),
+        ]);
+      } catch (err) {
+        const errMsg = (err as Error).message || "unknown";
+        const failResult = buildFailureResultJson({ execution_lane: "lane1_do" }, errMsg);
+        await supabase.from("tasks").update({ status: "failed", error: errMsg.slice(0, 300), result_json: failResult }).eq("id", taskId);
+        await sendMessage(chatId, `❌ Failed: \`${taskId}\` — ${errMsg.slice(0, 200)}`, {}, `task:${taskId}:failed`);
+      }
+      return new Response("ok");
+    }
 
 
     // /start still shows the help menu
