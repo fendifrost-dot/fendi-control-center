@@ -721,72 +721,8 @@ async function setPlaylistConfirm(chatId: string, data: { track_name: string; in
   );
 }
 
-/** Retrieve a pending playlist confirmation from bot_settings, or null. */
-async function getPlaylistConfirm(chatId: string): Promise<{ track_name: string; inferred_vibe: string; created_at: string } | null> {
-  const { data } = await supabase
-    .from("bot_settings")
-    .select("setting_value")
-    .eq("setting_key", `pending_playlist:${chatId}`)
-    .maybeSingle();
-  if (!data) return null;
-  try {
-    return JSON.parse(data.setting_value);
-  } catch {
-    return null;
-  }
-}
 
-/** Remove a pending playlist confirmation from bot_settings. */
-async function clearPlaylistConfirm(chatId: string) {
-  await supabase.from("bot_settings").delete().eq("setting_key", `pending_playlist:${chatId}`);
-}
 
-type LastPlaylistResearch = {
-  track_name: string; user_vibe: string; ranked_playlist_ids: string[]; ts: string;
-};
-function lastPlaylistResearchKey(chatId: string) { return `last_playlist_research:${chatId}`; }
-function pendingPitchBulkKey(chatId: string) { return `pending_pitch_bulk:${chatId}`; }
-function pendingPitchTier3Key(chatId: string) { return `pending_pitch_tier3:${chatId}`; }
-async function saveLastPlaylistResearch(chatId: string, data: LastPlaylistResearch) {
-  await supabase.from("bot_settings").upsert({ setting_key: lastPlaylistResearchKey(chatId), setting_value: JSON.stringify(data), updated_at: new Date().toISOString() }, { onConflict: "setting_key" });
-}
-async function getLastPlaylistResearch(chatId: string): Promise<LastPlaylistResearch | null> {
-  const { data } = await supabase.from("bot_settings").select("setting_value").eq("setting_key", lastPlaylistResearchKey(chatId)).maybeSingle();
-  if (!data?.setting_value) return null;
-  try { const p = JSON.parse(data.setting_value); if (p?.track_name && Array.isArray(p.ranked_playlist_ids)) return p; } catch {}
-  return null;
-}
-type PendingPitchBulk = { track_name: string; playlist_ids: string[]; ts: string };
-type PendingPitchTier3 = { playlist_id: string; track_name: string; ts: string };
-async function setPendingPitchBulk(chatId: string, state: PendingPitchBulk) {
-  await supabase.from("bot_settings").upsert({ setting_key: pendingPitchBulkKey(chatId), setting_value: JSON.stringify(state), updated_at: new Date().toISOString() }, { onConflict: "setting_key" });
-}
-async function getPendingPitchBulk(chatId: string): Promise<PendingPitchBulk | null> {
-  const { data } = await supabase.from("bot_settings").select("setting_value").eq("setting_key", pendingPitchBulkKey(chatId)).maybeSingle();
-  if (!data?.setting_value) return null;
-  try { const p = JSON.parse(data.setting_value); if (p?.track_name && Array.isArray(p.playlist_ids)) return p; } catch {}
-  return null;
-}
-async function clearPendingPitchBulk(chatId: string) {
-  await supabase.from("bot_settings").delete().eq("setting_key", pendingPitchBulkKey(chatId));
-}
-async function setPendingPitchTier3(chatId: string, state: PendingPitchTier3) {
-  await supabase.from("bot_settings").upsert({ setting_key: pendingPitchTier3Key(chatId), setting_value: JSON.stringify(state), updated_at: new Date().toISOString() }, { onConflict: "setting_key" });
-}
-async function getPendingPitchTier3(chatId: string): Promise<PendingPitchTier3 | null> {
-  const { data } = await supabase.from("bot_settings").select("setting_value").eq("setting_key", pendingPitchTier3Key(chatId)).maybeSingle();
-  if (!data?.setting_value) return null;
-  try { const p = JSON.parse(data.setting_value); if (p?.playlist_id && p?.track_name) return p; } catch {}
-  return null;
-}
-async function clearPendingPitchTier3(chatId: string) {
-  await supabase.from("bot_settings").delete().eq("setting_key", pendingPitchTier3Key(chatId));
-}
-async function hubPlaylistBatch(playlistIds: string[]): Promise<any[]> {
-  if (!playlistIds.length) return [];
-  const r = await callFanFuelHub("playlist-batch", { playlist_ids: playlistIds });
-  return Array.isArray(r?.playlists) ? r.playlists : [];
-}
 
 
 /** Execute the actual playlist research via FanFuel Hub. */
