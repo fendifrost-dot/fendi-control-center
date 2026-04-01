@@ -45,7 +45,7 @@ export async function callGPT(
   if (!OPENAI_API_KEY) throw new Error("OPENAI_API_KEY is not set");
 
   let lastErr: unknown = null;
-  for (let( attempt = 0; attempt < 3; attempt++) {
+  for (let attempt = 0; attempt < 3; attempt++) {
     const ctrl = new AbortController();
     const timeout = setTimeout(() => ctrl.abort(), DEFAULT_TIMEOUT_MS);
     try {
