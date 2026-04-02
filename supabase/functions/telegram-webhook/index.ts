@@ -2757,6 +2757,10 @@ async function executeAgenticLoop(chatId: string, userMessage: string, opts: { t
     matchedWorkflow = SYNTHETIC_QUERY_CC_TAX;
     console.log(JSON.stringify({ ts: Date.now(), event: "workflow_synthetic_fallback", key: opts.workflowKey, taskId: opts.taskId }));
   }
+  if (!matchedWorkflow && opts.workflowKey === "generate_tax_docs" && IMPLEMENTED_WORKFLOW_KEYS.has("generate_tax_docs")) {
+    matchedWorkflow = SYNTHETIC_GENERATE_TAX_DOCS;
+    console.log(JSON.stringify({ ts: Date.now(), event: "workflow_synthetic_fallback", key: opts.workflowKey, taskId: opts.taskId }));
+  }
   // Synthetic fallback - if registry missing analyze_client_credit, use analyze_credit_strategy
   if (!matchedWorkflow && opts.workflowKey === "analyze_client_credit" && IMPLEMENTED_WORKFLOW_KEYS.has("analyze_credit_strategy")) {
     matchedWorkflow = SYNTHETIC_ANALYZE_CREDIT_STRATEGY as any;
