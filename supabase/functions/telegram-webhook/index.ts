@@ -4626,7 +4626,6 @@ async function callFanFuelHub(functionName: string, body: any) {
       // Keep these for compatibility with other deployments/endpoints.
       "Authorization": `Bearer ${key}`,
       "apikey": key,
-        "x-api-key": key,
     },
     body: JSON.stringify(body),
   });
