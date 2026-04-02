@@ -41,6 +41,7 @@ const IMPLEMENTED_WORKFLOW_KEYS = new Set([
   "send_pitch",
   "credit_analysis_and_disputes",
   "playlist_pitch_workflow",
+  "generate_tax_docs",
 ]);
 
 // ─── Workflow registry fetch ────────────────────────────────────
