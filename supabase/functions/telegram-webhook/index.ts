@@ -41,6 +41,7 @@ const IMPLEMENTED_WORKFLOW_KEYS = new Set([
   "send_pitch",
   "credit_analysis_and_disputes",
   "playlist_pitch_workflow",
+  "generate_tax_docs",
 ]);
 
 // ─── Workflow registry fetch ────────────────────────────────────
@@ -88,6 +89,14 @@ const SYNTHETIC_QUERY_CC_TAX: WorkflowEntry = {
   description: "Run CC Tax status, transactions, documents, and discrepancy checks.",
   trigger_phrases: ["tax status", "tax generator", "tax discrepancies", "tax documents", "tax transactions"],
   tools: ["query_cc_tax"],
+};
+
+const SYNTHETIC_GENERATE_TAX_DOCS: WorkflowEntry = {
+  key: "generate_tax_docs",
+  name: "Generate Tax Documents",
+  description: "Pull all CC Tax data and generate Form 1040 summary, human-readable worksheet, and TXF export for TurboTax.",
+  trigger_phrases: ["prepare taxes", "complete taxes", "file taxes", "generate tax documents", "tax preparation", "turbotax export"],
+  tools: ["generate_tax_docs"],
 };
 
 // ─── Workflow key aliases (deprecated → canonical) ──────────
@@ -1407,6 +1416,47 @@ const AGENT_TOOLS: ToolDef[] = [
     },
   },
   {
+    name: "generate_tax_docs" as const,
+    description:
+      "Generate complete tax preparation documents from CC Tax data — includes Form 1040 JSON summary, human-readable worksheet, and TXF export for TurboTax import. Supports multi-year via tax_years array. Use when user says 'prepare taxes', 'complete taxes', 'file taxes', or 'generate tax documents'.",
+    parameters: {
+      type: "object" as const,
+      properties: {
+        tax_years: {
+          type: "array",
+          items: { type: "number" },
+          description: "Array of tax years to generate documents for (e.g. [2024] or [2023, 2024]). Defaults to current year.",
+        },
+      },
+      required: [],
+    },
+    destructive: false,
+    execute: async (args: { tax_years?: number[] }) => {
+      const ANON_KEY = Deno.env.get("SUPABASE_PUBLISHABLE_KEY") || SUPABASE_SERVICE_ROLE_KEY;
+      const resp = await fetch(`${SUPABASE_URL}/functions/v1/generate-tax-documents`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${ANON_KEY}` },
+        body: JSON.stringify({ tax_years: args.tax_years }),
+      });
+      const raw = await resp.text();
+      if (!resp.ok) throw new Error(`generate-tax-documents failed (${resp.status}): ${raw.slice(0, 400)}`);
+      try {
+        const parsed = JSON.parse(raw);
+        if (parsed.ok && parsed.results) {
+          // Return a readable summary rather than raw JSON dump
+          const years = Object.keys(parsed.results);
+          const summaries = years.map((y) => {
+            const r = parsed.results[y];
+            const readiness = r.json_summary?.filing_readiness;
+            return `📋 Tax Year ${y}:\n• Filing readiness: ${readiness?.score ?? "N/A"}/100 ${readiness?.ready_to_file ? "✅" : "⚠️"}\n• Missing items: ${readiness?.missing_items?.length ? readiness.missing_items.join(", ") : "None"}\n• Worksheet and TXF export generated`;
+          });
+          return `Tax documents generated for ${years.join(", ")}:\n\n${summaries.join("\n\n")}\n\nFull data available in JSON response.`;
+        }
+      } catch (_) { /* return raw */ }
+      return raw;
+    },
+  },
+  {
     name: "scan_drive_overview" as const,
     description: "Read-only scan of Google Drive client folders. Returns client names, file counts, and file types â does NOT read file contents. Call this first in autonomous mode to understand what's in Drive. Safe to call without approval.",
     destructive: false,
@@ -2707,6 +2757,10 @@ async function executeAgenticLoop(chatId: string, userMessage: string, opts: { t
     matchedWorkflow = SYNTHETIC_QUERY_CC_TAX;
     console.log(JSON.stringify({ ts: Date.now(), event: "workflow_synthetic_fallback", key: opts.workflowKey, taskId: opts.taskId }));
   }
+  if (!matchedWorkflow && opts.workflowKey === "generate_tax_docs" && IMPLEMENTED_WORKFLOW_KEYS.has("generate_tax_docs")) {
+    matchedWorkflow = SYNTHETIC_GENERATE_TAX_DOCS;
+    console.log(JSON.stringify({ ts: Date.now(), event: "workflow_synthetic_fallback", key: opts.workflowKey, taskId: opts.taskId }));
+  }
   // Synthetic fallback - if registry missing analyze_client_credit, use analyze_credit_strategy
   if (!matchedWorkflow && opts.workflowKey === "analyze_client_credit" && IMPLEMENTED_WORKFLOW_KEYS.has("analyze_credit_strategy")) {
     matchedWorkflow = SYNTHETIC_ANALYZE_CREDIT_STRATEGY as any;
@@ -3827,6 +3881,13 @@ serve(async (req) => {
     const newClientIntent = isNewClientCreditIntent(lowerText);
     const existingClientIntent = isExistingClientProgressIntent(lowerText);
     const taxIntent = isTaxIntent(lowerText);
+    const taxDocIntent =
+      /\bprepare\s+tax/i.test(lowerText) ||
+      /\bcomplete\s+tax/i.test(lowerText) ||
+      /\bfile\s+tax/i.test(lowerText) ||
+      /\bgenerate\s+tax\s+doc/i.test(lowerText) ||
+      /\btax\s+preparation\b/i.test(lowerText) ||
+      /\bturbotax\s+export\b/i.test(lowerText);
     const creditIntent =
       /\banalyze\b.*\bcredit\b/i.test(lowerText) ||
       /\bcredit strategy\b/i.test(lowerText) ||
@@ -3836,10 +3897,13 @@ serve(async (req) => {
       /\bgenerate pitch\b/i.test(lowerText) ||
       /\bplaylist pitch workflow\b/i.test(lowerText);
     // Deterministic business routing:
+    // - "prepare taxes" / "file taxes" => generate_tax_docs (higher priority than query_cc_tax)
+    // - generic tax queries => CC Tax
     // - new/blank client file build => Credit Compass
     // - existing client progress/update => Credit Guardian strategy path
-    // - tax operations => CC Tax
-    if (taxIntent && IMPLEMENTED_WORKFLOW_KEYS.has("query_cc_tax")) {
+    if (taxDocIntent && IMPLEMENTED_WORKFLOW_KEYS.has("generate_tax_docs")) {
+      autoPromotedWorkflow = SYNTHETIC_GENERATE_TAX_DOCS;
+    } else if (taxIntent && IMPLEMENTED_WORKFLOW_KEYS.has("query_cc_tax")) {
       autoPromotedWorkflow = SYNTHETIC_QUERY_CC_TAX;
     } else if (newClientIntent && IMPLEMENTED_WORKFLOW_KEYS.has("query_credit_compass")) {
       autoPromotedWorkflow = SYNTHETIC_QUERY_CREDIT_COMPASS;
@@ -3856,7 +3920,9 @@ serve(async (req) => {
       if (intentChosen && IMPLEMENTED_WORKFLOW_KEYS.has(intentChosen.key)) {
         autoPromotedWorkflow = intentChosen;
       }
-      if (!intentChosen && taxIntent && IMPLEMENTED_WORKFLOW_KEYS.has("query_cc_tax")) {
+      if (!intentChosen && taxDocIntent && IMPLEMENTED_WORKFLOW_KEYS.has("generate_tax_docs")) {
+        autoPromotedWorkflow = SYNTHETIC_GENERATE_TAX_DOCS;
+      } else if (!intentChosen && taxIntent && IMPLEMENTED_WORKFLOW_KEYS.has("query_cc_tax")) {
         autoPromotedWorkflow = SYNTHETIC_QUERY_CC_TAX;
       } else if (!intentChosen && newClientIntent && IMPLEMENTED_WORKFLOW_KEYS.has("query_credit_compass")) {
         autoPromotedWorkflow = SYNTHETIC_QUERY_CREDIT_COMPASS;
