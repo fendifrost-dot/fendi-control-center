@@ -3882,12 +3882,14 @@ serve(async (req) => {
     const existingClientIntent = isExistingClientProgressIntent(lowerText);
     const taxIntent = isTaxIntent(lowerText);
     const taxDocIntent =
-      /\bprepare\s+tax/i.test(lowerText) ||
-      /\bcomplete\s+tax/i.test(lowerText) ||
-      /\bfile\s+tax/i.test(lowerText) ||
-      /\bgenerate\s+tax\s+doc/i.test(lowerText) ||
+      /\bprepare\b.*\btax/i.test(lowerText) ||
+      /\bcomplete\b.*\btax/i.test(lowerText) ||
+      /\bfile\b.*\btax/i.test(lowerText) ||
+      /\bdo\b.*\btax/i.test(lowerText) ||
+      /\bgenerate\b.*\btax\s+doc/i.test(lowerText) ||
       /\btax\s+preparation\b/i.test(lowerText) ||
-      /\bturbotax\s+export\b/i.test(lowerText);
+      /\bturbotax\s+export\b/i.test(lowerText) ||
+      /\btax.*(20\d{2})/i.test(lowerText);
     const creditIntent =
       /\banalyze\b.*\bcredit\b/i.test(lowerText) ||
       /\bcredit strategy\b/i.test(lowerText) ||
