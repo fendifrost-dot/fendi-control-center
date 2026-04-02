@@ -3945,7 +3945,11 @@ serve(async (req) => {
     const creditIntent =
       /\banalyze\b.*\bcredit\b/i.test(lowerText) ||
       /\bcredit strategy\b/i.test(lowerText) ||
-      /\bdispute strategy\b/i.test(lowerText);
+      /\bdispute strategy\b/i.test(lowerText) ||
+      /\bdispute\s+letter/i.test(lowerText) ||
+      /\bpull\b.*\breport\b/i.test(lowerText) ||
+      /\bcredit\b.*\bdispute/i.test(lowerText) ||
+      /\bexperian\b.*\breport/i.test(lowerText);
     const playlistPitchIntent =
       /\bresearch playlists?\b/i.test(lowerText) ||
       /\bgenerate pitch\b/i.test(lowerText) ||
