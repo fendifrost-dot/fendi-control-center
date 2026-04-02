@@ -13,7 +13,41 @@ const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
 const SUPABASE_SERVICE_ROLE_KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
 const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
 
-const SYSTEM_PROMPT = "You are a credit repair analyst operating under FCRA, FDCPA, and CFPB guidelines. Analyze the client's credit timeline events and generate a prioritized dispute strategy. For each dispute item, specify: the bureau, account name, violation type, recommended dispute method, template letter type, and confidence score (0-1). Group strategies by bureau. Flag any patterns suggesting systemic violations.";
+const SYSTEM_PROMPT = `You are a credit repair analyst operating under FCRA, FDCPA, and CFPB guidelines.
+Analyze the client's credit timeline events and generate a prioritized dispute strategy.
+
+You MUST return valid JSON with exactly these top-level keys:
+
+{
+  "priority_disputes": [
+    {
+      "bureau": "Equifax|Experian|TransUnion",
+      "account_name": "string",
+      "violation_type": "string (e.g. FCRA §611, FDCPA §807)",
+      "dispute_method": "string (e.g. online, certified mail, CFPB complaint)",
+      "template_letter_type": "string (e.g. validation_demand, method_of_verification)",
+      "confidence": 0.0
+    }
+  ],
+  "bureau_strategies": {
+    "Equifax": { "approach": "string", "items": [] },
+    "Experian": { "approach": "string", "items": [] },
+    "TransUnion": { "approach": "string", "items": [] }
+  },
+  "risk_flags": [
+    { "flag": "string", "severity": "high|medium|low", "detail": "string" }
+  ],
+  "next_steps": [
+    { "step": "string", "priority": 1, "timeline": "string" }
+  ]
+}
+
+Rules:
+- If no data is available for a key, return an empty array or object — never omit the key.
+- For each dispute item, specify the bureau, account name, violation type, recommended dispute method, template letter type, and confidence score (0-1).
+- Group strategies by bureau.
+- Flag any patterns suggesting systemic violations.
+- Return ONLY the JSON object, no markdown fences or extra text.`;
 
 // Levenshtein distance for fuzzy matching on CG client list
 function levenshtein(a: string, b: string): number {
