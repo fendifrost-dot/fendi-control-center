@@ -94,7 +94,7 @@ const SYNTHETIC_QUERY_CC_TAX: WorkflowEntry = {
 const SYNTHETIC_GENERATE_TAX_DOCS: WorkflowEntry = {
   key: "generate_tax_docs",
   name: "Generate Tax Documents",
-  description: "Pull all CC Tax data and generate Form 1040 summary, human-readable worksheet, and TXF export for TurboTax.",
+  description: "Pull all CC Tax data and generate 6 prep documents: Form 1040 JSON summary (with Schedule SE), human-readable worksheet, TXF export for TurboTax, line-by-line Form 1040 mapping, CSV export for Free File, and filing recommendation based on AGI.",
   trigger_phrases: ["prepare taxes", "complete taxes", "file taxes", "generate tax documents", "tax preparation", "turbotax export"],
   tools: ["generate_tax_docs"],
 };
