@@ -175,7 +175,7 @@ async function extractWithGrok(fileName: string, textContent: string): Promise<a
     method: "POST",
     headers: {
       "Content-Type": "application/json",
-      "Authorization": `Bearer ${GROK_KEY}`,
+      "Authorization": `Bearer ${Deno.env.get("Frost_Grok") || ""}`,
     },
     body: JSON.stringify({
       model: "grok-3-mini-fast",
