@@ -91,6 +91,14 @@ const SYNTHETIC_QUERY_CC_TAX: WorkflowEntry = {
   tools: ["query_cc_tax"],
 };
 
+const SYNTHETIC_GENERATE_TAX_DOCS: WorkflowEntry = {
+  key: "generate_tax_docs",
+  name: "Generate Tax Documents",
+  description: "Pull all CC Tax data and generate Form 1040 summary, human-readable worksheet, and TXF export for TurboTax.",
+  trigger_phrases: ["prepare taxes", "complete taxes", "file taxes", "generate tax documents", "tax preparation", "turbotax export"],
+  tools: ["generate_tax_docs"],
+};
+
 // ─── Workflow key aliases (deprecated → canonical) ──────────
 // Routes old keys to new canonical handlers. "/do analyze_client_credit" → analyze_credit_strategy
 const WORKFLOW_KEY_ALIASES: Record<string, string> = {
