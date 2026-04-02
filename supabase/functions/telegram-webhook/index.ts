@@ -1672,6 +1672,10 @@ const AGENT_TOOLS: ToolDef[] = [
       });
       const raw = await resp.text();
       if (!resp.ok) throw new Error(`analyze-credit-strategy failed (${resp.status}): ${raw.slice(0, 400)}`);
+      try {
+        const parsed = JSON.parse(raw);
+        if (parsed.needsVerification && parsed.message) return parsed.message;
+      } catch (_) { /* non-JSON response, return as-is */ }
       return raw;
     },
   },
