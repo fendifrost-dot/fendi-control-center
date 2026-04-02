@@ -3881,6 +3881,13 @@ serve(async (req) => {
     const newClientIntent = isNewClientCreditIntent(lowerText);
     const existingClientIntent = isExistingClientProgressIntent(lowerText);
     const taxIntent = isTaxIntent(lowerText);
+    const taxDocIntent =
+      /\bprepare\s+tax/i.test(lowerText) ||
+      /\bcomplete\s+tax/i.test(lowerText) ||
+      /\bfile\s+tax/i.test(lowerText) ||
+      /\bgenerate\s+tax\s+doc/i.test(lowerText) ||
+      /\btax\s+preparation\b/i.test(lowerText) ||
+      /\bturbotax\s+export\b/i.test(lowerText);
     const creditIntent =
       /\banalyze\b.*\bcredit\b/i.test(lowerText) ||
       /\bcredit strategy\b/i.test(lowerText) ||
@@ -3890,10 +3897,13 @@ serve(async (req) => {
       /\bgenerate pitch\b/i.test(lowerText) ||
       /\bplaylist pitch workflow\b/i.test(lowerText);
     // Deterministic business routing:
+    // - "prepare taxes" / "file taxes" => generate_tax_docs (higher priority than query_cc_tax)
+    // - generic tax queries => CC Tax
     // - new/blank client file build => Credit Compass
     // - existing client progress/update => Credit Guardian strategy path
-    // - tax operations => CC Tax
-    if (taxIntent && IMPLEMENTED_WORKFLOW_KEYS.has("query_cc_tax")) {
+    if (taxDocIntent && IMPLEMENTED_WORKFLOW_KEYS.has("generate_tax_docs")) {
+      autoPromotedWorkflow = SYNTHETIC_GENERATE_TAX_DOCS;
+    } else if (taxIntent && IMPLEMENTED_WORKFLOW_KEYS.has("query_cc_tax")) {
       autoPromotedWorkflow = SYNTHETIC_QUERY_CC_TAX;
     } else if (newClientIntent && IMPLEMENTED_WORKFLOW_KEYS.has("query_credit_compass")) {
       autoPromotedWorkflow = SYNTHETIC_QUERY_CREDIT_COMPASS;
@@ -3910,7 +3920,9 @@ serve(async (req) => {
       if (intentChosen && IMPLEMENTED_WORKFLOW_KEYS.has(intentChosen.key)) {
         autoPromotedWorkflow = intentChosen;
       }
-      if (!intentChosen && taxIntent && IMPLEMENTED_WORKFLOW_KEYS.has("query_cc_tax")) {
+      if (!intentChosen && taxDocIntent && IMPLEMENTED_WORKFLOW_KEYS.has("generate_tax_docs")) {
+        autoPromotedWorkflow = SYNTHETIC_GENERATE_TAX_DOCS;
+      } else if (!intentChosen && taxIntent && IMPLEMENTED_WORKFLOW_KEYS.has("query_cc_tax")) {
         autoPromotedWorkflow = SYNTHETIC_QUERY_CC_TAX;
       } else if (!intentChosen && newClientIntent && IMPLEMENTED_WORKFLOW_KEYS.has("query_credit_compass")) {
         autoPromotedWorkflow = SYNTHETIC_QUERY_CREDIT_COMPASS;
