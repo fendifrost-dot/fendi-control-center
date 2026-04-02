@@ -138,7 +138,7 @@ serve(async (req) => {
         TAX_SYSTEM_PROMPT,
         userPrompt,
         { required: ["json_summary", "worksheet", "txf_export", "form_1040_lines", "csv_export", "filing_recommendation"] },
-        16384,
+        8192,
       );
 
       return { year: String(year), data: generated };
