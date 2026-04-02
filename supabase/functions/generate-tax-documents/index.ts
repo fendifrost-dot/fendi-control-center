@@ -93,9 +93,7 @@ serve(async (req) => {
       );
     }
 
-    const results: Record<string, any> = {};
-
-    for (const year of taxYears) {
+    async function processYear(year: number) {
       console.log(`Processing tax year ${year}...`);
 
       const [
@@ -143,7 +141,13 @@ serve(async (req) => {
         16384,
       );
 
-      results[String(year)] = generated;
+      return { year: String(year), data: generated };
+    }
+
+    const yearResults = await Promise.all(taxYears.map((y) => processYear(y)));
+    const results: Record<string, any> = {};
+    for (const { year, data } of yearResults) {
+      results[year] = data;
     }
 
     return new Response(
