@@ -99,6 +99,14 @@ const SYNTHETIC_GENERATE_TAX_DOCS: WorkflowEntry = {
   tools: ["generate_tax_docs"],
 };
 
+const SYNTHETIC_CREDIT_ANALYSIS_AND_DISPUTES: WorkflowEntry = {
+  key: "credit_analysis_and_disputes",
+  name: "Credit Analysis & Disputes",
+  description: "Analyze credit report and generate dispute letters for negative items.",
+  trigger_phrases: ["generate dispute", "dispute letter", "pull report and dispute"],
+  tools: ["analyze_credit_strategy", "generate_dispute_letters"],
+};
+
 // ─── Workflow key aliases (deprecated → canonical) ──────────
 // Routes old keys to new canonical handlers. "/do analyze_client_credit" → analyze_credit_strategy
 const WORKFLOW_KEY_ALIASES: Record<string, string> = {
@@ -2801,6 +2809,10 @@ async function executeAgenticLoop(chatId: string, userMessage: string, opts: { t
     matchedWorkflow = SYNTHETIC_GENERATE_TAX_DOCS;
     console.log(JSON.stringify({ ts: Date.now(), event: "workflow_synthetic_fallback", key: opts.workflowKey, taskId: opts.taskId }));
   }
+  if (!matchedWorkflow && opts.workflowKey === "credit_analysis_and_disputes" && IMPLEMENTED_WORKFLOW_KEYS.has("credit_analysis_and_disputes")) {
+    matchedWorkflow = SYNTHETIC_CREDIT_ANALYSIS_AND_DISPUTES;
+    console.log(JSON.stringify({ ts: Date.now(), event: "workflow_synthetic_fallback", key: opts.workflowKey, taskId: opts.taskId }));
+  }
   // Synthetic fallback - if registry missing analyze_client_credit, use analyze_credit_strategy
   if (!matchedWorkflow && opts.workflowKey === "analyze_client_credit" && IMPLEMENTED_WORKFLOW_KEYS.has("analyze_credit_strategy")) {
     matchedWorkflow = SYNTHETIC_ANALYZE_CREDIT_STRATEGY as any;
@@ -3933,7 +3945,11 @@ serve(async (req) => {
     const creditIntent =
       /\banalyze\b.*\bcredit\b/i.test(lowerText) ||
       /\bcredit strategy\b/i.test(lowerText) ||
-      /\bdispute strategy\b/i.test(lowerText);
+      /\bdispute strategy\b/i.test(lowerText) ||
+      /\bdispute\s+letter/i.test(lowerText) ||
+      /\bpull\b.*\breport\b/i.test(lowerText) ||
+      /\bcredit\b.*\bdispute/i.test(lowerText) ||
+      /\bexperian\b.*\breport/i.test(lowerText);
     const playlistPitchIntent =
       /\bresearch playlists?\b/i.test(lowerText) ||
       /\bgenerate pitch\b/i.test(lowerText) ||
