@@ -35,14 +35,14 @@ async function fetchCCTaxData(action: string, taxYear?: number): Promise<any> {
   const CC_TAX_KEY = Deno.env.get("CC_TAX_KEY");
   if (!CC_TAX_URL) throw new Error("CC_TAX_URL is not configured");
   if (!CC_TAX_KEY) throw new Error("CC_TAX_KEY is not configured");
-  const resp = await fetch(\`\${CC_TAX_URL}/functions/v1/control-center-api\`, {
+  const resp = await fetch(`${CC_TAX_URL}/functions/v1/control-center-api`, {
     method: "POST",
-    headers: { "Content-Type": "application/json", Authorization: \`Bearer \${CC_TAX_KEY}\` },
+    headers: { "Content-Type": "application/json", Authorization: `Bearer ${CC_TAX_KEY}` },
     body: JSON.stringify({ action, tax_year: taxYear }),
   });
   if (!resp.ok) {
     const detail = await resp.text();
-    throw new Error(\`CC Tax \${action} failed (\${resp.status}): \${detail.slice(0, 500)}\`);
+    throw new Error(`CC Tax ${action} failed (${resp.status}): ${detail.slice(0, 500)}`);
   }
   return resp.json();
 }
@@ -58,7 +58,7 @@ serve(async (req) => {
       return new Response(JSON.stringify({ ok: false, error: "tax_years must be a non-empty array" }), { status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" } });
     }
     async function processYear(year: number) {
-      console.log(\`Processing tax year \${year}...\`);
+      console.log(`Processing tax year ${year}...`);
       const [workflowStatus, yearConfig, documents, transactions, reconciliations, discrepancies, plReport] = await Promise.all([
         fetchCCTaxData("get_workflow_status", year).catch((e) => ({ error: e.message })),
         fetchCCTaxData("get_year_config", year).catch((e) => ({ error: e.message })),
@@ -69,7 +69,7 @@ serve(async (req) => {
         fetchCCTaxData("get_pl_report", year).catch((e) => ({ error: e.message })),
       ]);
       const taxDataPayload = JSON.stringify({ tax_year: year, workflow_status: workflowStatus, year_config: yearConfig, documents, transactions, reconciliations, discrepancies, pl_report: plReport });
-      const userPrompt = \`Generate all three tax document outputs for tax year \${year}. Be concise. Here is the tax data:\n\n\${taxDataPayload}\`;
+      const userPrompt = `Generate all three tax document outputs for tax year ${year}. Be concise. Here is the tax data:\n\n${taxDataPayload}`;
       const generated = await callClaudeJSON<{ json_summary: Record<string, unknown>; worksheet: string; filing_recommendation: Record<string, unknown>; }>(
         TAX_SYSTEM_PROMPT, userPrompt, { required: ["json_summary", "worksheet", "filing_recommendation"] }, 4096,
       );
