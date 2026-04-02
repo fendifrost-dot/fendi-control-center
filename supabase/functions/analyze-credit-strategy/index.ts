@@ -129,8 +129,8 @@ async function resolveClientId(clientName: string): Promise<{
         .sort((a: any, b: any) => b.score - a.score);
 
       if (scored.length > 0 && scored[0].score >= 0.7) {
-        const queryTokens = clientName.toLowerCase().split(/[\s\-_]+/).filter(Boolean);
-        const matchTokens = scored[0].name.toLowerCase().split(/[\s\-_]+/).filter(Boolean);
+        const queryTokens = clientName.toLowerCase().split(/[\s\-_,.']+/).filter((t: string) => t.length > 1);
+        const matchTokens = scored[0].name.toLowerCase().split(/[\s\-_,.']+/).filter((t: string) => t.length > 1);
         const hasTokenOverlap = queryTokens.some((qt: string) =>
           matchTokens.some((mt: string) => mt.includes(qt) || qt.includes(mt) || nameSimilarity(qt, mt) > 0.8)
         );
