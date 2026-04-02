@@ -2,6 +2,7 @@ import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.49.1";
 import { fetchCreditGuardian } from "../_shared/creditGuardian.ts";
 import { callClaudeJSON } from "../_shared/claude.ts";
+import { fuzzyClientSearch } from "../_shared/fuzzyClientSearch.ts";
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
@@ -14,13 +15,128 @@ const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
 
 const SYSTEM_PROMPT = "You are a credit repair analyst operating under FCRA, FDCPA, and CFPB guidelines. Analyze the client's credit timeline events and generate a prioritized dispute strategy. For each dispute item, specify: the bureau, account name, violation type, recommended dispute method, template letter type, and confidence score (0-1). Group strategies by bureau. Flag any patterns suggesting systemic violations.";
 
-async function resolveClientId(clientName: string): Promise<string | null> {
-  const resp = await fetchCreditGuardian({ action: "get_clients" });
-  if (!resp.ok) return null;
-  const payload = await resp.json();
-  const rows = Array.isArray(payload?.data) ? payload.data : (Array.isArray(payload) ? payload : []);
-  const hit = rows.find((c: any) => String(c.name || "").toLowerCase().includes(clientName.toLowerCase()));
-  return hit?.id || null;
+// Levenshtein distance for fuzzy matching on CG client list
+function levenshtein(a: string, b: string): number {
+  const al = a.toLowerCase(), bl = b.toLowerCase();
+  const matrix: number[][] = [];
+  for (let i = 0; i <= al.length; i++) matrix[i] = [i];
+  for (let j = 0; j <= bl.length; j++) matrix[0][j] = j;
+  for (let i = 1; i <= al.length; i++) {
+    for (let j = 1; j <= bl.length; j++) {
+      const cost = al[i - 1] === bl[j - 1] ? 0 : 1;
+      matrix[i][j] = Math.min(
+        matrix[i - 1][j] + 1,
+        matrix[i][j - 1] + 1,
+        matrix[i - 1][j - 1] + cost
+      );
+    }
+  }
+  return matrix[al.length][bl.length];
+}
+
+function nameSimilarity(a: string, b: string): number {
+  if (!a || !b) return 0;
+  const maxLen = Math.max(a.length, b.length);
+  if (maxLen === 0) return 1;
+  return 1 - levenshtein(a, b) / maxLen;
+}
+
+function tokenMatch(query: string, target: string): number {
+  const q = query.toLowerCase().trim();
+  const t = target.toLowerCase().trim();
+  if (q === t) return 1.0;
+  if (t.includes(q)) return 0.85;
+  if (q.includes(t)) return 0.75;
+  const qTokens = q.split(/[\s\-_]+/).filter(Boolean);
+  const tTokens = t.split(/[\s\-_]+/).filter(Boolean);
+  let matched = 0;
+  for (const qt of qTokens) {
+    for (const tt of tTokens) {
+      if (tt.includes(qt) || qt.includes(tt)) { matched++; break; }
+      if (nameSimilarity(qt, tt) > 0.75) { matched += 0.7; break; }
+    }
+  }
+  return qTokens.length > 0 ? (matched / qTokens.length) * 0.7 : 0;
+}
+
+async function resolveClientId(clientName: string): Promise<{
+  clientId: string | null;
+  needsVerification: boolean;
+  message?: string;
+  matchedName?: string;
+}> {
+  // Step 1: Try Credit Guardian client list with fuzzy matching
+  try {
+    const resp = await fetchCreditGuardian({ action: "get_clients" });
+    if (resp.ok) {
+      const payload = await resp.json();
+      const rows = Array.isArray(payload?.data) ? payload.data : (Array.isArray(payload) ? payload : []);
+
+      // Exact match
+      const exact = rows.find((c: any) => String(c.name || "").toLowerCase() === clientName.toLowerCase());
+      if (exact?.id) return { clientId: exact.id, needsVerification: false, matchedName: exact.name };
+
+      // Substring match (both directions)
+      const substring = rows.find((c: any) => {
+        const name = String(c.name || "").toLowerCase();
+        const query = clientName.toLowerCase();
+        return name.includes(query) || query.includes(name);
+      });
+      if (substring?.id) return { clientId: substring.id, needsVerification: false, matchedName: substring.name };
+
+      // Fuzzy match on CG clients
+      const scored = rows
+        .map((c: any) => ({
+          id: c.id,
+          name: String(c.name || ""),
+          score: Math.max(tokenMatch(clientName, String(c.name || "")), nameSimilarity(clientName, String(c.name || ""))),
+        }))
+        .filter((c: any) => c.score >= 0.5)
+        .sort((a: any, b: any) => b.score - a.score);
+
+      if (scored.length > 0 && scored[0].score >= 0.7) {
+        return { clientId: scored[0].id, needsVerification: false, matchedName: scored[0].name };
+      }
+
+      // Multiple possible matches - ask for verification
+      if (scored.length > 0) {
+        const opts = scored.slice(0, 4).map((c: any, i: number) => `${i + 1}. ${c.name}`).join("\n");
+        return {
+          clientId: null,
+          needsVerification: true,
+          message: `I found some possible matches for "${clientName}" but I'm not confident:\n\n${opts}\n\nCould you confirm which one, or let me know if the file might be listed under a different name?`,
+        };
+      }
+    }
+  } catch (err) {
+    console.error("[RESOLVE] CG client lookup error:", err);
+  }
+
+  // Step 2: Try local fuzzy search (clients table, aliases, Drive folders)
+  try {
+    const localResult = await fuzzyClientSearch(clientName);
+    if (localResult.exactMatch && !localResult.needsVerification) {
+      return { clientId: localResult.exactMatch.id, needsVerification: false, matchedName: localResult.exactMatch.name };
+    }
+    if (localResult.fuzzyMatches.length > 0) {
+      const opts = localResult.fuzzyMatches.slice(0, 4)
+        .map((m, i) => `${i + 1}. ${m.name} (${m.source.replace("_", " ")})`).join("\n");
+      return {
+        clientId: null,
+        needsVerification: true,
+        message: `I found some possible matches for "${clientName}":\n\n${opts}\n\nCould you confirm which one? Or if none of these are right, the file might be listed under a different name (like a nickname or legal name).`,
+      };
+    }
+  } catch (err) {
+    console.error("[RESOLVE] Local fuzzy search error:", err);
+  }
+
+  // Step 3: No match anywhere - ask user if it could be under a different name
+  return {
+    clientId: null,
+    needsVerification: true,
+    message: `I couldn't find a client matching "${clientName}" in our system. Could the file be listed under a different name? Sometimes files are stored under a nickname, legal name, or folder name that's different from what you used.`,
+  };
 }
 
 serve(async (req) => {
@@ -30,8 +146,34 @@ serve(async (req) => {
     const body = await req.json().catch(() => ({}));
     let clientId = body.client_id as string | undefined;
     const clientName = body.client_name as string | undefined;
-    if (!clientId && clientName) clientId = await resolveClientId(clientName) || undefined;
-    if (!clientId) throw new Error("client_id or resolvable client_name is required");
+
+    if (!clientId && clientName) {
+      const resolution = await resolveClientId(clientName);
+      if (resolution.needsVerification || !resolution.clientId) {
+        return new Response(JSON.stringify({
+          ok: false,
+          needsVerification: true,
+          message: resolution.message,
+          searchedFor: clientName,
+        }), {
+          status: 200,
+          headers: { ...corsHeaders, "Content-Type": "application/json" },
+        });
+      }
+      clientId = resolution.clientId;
+      console.log(`[RESOLVE] "${clientName}" resolved to client ${clientId} (${resolution.matchedName})`);
+    }
+
+    if (!clientId) {
+      return new Response(JSON.stringify({
+        ok: false,
+        needsVerification: true,
+        message: "I need a client name to analyze. Who would you like me to look up?",
+      }), {
+        status: 200,
+        headers: { ...corsHeaders, "Content-Type": "application/json" },
+      });
+    }
 
     const [detailResp, docsResp] = await Promise.all([
       fetchCreditGuardian({ action: "get_client_detail", params: { client_id: clientId } }),
