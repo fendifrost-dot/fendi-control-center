@@ -837,6 +837,230 @@ export type Database = {
           },
         ]
       }
+      tax_form_instances: {
+        Row: {
+          created_at: string | null
+          drive_file_id: string | null
+          error_message: string | null
+          field_data: Json | null
+          form_type: string
+          form_year: number
+          id: string
+          notes: string | null
+          pdf_url: string | null
+          status: string | null
+          tax_return_id: string
+          template_id: string | null
+          updated_at: string | null
+        }
+        Insert: {
+          created_at?: string | null
+          drive_file_id?: string | null
+          error_message?: string | null
+          field_data?: Json | null
+          form_type: string
+          form_year: number
+          id?: string
+          notes?: string | null
+          pdf_url?: string | null
+          status?: string | null
+          tax_return_id: string
+          template_id?: string | null
+          updated_at?: string | null
+        }
+        Update: {
+          created_at?: string | null
+          drive_file_id?: string | null
+          error_message?: string | null
+          field_data?: Json | null
+          form_type?: string
+          form_year?: number
+          id?: string
+          notes?: string | null
+          pdf_url?: string | null
+          status?: string | null
+          tax_return_id?: string
+          template_id?: string | null
+          updated_at?: string | null
+        }
+        Relationships: [
+          {
+            foreignKeyName: "tax_form_instances_tax_return_id_fkey"
+            columns: ["tax_return_id"]
+            isOneToOne: false
+            referencedRelation: "tax_returns"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "tax_form_instances_template_id_fkey"
+            columns: ["template_id"]
+            isOneToOne: false
+            referencedRelation: "tax_form_templates"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
+      tax_form_templates: {
+        Row: {
+          created_at: string | null
+          description: string | null
+          field_schema: Json | null
+          form_name: string
+          form_type: string
+          form_year: number
+          id: string
+          is_active: boolean | null
+          pdf_template_url: string | null
+          updated_at: string | null
+        }
+        Insert: {
+          created_at?: string | null
+          description?: string | null
+          field_schema?: Json | null
+          form_name: string
+          form_type: string
+          form_year: number
+          id?: string
+          is_active?: boolean | null
+          pdf_template_url?: string | null
+          updated_at?: string | null
+        }
+        Update: {
+          created_at?: string | null
+          description?: string | null
+          field_schema?: Json | null
+          form_name?: string
+          form_type?: string
+          form_year?: number
+          id?: string
+          is_active?: boolean | null
+          pdf_template_url?: string | null
+          updated_at?: string | null
+        }
+        Relationships: []
+      }
+      tax_return_audit_log: {
+        Row: {
+          action: string
+          actor: string | null
+          created_at: string | null
+          id: string
+          metadata: Json | null
+          new_values: Json | null
+          old_values: Json | null
+          tax_return_id: string
+        }
+        Insert: {
+          action: string
+          actor?: string | null
+          created_at?: string | null
+          id?: string
+          metadata?: Json | null
+          new_values?: Json | null
+          old_values?: Json | null
+          tax_return_id: string
+        }
+        Update: {
+          action?: string
+          actor?: string | null
+          created_at?: string | null
+          id?: string
+          metadata?: Json | null
+          new_values?: Json | null
+          old_values?: Json | null
+          tax_return_id?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "tax_return_audit_log_tax_return_id_fkey"
+            columns: ["tax_return_id"]
+            isOneToOne: false
+            referencedRelation: "tax_returns"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
+      tax_returns: {
+        Row: {
+          agi: number | null
+          amount_owed_or_refund: number | null
+          client_id: string
+          client_name: string | null
+          confirmation_number: string | null
+          created_at: string | null
+          created_by: string | null
+          drive_folder_id: string | null
+          drive_folder_url: string | null
+          filed_at: string | null
+          filing_method: string | null
+          filing_readiness_score: number | null
+          filing_recommendation: Json | null
+          filing_status: string | null
+          id: string
+          json_summary: Json | null
+          model: string | null
+          notes: string | null
+          status: string | null
+          tax_year: number
+          total_income: number | null
+          total_tax: number | null
+          updated_at: string | null
+          worksheet: string | null
+        }
+        Insert: {
+          agi?: number | null
+          amount_owed_or_refund?: number | null
+          client_id: string
+          client_name?: string | null
+          confirmation_number?: string | null
+          created_at?: string | null
+          created_by?: string | null
+          drive_folder_id?: string | null
+          drive_folder_url?: string | null
+          filed_at?: string | null
+          filing_method?: string | null
+          filing_readiness_score?: number | null
+          filing_recommendation?: Json | null
+          filing_status?: string | null
+          id?: string
+          json_summary?: Json | null
+          model?: string | null
+          notes?: string | null
+          status?: string | null
+          tax_year: number
+          total_income?: number | null
+          total_tax?: number | null
+          updated_at?: string | null
+          worksheet?: string | null
+        }
+        Update: {
+          agi?: number | null
+          amount_owed_or_refund?: number | null
+          client_id?: string
+          client_name?: string | null
+          confirmation_number?: string | null
+          created_at?: string | null
+          created_by?: string | null
+          drive_folder_id?: string | null
+          drive_folder_url?: string | null
+          filed_at?: string | null
+          filing_method?: string | null
+          filing_readiness_score?: number | null
+          filing_recommendation?: Json | null
+          filing_status?: string | null
+          id?: string
+          json_summary?: Json | null
+          model?: string | null
+          notes?: string | null
+          status?: string | null
+          tax_year?: number
+          total_income?: number | null
+          total_tax?: number | null
+          updated_at?: string | null
+          worksheet?: string | null
+        }
+        Relationships: []
+      }
       telegram_approval_queue: {
         Row: {
           client_id: string
