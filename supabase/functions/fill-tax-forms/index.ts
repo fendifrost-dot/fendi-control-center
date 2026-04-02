@@ -138,7 +138,7 @@ serve(async (req) => {
             // Update the form instance with results
             await updateFormInstance(supabase, instanceId, {
               status: "filled",
-              pdf_url: pdfUrl || driveUrl,
+              pdf_url: pdfUrl || driveUrl || undefined,
               drive_file_id: driveUrl ? driveUrl.split("/d/")[1]?.split("/")[0] : undefined,
             });
 
