@@ -1416,6 +1416,47 @@ const AGENT_TOOLS: ToolDef[] = [
     },
   },
   {
+    name: "generate_tax_docs" as const,
+    description:
+      "Generate complete tax preparation documents from CC Tax data — includes Form 1040 JSON summary, human-readable worksheet, and TXF export for TurboTax import. Supports multi-year via tax_years array. Use when user says 'prepare taxes', 'complete taxes', 'file taxes', or 'generate tax documents'.",
+    parameters: {
+      type: "object" as const,
+      properties: {
+        tax_years: {
+          type: "array",
+          items: { type: "number" },
+          description: "Array of tax years to generate documents for (e.g. [2024] or [2023, 2024]). Defaults to current year.",
+        },
+      },
+      required: [],
+    },
+    destructive: false,
+    execute: async (args: { tax_years?: number[] }) => {
+      const ANON_KEY = Deno.env.get("SUPABASE_PUBLISHABLE_KEY") || SUPABASE_SERVICE_ROLE_KEY;
+      const resp = await fetch(`${SUPABASE_URL}/functions/v1/generate-tax-documents`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${ANON_KEY}` },
+        body: JSON.stringify({ tax_years: args.tax_years }),
+      });
+      const raw = await resp.text();
+      if (!resp.ok) throw new Error(`generate-tax-documents failed (${resp.status}): ${raw.slice(0, 400)}`);
+      try {
+        const parsed = JSON.parse(raw);
+        if (parsed.ok && parsed.results) {
+          // Return a readable summary rather than raw JSON dump
+          const years = Object.keys(parsed.results);
+          const summaries = years.map((y) => {
+            const r = parsed.results[y];
+            const readiness = r.json_summary?.filing_readiness;
+            return `📋 Tax Year ${y}:\n• Filing readiness: ${readiness?.score ?? "N/A"}/100 ${readiness?.ready_to_file ? "✅" : "⚠️"}\n• Missing items: ${readiness?.missing_items?.length ? readiness.missing_items.join(", ") : "None"}\n• Worksheet and TXF export generated`;
+          });
+          return `Tax documents generated for ${years.join(", ")}:\n\n${summaries.join("\n\n")}\n\nFull data available in JSON response.`;
+        }
+      } catch (_) { /* return raw */ }
+      return raw;
+    },
+  },
+  {
     name: "scan_drive_overview" as const,
     description: "Read-only scan of Google Drive client folders. Returns client names, file counts, and file types â does NOT read file contents. Call this first in autonomous mode to understand what's in Drive. Safe to call without approval.",
     destructive: false,
