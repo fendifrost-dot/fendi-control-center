@@ -99,6 +99,14 @@ const SYNTHETIC_GENERATE_TAX_DOCS: WorkflowEntry = {
   tools: ["generate_tax_docs"],
 };
 
+const SYNTHETIC_CREDIT_ANALYSIS_AND_DISPUTES: WorkflowEntry = {
+  key: "credit_analysis_and_disputes",
+  name: "Credit Analysis & Disputes",
+  description: "Analyze credit report and generate dispute letters for negative items.",
+  trigger_phrases: ["generate dispute", "dispute letter", "pull report and dispute"],
+  tools: ["analyze_credit_strategy", "generate_dispute_letters"],
+};
+
 // ─── Workflow key aliases (deprecated → canonical) ──────────
 // Routes old keys to new canonical handlers. "/do analyze_client_credit" → analyze_credit_strategy
 const WORKFLOW_KEY_ALIASES: Record<string, string> = {
