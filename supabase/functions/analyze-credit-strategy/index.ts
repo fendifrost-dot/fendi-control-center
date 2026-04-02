@@ -236,12 +236,12 @@ serve(async (req) => {
       .from("credit_analyses")
       .insert({
         client_id: clientId,
-        analysis_json: analysis,
-        status: "generated",
+        analysis: analysis,
+        model: "claude-sonnet-4-20250514",
       })
       .select("id, created_at")
       .single();
-    if (error) throw error;
+    if (error) throw new Error(error.message || JSON.stringify(error));
 
     return new Response(JSON.stringify({
       ok: true,
@@ -252,8 +252,9 @@ serve(async (req) => {
     }), {
       headers: { ...corsHeaders, "Content-Type": "application/json" },
     });
-  } catch (err) {
-    return new Response(JSON.stringify({ ok: false, error: String(err) }), {
+  } catch (err: any) {
+    console.error("[analyze-credit-strategy] Error:", err);
+    return new Response(JSON.stringify({ ok: false, error: err?.message || JSON.stringify(err) }), {
       status: 500,
       headers: { ...corsHeaders, "Content-Type": "application/json" },
     });
