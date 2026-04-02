@@ -1418,7 +1418,7 @@ const AGENT_TOOLS: ToolDef[] = [
   {
     name: "generate_tax_docs" as const,
     description:
-      "Generate complete tax preparation documents from CC Tax data — includes Form 1040 JSON summary, human-readable worksheet, and TXF export for TurboTax import. Supports multi-year via tax_years array. Use when user says 'prepare taxes', 'complete taxes', 'file taxes', or 'generate tax documents'.",
+      "Generate 6 tax preparation documents from CC Tax data: (1) Form 1040 JSON summary with Schedule SE, (2) human-readable worksheet, (3) TXF export for TurboTax, (4) line-by-line Form 1040 mapping (Lines 1-37), (5) CSV export for Free File import, (6) filing recommendation based on AGI. These are PREP documents only — not filing. Supports multi-year via tax_years array.",
     parameters: {
       type: "object" as const,
       properties: {
@@ -1443,14 +1443,31 @@ const AGENT_TOOLS: ToolDef[] = [
       try {
         const parsed = JSON.parse(raw);
         if (parsed.ok && parsed.results) {
-          // Return a readable summary rather than raw JSON dump
           const years = Object.keys(parsed.results);
           const summaries = years.map((y) => {
             const r = parsed.results[y];
             const readiness = r.json_summary?.filing_readiness;
-            return `📋 Tax Year ${y}:\n• Filing readiness: ${readiness?.score ?? "N/A"}/100 ${readiness?.ready_to_file ? "✅" : "⚠️"}\n• Missing items: ${readiness?.missing_items?.length ? readiness.missing_items.join(", ") : "None"}\n• Worksheet and TXF export generated`;
+            const rec = r.filing_recommendation;
+            const docList = [
+              "Form 1040 JSON summary",
+              "Human-readable worksheet",
+              "TXF export (TurboTax)",
+              "Form 1040 line-by-line mapping",
+              "CSV export (Free File)",
+              "Filing recommendation",
+            ];
+            let summary = `📋 Tax Year ${y}:`;
+            summary += `\n• AGI: $${rec?.agi?.toLocaleString() ?? "N/A"}`;
+            summary += `\n• Recommended filing method: ${rec?.method ?? "N/A"}`;
+            summary += `\n• Filing readiness: ${readiness?.score ?? "N/A"}/100 ${readiness?.ready_to_file ? "✅" : "⚠️"}`;
+            summary += `\n• Missing items: ${readiness?.missing_items?.length ? readiness.missing_items.join(", ") : "None"}`;
+            summary += `\n• Documents generated: ${docList.join(", ")}`;
+            if (rec?.steps?.length) {
+              summary += `\n\n📌 Next steps:\n${rec.steps.map((s: string, i: number) => `  ${i + 1}. ${s}`).join("\n")}`;
+            }
+            return summary;
           });
-          return `Tax documents generated for ${years.join(", ")}:\n\n${summaries.join("\n\n")}\n\nFull data available in JSON response.`;
+          return `Tax prep documents generated for ${years.join(", ")}:\n\n${summaries.join("\n\n")}\n\n⚠️ Disclaimer: These are preparation documents only — not a tax filing. Review all figures before submitting.`;
         }
       } catch (_) { /* return raw */ }
       return raw;

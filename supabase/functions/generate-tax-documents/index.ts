@@ -6,31 +6,54 @@ const corsHeaders = {
   "Access-Control-Allow-Headers": "authorization, x-client-info, apikey, content-type",
 };
 
-const TAX_SYSTEM_PROMPT = `You are a senior tax accountant AI assistant. You produce three outputs from raw tax data:
+const TAX_SYSTEM_PROMPT = `You are a senior tax accountant AI assistant. You produce SIX outputs from raw tax data.
 
-1. **JSON summary** — structured data with:
+IMPORTANT: We are NOT filing taxes — only preparing documents for review. All outputs are prep documents.
+
+1. **json_summary** — structured data with:
    - form_1040: { filing_status, total_income, adjusted_gross_income, taxable_income, total_tax, estimated_payments, amount_owed_or_refund }
    - schedule_c: { business_name, gross_income, total_expenses, net_profit, expense_categories: [{name, amount}] }
+   - schedule_se: { net_earnings, se_tax, deductible_half }
    - filing_readiness: { score (0-100), missing_items: string[], warnings: string[], ready_to_file: boolean }
    - deductions: { standard_or_itemized, items: [{description, amount, category}] }
 
-2. **Human-readable worksheet** — a clean, printable text worksheet summarizing all tax data, organized by category (income, expenses, deductions, estimated payments, filing status). Include totals and notes.
+2. **worksheet** — a clean, printable text worksheet summarizing all tax data, organized by category (income, expenses, deductions, estimated payments, filing status). Include totals and notes.
 
-3. **TXF export** — valid TXF format (Tax Exchange Format) compatible with TurboTax import. Use correct TXF line codes:
+3. **txf_export** — valid TXF format (Tax Exchange Format) compatible with TurboTax import. Use correct TXF line codes:
    - V042 for version header
    - N521 for wages (W-2)
    - N547 for interest income
-   - N543 for dividend income  
+   - N543 for dividend income
    - N1401 for Schedule C gross receipts
    - N1539 for Schedule C expenses (by category)
    - N2440 for estimated tax payments
    - D for date lines, $ for amount lines
 
+4. **form_1040_lines** — line-by-line Form 1040 mapping for mail-in preparation:
+   - An array of objects: [{ line: number (1-37), description: string, amount: number, source: string }]
+   - Cover Lines 1 through 37 (income, adjustments, AGI, deductions, taxable income, tax, credits, payments, refund/owed)
+   - If a line has no data, include it with amount 0 and source "N/A"
+
+5. **csv_export** — flat CSV string with columns: field_id,form,line,description,amount,notes
+   - One row per tax field for Free File import
+   - Include header row
+   - Cover Form 1040, Schedule C, Schedule SE fields
+
+6. **filing_recommendation** — object with:
+   - method: one of "free_file" | "turbotax" | "mail_in" | "mixed"
+   - agi: number (the adjusted gross income)
+   - reasoning: string explaining why this method is recommended
+   - steps: string[] (ordered next steps the taxpayer should take)
+   - Rules: If AGI <= 84000, recommend "free_file". If AGI > 84000 and Schedule C exists, recommend "turbotax". If no digital access, recommend "mail_in". If mixed scenarios, recommend "mixed" with explanation.
+
 Respond with valid JSON only. Structure:
 {
-  "json_summary": { form_1040: {...}, schedule_c: {...}, filing_readiness: {...}, deductions: {...} },
-  "worksheet": "string (the full human-readable worksheet text)",
-  "txf_export": "string (the complete TXF file content)"
+  "json_summary": { form_1040: {...}, schedule_c: {...}, schedule_se: {...}, filing_readiness: {...}, deductions: {...} },
+  "worksheet": "string",
+  "txf_export": "string",
+  "form_1040_lines": [{ "line": 1, "description": "...", "amount": 0, "source": "..." }, ...],
+  "csv_export": "string",
+  "filing_recommendation": { "method": "...", "agi": 0, "reasoning": "...", "steps": ["..."] }
 }`;
 
 async function fetchCCTaxData(action: string, taxYear?: number): Promise<any> {
@@ -75,7 +98,6 @@ serve(async (req) => {
     for (const year of taxYears) {
       console.log(`Processing tax year ${year}...`);
 
-      // Pull all relevant data from CC Tax in parallel
       const [
         workflowStatus,
         yearConfig,
@@ -105,24 +127,23 @@ serve(async (req) => {
         pl_report: plReport,
       });
 
-      const userPrompt = `Generate all three tax document outputs for tax year ${year}. Here is the complete tax data:\n\n${taxDataPayload}`;
+      const userPrompt = `Generate all six tax document outputs for tax year ${year}. Here is the complete tax data:\n\n${taxDataPayload}`;
 
       const generated = await callClaudeJSON<{
         json_summary: Record<string, unknown>;
         worksheet: string;
         txf_export: string;
+        form_1040_lines: Array<{ line: number; description: string; amount: number; source: string }>;
+        csv_export: string;
+        filing_recommendation: { method: string; agi: number; reasoning: string; steps: string[] };
       }>(
         TAX_SYSTEM_PROMPT,
         userPrompt,
-        { required: ["json_summary", "worksheet", "txf_export"] },
-        8192,
+        { required: ["json_summary", "worksheet", "txf_export", "form_1040_lines", "csv_export", "filing_recommendation"] },
+        16384,
       );
 
-      results[String(year)] = {
-        json_summary: generated.json_summary,
-        worksheet: generated.worksheet,
-        txf_export: generated.txf_export,
-      };
+      results[String(year)] = generated;
     }
 
     return new Response(

@@ -145,7 +145,7 @@ async function resolveClientId(clientName: string): Promise<{
         return {
           clientId: null,
           needsVerification: true,
-          message: `I found some possible matches for "${clientName}" but I'm not confident:\n\n${opts}\n\nCould you confirm which one, or let me know if the file might be listed under a different name?`,
+          message: `I found some possible matches for "${clientName}":\n\n${opts}\n\nCould you confirm which one, or let me know if the file might be listed under a different name?`,
         };
       }
     }
