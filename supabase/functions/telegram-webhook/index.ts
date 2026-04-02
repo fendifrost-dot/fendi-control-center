@@ -1436,24 +1436,35 @@ const AGENT_TOOLS: ToolDef[] = [
       const allYears = args.tax_years ?? [new Date().getFullYear()];
       const batchSize = 2;
       const mergedResults: Record<string, any> = {};
+      const batches: number[][] = [];
 
       for (let i = 0; i < allYears.length; i += batchSize) {
-        const batch = allYears.slice(i, i + batchSize);
-        const resp = await fetch(`${SUPABASE_URL}/functions/v1/generate-tax-documents`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json", Authorization: `Bearer ${ANON_KEY}` },
-          body: JSON.stringify({ tax_years: batch }),
-        });
-        const raw = await resp.text();
-        if (!resp.ok) throw new Error(`generate-tax-documents failed (${resp.status}): ${raw.slice(0, 400)}`);
-        try {
-          const parsed = JSON.parse(raw);
-          if (parsed.ok && parsed.results) {
-            Object.assign(mergedResults, parsed.results);
+        batches.push(allYears.slice(i, i + batchSize));
+      }
+
+      const batchResponses = await Promise.all(
+        batches.map(async (batch) => {
+          const resp = await fetch(`${SUPABASE_URL}/functions/v1/generate-tax-documents`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json", Authorization: `Bearer ${ANON_KEY}` },
+            body: JSON.stringify({ tax_years: batch }),
+          });
+          const raw = await resp.text();
+          if (!resp.ok) throw new Error(`generate-tax-documents failed (${resp.status}): ${raw.slice(0, 400)}`);
+          try {
+            const parsed = JSON.parse(raw);
+            if (parsed.ok && parsed.results) {
+              return parsed.results as Record<string, any>;
+            }
+            return {};
+          } catch (_) {
+            throw new Error(`Failed to parse tax response for years ${batch.join(",")}: ${raw.slice(0, 400)}`);
           }
-        } catch (_) {
-          throw new Error(`Failed to parse tax response for years ${batch.join(",")}: ${raw.slice(0, 400)}`);
-        }
+        })
+      );
+
+      for (const batchResult of batchResponses) {
+        Object.assign(mergedResults, batchResult);
       }
 
       const years = Object.keys(mergedResults);
