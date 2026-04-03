@@ -209,12 +209,11 @@ async function processForm(
   const { error: dbError } = await supabase.from("tax_form_instances").insert({
     tax_return_id: taxReturnId,
     form_type: formType,
-    tax_year: taxYear,
+    form_year: taxYear,
     status: "draft",
-    storage_path: storagePath,
+    pdf_url: storagePath,
     drive_file_id: driveResult?.id || null,
-    drive_link: driveResult?.webViewLink || null,
-    field_count: Object.keys(fieldMappings).length,
+    notes: `fields: ${Object.keys(fieldMappings).length}, drive_link: ${driveResult?.webViewLink || "N/A"}`,
     created_at: new Date().toISOString(),
   });
 
