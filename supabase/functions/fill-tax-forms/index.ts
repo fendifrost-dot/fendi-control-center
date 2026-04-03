@@ -101,7 +101,7 @@ function getFieldMappings(formType: string): Record<string, string> {
   return mappings[formType] || {};
 }
 
-async function ensureStorageBucket(supabase: ReturnType<typeof createClient>, bucketName: string) {
+async function ensureStorageBucket(supabase: any, bucketName: string) {
   const { data: buckets } = await supabase.storage.listBuckets();
   const exists = buckets?.some((b: { name: string }) => b.name === bucketName);
   if (!exists) {
@@ -116,7 +116,7 @@ async function ensureStorageBucket(supabase: ReturnType<typeof createClient>, bu
 }
 
 async function processForm(
-  supabase: ReturnType<typeof createClient>,
+  supabase: any,
   driveAccessToken: string,
   driveFolderId: string,
   formType: string,
@@ -209,12 +209,11 @@ async function processForm(
   const { error: dbError } = await supabase.from("tax_form_instances").insert({
     tax_return_id: taxReturnId,
     form_type: formType,
-    tax_year: taxYear,
+    form_year: taxYear,
     status: "draft",
-    storage_path: storagePath,
+    pdf_url: storagePath,
     drive_file_id: driveResult?.id || null,
-    drive_link: driveResult?.webViewLink || null,
-    field_count: Object.keys(fieldMappings).length,
+    notes: `fields: ${Object.keys(fieldMappings).length}, drive_link: ${driveResult?.webViewLink || "N/A"}`,
     created_at: new Date().toISOString(),
   });
 
