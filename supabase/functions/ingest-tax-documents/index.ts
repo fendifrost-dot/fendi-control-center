@@ -230,23 +230,6 @@ async function writeToTaxSupabase(
     throw new Error(`Supabase write error (${endpoint}): ${res.status} - ${errText}`);
   }
   return res.json();
-} fetch(`${taxUrl}/rest/v1/${endpoint}`, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      apikey: taxKey,
-      Authorization: `Bearer ${taxKey}`,
-      Prefer: 'return=representation',
-    },
-    body: JSON.stringify(data),
-  });
-
-  if (!res.ok) {
-    const errText = await res.text();
-    throw new Error(`Supabase write error (${endpoint}): ${res.status} - ${errText}`);
-  }
-  return res.json();
-}
 
 serve(async (req: Request) => {
   if (req.method === 'OPTIONS') {
