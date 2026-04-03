@@ -1436,11 +1436,15 @@ const AGENT_TOOLS: ToolDef[] = [
           items: { type: "number" },
           description: "Array of tax years to generate documents for (e.g. [2024] or [2023, 2024]). Defaults to current year.",
         },
+        client_name: {
+          type: "string",
+          description: "Full name of the client (e.g. 'Sam Higgins'). Used to tag the tax return record.",
+        },
       },
       required: [],
     },
     destructive: false,
-    execute: async (args: { tax_years?: number[] }) => {
+    execute: async (args: { tax_years?: number[]; client_name?: string }) => {
       const ANON_KEY = Deno.env.get("SUPABASE_PUBLISHABLE_KEY") || SUPABASE_SERVICE_ROLE_KEY;
       const allYears = args.tax_years ?? [new Date().getFullYear()];
       const batchSize = 2;
@@ -1456,7 +1460,7 @@ const AGENT_TOOLS: ToolDef[] = [
           const resp = await fetch(`${SUPABASE_URL}/functions/v1/generate-tax-documents`, {
             method: "POST",
             headers: { "Content-Type": "application/json", Authorization: `Bearer ${ANON_KEY}` },
-            body: JSON.stringify({ tax_years: batch }),
+            body: JSON.stringify({ tax_years: batch, client_name: args.client_name || "unknown", client_id: args.client_name?.toLowerCase().replace(/\s+/g, "_") || "unknown" }),
           });
           const raw = await resp.text();
           if (!resp.ok) throw new Error(`generate-tax-documents failed (${resp.status}): ${raw.slice(0, 400)}`);
@@ -3279,7 +3283,8 @@ serve(async (req) => {
       text.toLowerCase().trim().startsWith("/help") ||
       text.toLowerCase().trim() === "/ping" ||
       text.toLowerCase().trim().startsWith("/resend") ||
-      text.toLowerCase().trim().startsWith("/model");
+      text.toLowerCase().trim().startsWith("/model") ||
+      text.toLowerCase().trim().startsWith("/tax ");
 
     // ── Pending bulk pitch (confirm all) ────────────────────────────────
     const pendingBulkEarly = await getPendingPitchBulk(chatId);
@@ -3413,7 +3418,8 @@ serve(async (req) => {
         lower.startsWith("/help") ||
         lower === "/ping" ||
         lower.startsWith("/resend") ||
-        lower.startsWith("/model");
+        lower.startsWith("/model") ||
+        lower.startsWith("/tax ");
 
       if (clearAndContinue) {
         await clearPlaylistConfirm(chatId);
@@ -4213,6 +4219,127 @@ serve(async (req) => {
       _currentTaskId = null;
       return new Response("ok");
     }
+    // -- /tax status <name> -- look up tax return status --
+    if (text.toLowerCase().startsWith("/tax status")) {
+      await setShortcutAttribution(taskId, "tax_status");
+      try {
+        const nameArg = text.replace(/^\/tax\s+status\s*/i, "").trim();
+        if (!nameArg) {
+          await sendMessage(chatId, "Usage: `/tax status <client name>`\nExample: `/tax status Sam Higgins`");
+          await supabase.from("tasks").update({ status: "succeeded", result_json: { execution_lane: "shortcut", progress_step: "shortcut_tax_status", action: "show_usage" } }).eq("id", taskId);
+          await sendMessage(chatId, `✅ Done: \`${taskId}\``);
+          _currentTaskId = null;
+          return new Response("ok");
+        }
+        const { data: returns, error: trErr } = await supabase
+          .from("tax_returns")
+          .select("id, client_id, client_name, tax_year, status, agi, total_income, total_tax, amount_owed_or_refund, filing_status, filing_method, filing_readiness_score, created_at")
+          .ilike("client_name", `%${nameArg}%`)
+          .order("tax_year", { ascending: false });
+        if (trErr) throw new Error(`DB error: ${trErr.message}`);
+        if (!returns || returns.length === 0) {
+          await sendMessage(chatId, `No tax returns found for "${nameArg}".`);
+        } else {
+          const lines: string[] = [`📋 *Tax Returns for "${nameArg}"*\n`];
+          for (const r of returns) {
+            lines.push(`*${r.tax_year}* — ${r.status || "unknown"}`);
+            if (r.agi != null) lines.push(`  AGI: $${Number(r.agi).toLocaleString()}`);
+            if (r.total_income != null) lines.push(`  Total Income: $${Number(r.total_income).toLocaleString()}`);
+            if (r.total_tax != null) lines.push(`  Total Tax: $${Number(r.total_tax).toLocaleString()}`);
+            if (r.amount_owed_or_refund != null) {
+              const amt = Number(r.amount_owed_or_refund);
+              lines.push(`  ${amt >= 0 ? "Owed" : "Refund"}: $${Math.abs(amt).toLocaleString()}`);
+            }
+            if (r.filing_method) lines.push(`  Method: ${r.filing_method}`);
+            if (r.filing_readiness_score != null) lines.push(`  Readiness: ${r.filing_readiness_score}/100`);
+            lines.push("");
+          }
+          await sendMessage(chatId, lines.join("\n"));
+        }
+        await supabase.from("tasks").update({ status: "succeeded", result_json: { execution_lane: "shortcut", progress_step: "shortcut_tax_status", action: "tax_status", client_search: nameArg, results_count: returns?.length ?? 0 } }).eq("id", taskId);
+        await sendMessage(chatId, `✅ Done: \`${taskId}\``);
+      } catch (taxStatusErr) {
+        const errMsg = taxStatusErr instanceof Error ? taxStatusErr.message : String(taxStatusErr);
+        console.error("Tax status error:", taxStatusErr);
+        await supabase.from("tasks").update({ status: "failed", error: errMsg.slice(0, 300) }).eq("id", taskId);
+        await sendMessage(chatId, `❌ Failed: \`${taskId}\` — ${errMsg.slice(0, 200)}`);
+      }
+      _currentTaskId = null;
+      return new Response("ok");
+    }
+
+    // -- /tax forms <name> [year] -- get links to filled PDF forms --
+    if (text.toLowerCase().startsWith("/tax forms")) {
+      await setShortcutAttribution(taskId, "tax_forms");
+      try {
+        const argsStr = text.replace(/^\/tax\s+forms\s*/i, "").trim();
+        if (!argsStr) {
+          await sendMessage(chatId, "Usage: `/tax forms <client name> [year]`\nExample: `/tax forms Sam Higgins 2024`");
+          await supabase.from("tasks").update({ status: "succeeded", result_json: { execution_lane: "shortcut", progress_step: "shortcut_tax_forms", action: "show_usage" } }).eq("id", taskId);
+          await sendMessage(chatId, `✅ Done: \`${taskId}\``);
+          _currentTaskId = null;
+          return new Response("ok");
+        }
+        // Parse: last token might be a year
+        const tokens = argsStr.split(/\s+/);
+        const lastToken = tokens[tokens.length - 1];
+        let yearFilter: number | null = null;
+        let clientSearch: string;
+        if (/^\d{4}$/.test(lastToken) && Number(lastToken) >= 2000 && Number(lastToken) <= 2099) {
+          yearFilter = Number(lastToken);
+          clientSearch = tokens.slice(0, -1).join(" ");
+        } else {
+          clientSearch = argsStr;
+        }
+        if (!clientSearch) {
+          await sendMessage(chatId, "Please provide a client name. Example: `/tax forms Sam 2024`");
+          await supabase.from("tasks").update({ status: "succeeded", result_json: { execution_lane: "shortcut", progress_step: "shortcut_tax_forms", action: "show_usage" } }).eq("id", taskId);
+          await sendMessage(chatId, `✅ Done: \`${taskId}\``);
+          _currentTaskId = null;
+          return new Response("ok");
+        }
+        let query = supabase
+          .from("tax_returns")
+          .select("id, client_name, tax_year, tax_form_instances(id, form_type, form_year, status, pdf_url)")
+          .ilike("client_name", `%${clientSearch}%`)
+          .order("tax_year", { ascending: false });
+        if (yearFilter) query = query.eq("tax_year", yearFilter);
+        const { data: returns, error: trErr } = await query;
+        if (trErr) throw new Error(`DB error: ${trErr.message}`);
+        if (!returns || returns.length === 0) {
+          await sendMessage(chatId, `No tax returns found for "${clientSearch}"${yearFilter ? ` (${yearFilter})` : ""}.`);
+        } else {
+          const lines: string[] = [`📄 *Tax Forms for "${clientSearch}"${yearFilter ? ` (${yearFilter})` : ""}*\n`];
+          for (const r of returns) {
+            const forms = (r as any).tax_form_instances || [];
+            lines.push(`*${r.tax_year}* — ${forms.length} form(s)`);
+            for (const f of forms) {
+              let link = f.pdf_url || "";
+              if (link && !link.startsWith("http")) {
+                const { data: signedData } = await supabase.storage
+                  .from("tax-documents")
+                  .createSignedUrl(link, 3600);
+                link = signedData?.signedUrl || link;
+              }
+              const statusEmoji = f.status === "filled" ? "✅" : f.status === "error" ? "❌" : "⏳";
+              lines.push(`  ${statusEmoji} ${f.form_type} (${f.form_year}) — ${f.status}${link ? `\n  [View PDF](${link})` : ""}`);
+            }
+            lines.push("");
+          }
+          await sendMessage(chatId, lines.join("\n"));
+        }
+        await supabase.from("tasks").update({ status: "succeeded", result_json: { execution_lane: "shortcut", progress_step: "shortcut_tax_forms", action: "tax_forms", client_search: clientSearch, year: yearFilter } }).eq("id", taskId);
+        await sendMessage(chatId, `✅ Done: \`${taskId}\``);
+      } catch (taxFormsErr) {
+        const errMsg = taxFormsErr instanceof Error ? taxFormsErr.message : String(taxFormsErr);
+        console.error("Tax forms error:", taxFormsErr);
+        await supabase.from("tasks").update({ status: "failed", error: errMsg.slice(0, 300) }).eq("id", taskId);
+        await sendMessage(chatId, `❌ Failed: \`${taskId}\` — ${errMsg.slice(0, 200)}`);
+      }
+      _currentTaskId = null;
+      return new Response("ok");
+    }
+
 
     // ââ /metrics â execution metrics ââ
     if (text.toLowerCase().startsWith("/metrics")) {
