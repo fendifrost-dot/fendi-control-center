@@ -20,7 +20,7 @@ IMPORTANT: We are NOT filing taxes — only preparing documents so the client is
 2. Worksheet — clean printable text.
 3. Filing method recommendation based on AGI.
 
-Respond with valid JSON only.`;
+Respond with valid JSON only. Always include a "filing_recommendation" key with at minimum { "method": "...", "agi": <number>, "steps": ["..."] }.`;
 
 async function fetchCCTaxData(action: string, taxYear?: number): Promise<any> {
   const CC_TAX_URL = Deno.env.get("CC_TAX_URL");
@@ -36,19 +36,33 @@ async function fetchCCTaxData(action: string, taxYear?: number): Promise<any> {
     },
     body: JSON.stringify({ action, tax_year: taxYear }),
   });
+
   if (!resp.ok) {
     const detail = await resp.text();
-    throw new Error(`CC Tax ${action} failed (${resp.status}): ${detail.slice(0, 500)}`);
+    throw new Error(
+      `CC Tax ${action} failed (${resp.status}): ${detail.slice(0, 500)}`
+    );
   }
   return resp.json();
 }
 
-async function runTxfExport(taxReturnId: string, clientName: string, year: number): Promise<any> {
+async function runTxfExport(
+  taxReturnId: string,
+  clientName: string,
+  year: number
+): Promise<any> {
   try {
     const r = await fetch(`${SUPABASE_URL}/functions/v1/export-txf`, {
       method: "POST",
-      headers: { "Content-Type": "application/json", Authorization: `Bearer ${SUPABASE_SERVICE_ROLE_KEY}` },
-      body: JSON.stringify({ tax_return_id: taxReturnId, client_name: clientName, tax_year: year }),
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${SUPABASE_SERVICE_ROLE_KEY}`,
+      },
+      body: JSON.stringify({
+        tax_return_id: taxReturnId,
+        client_name: clientName,
+        tax_year: year,
+      }),
     });
     return await r.json();
   } catch (e) {
@@ -56,15 +70,33 @@ async function runTxfExport(taxReturnId: string, clientName: string, year: numbe
   }
 }
 
-async function runIngestion(clientName: string, clientId: string, year: number): Promise<any> {
+async function runIngestion(
+  clientName: string,
+  clientId: string,
+  year: number
+): Promise<any> {
   try {
-    const r = await fetch(`${SUPABASE_URL}/functions/v1/ingest-tax-documents`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json", Authorization: `Bearer ${SUPABASE_SERVICE_ROLE_KEY}` },
-      body: JSON.stringify({ client_name: clientName, client_id: clientId, tax_year: year }),
-    });
-    return await r.json();
+    console.log(`[generate] Running ingestion for ${clientName} (${clientId}) year ${year}...`);
+    const r = await fetch(
+      `${SUPABASE_URL}/functions/v1/ingest-tax-documents`,
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${SUPABASE_SERVICE_ROLE_KEY}`,
+        },
+        body: JSON.stringify({
+          client_name: clientName,
+          client_id: clientId,
+          tax_year: year,
+        }),
+      }
+    );
+    const result = await r.json();
+    console.log(`[generate] Ingestion result for ${clientName} ${year}:`, JSON.stringify(result).slice(0, 500));
+    return result;
   } catch (e) {
+    console.error(`[generate] Ingestion error for ${clientName} ${year}:`, String(e));
     return { ok: false, error: String(e) };
   }
 }
@@ -76,12 +108,18 @@ serve(async (req) => {
 
   try {
     const body = await req.json();
-    const taxYears: number[] = body.tax_years ?? [body.tax_year ?? new Date().getFullYear()];
-
+    const taxYears: number[] =
+      body.tax_years ?? [body.tax_year ?? new Date().getFullYear()];
     if (!Array.isArray(taxYears) || taxYears.length === 0) {
       return new Response(
-        JSON.stringify({ ok: false, error: "tax_years must be a non-empty array of years" }),
-        { status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" } },
+        JSON.stringify({
+          ok: false,
+          error: "tax_years must be a non-empty array of years",
+        }),
+        {
+          status: 400,
+          headers: { ...corsHeaders, "Content-Type": "application/json" },
+        }
       );
     }
 
@@ -89,28 +127,56 @@ serve(async (req) => {
     const ingestionResults: Record<string, any> = {};
     if (body.client_name || body.client_id) {
       const ingestionPromises = taxYears.map(async (y) => {
-        const result = await runIngestion(body.client_name || body.client_id, body.client_id || "unknown", y);
+        const result = await runIngestion(
+          body.client_name || body.client_id,
+          body.client_id || "unknown",
+          y
+        );
         return { year: String(y), result };
       });
       const ingestionDone = await Promise.all(ingestionPromises);
       for (const { year, result } of ingestionDone) {
         ingestionResults[year] = result;
       }
+      console.log(`[generate] Ingestion complete for ${taxYears.join(", ")}. Results:`, JSON.stringify(Object.keys(ingestionResults)));
+    } else {
+      console.warn("[generate] No client_name or client_id — skipping ingestion step");
     }
 
     async function processYear(year: number) {
       console.log(`Processing tax year ${year}...`);
 
-      const [workflowStatus, yearConfig, documents, transactions, reconciliations, discrepancies, plReport] =
-        await Promise.all([
-          fetchCCTaxData("get_workflow_status", year).catch((e) => ({ error: e.message })),
-          fetchCCTaxData("get_year_config", year).catch((e) => ({ error: e.message })),
-          fetchCCTaxData("get_documents", year).catch((e) => ({ error: e.message })),
-          fetchCCTaxData("get_transactions", year).catch((e) => ({ error: e.message })),
-          fetchCCTaxData("get_reconciliations", year).catch((e) => ({ error: e.message })),
-          fetchCCTaxData("get_discrepancies", year).catch((e) => ({ error: e.message })),
-          fetchCCTaxData("get_pl_report", year).catch((e) => ({ error: e.message })),
-        ]);
+      const [
+        workflowStatus,
+        yearConfig,
+        documents,
+        transactions,
+        reconciliations,
+        discrepancies,
+        plReport,
+      ] = await Promise.all([
+        fetchCCTaxData("get_workflow_status", year).catch((e) => ({
+          error: e.message,
+        })),
+        fetchCCTaxData("get_year_config", year).catch((e) => ({
+          error: e.message,
+        })),
+        fetchCCTaxData("get_documents", year).catch((e) => ({
+          error: e.message,
+        })),
+        fetchCCTaxData("get_transactions", year).catch((e) => ({
+          error: e.message,
+        })),
+        fetchCCTaxData("get_reconciliations", year).catch((e) => ({
+          error: e.message,
+        })),
+        fetchCCTaxData("get_discrepancies", year).catch((e) => ({
+          error: e.message,
+        })),
+        fetchCCTaxData("get_pl_report", year).catch((e) => ({
+          error: e.message,
+        })),
+      ]);
 
       const taxDataPayload = JSON.stringify({
         tax_year: year,
@@ -125,23 +191,41 @@ serve(async (req) => {
 
       const userPrompt = `Generate all three tax document outputs for tax year ${year}. Be concise.\n\nHere is the tax data:\n\n${taxDataPayload}`;
 
+      // Only require json_summary and worksheet — filing_recommendation is optional
       const generated = await callClaudeJSON<{
         json_summary: Record<string, unknown>;
         worksheet: string;
-        filing_recommendation: Record<string, unknown>;
+        filing_recommendation?: Record<string, unknown>;
       }>(
         TAX_SYSTEM_PROMPT,
         userPrompt,
-        { required: ["json_summary", "worksheet", "filing_recommendation"] },
-        4096,
+        { required: ["json_summary", "worksheet"] },
+        4096
       );
+
+      // Provide sensible default for filing_recommendation if Claude didn't return it
+      const summary = generated.json_summary as Record<string, any>;
+      const form1040 = (summary?.form_1040 || {}) as Record<string, any>;
+      const readiness = (summary?.filing_readiness || {}) as Record<
+        string,
+        any
+      >;
+      const agi = Number(form1040.adjusted_gross_income) || 0;
+
+      const recommendation = (generated.filing_recommendation || {
+        method: agi <= 84000 ? "IRS Free File / TurboTax import (TXF)" : "Paper filing with IRS PDF forms",
+        agi: agi,
+        steps: [
+          "Review the generated worksheet for accuracy",
+          "Verify all income sources are accounted for",
+          agi <= 84000
+            ? "Import the TXF file into TurboTax or use IRS Free File"
+            : "Print and mail the completed 1040 forms to the IRS",
+        ],
+      }) as Record<string, any>;
 
       // Persist to Supabase
       const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
-      const summary = generated.json_summary as Record<string, any>;
-      const form1040 = (summary?.form_1040 || {}) as Record<string, any>;
-      const readiness = (summary?.filing_readiness || {}) as Record<string, any>;
-      const recommendation = generated.filing_recommendation as Record<string, any>;
 
       const { id: taxReturnId } = await upsertTaxReturn(supabase, {
         client_id: body.client_id || "unknown",
@@ -161,6 +245,7 @@ serve(async (req) => {
         model: "claude",
         created_by: "generate-tax-documents",
       });
+
       await logAudit(supabase, {
         tax_return_id: taxReturnId,
         action: "generated",
@@ -169,9 +254,9 @@ serve(async (req) => {
       });
 
       // AGI-based output strategy
-      const agi = Number(form1040.adjusted_gross_income) || 0;
       let pdfResults: any = null;
       let txfResults: any = null;
+
       const pdfBody = {
         tax_return_id: taxReturnId,
         client_id: body.client_id || "unknown",
@@ -183,11 +268,17 @@ serve(async (req) => {
 
       async function runPdfFill() {
         try {
-          const r = await fetch(`${SUPABASE_URL}/functions/v1/fill-tax-forms`, {
-            method: "POST",
-            headers: { "Content-Type": "application/json", Authorization: `Bearer ${SUPABASE_SERVICE_ROLE_KEY}` },
-            body: JSON.stringify(pdfBody),
-          });
+          const r = await fetch(
+            `${SUPABASE_URL}/functions/v1/fill-tax-forms`,
+            {
+              method: "POST",
+              headers: {
+                "Content-Type": "application/json",
+                Authorization: `Bearer ${SUPABASE_SERVICE_ROLE_KEY}`,
+              },
+              body: JSON.stringify(pdfBody),
+            }
+          );
           return await r.json();
         } catch (e) {
           return { ok: false, error: String(e) };
@@ -195,13 +286,25 @@ serve(async (req) => {
       }
 
       if (agi <= 84000) {
-        console.log(`[generate] AGI $${agi} <= $84,000 — generating TXF for Free File/TurboTax import`);
-        txfResults = await runTxfExport(taxReturnId, body.client_name || body.client_id || "unknown", year);
+        console.log(
+          `[generate] AGI $${agi} <= $84,000 — generating TXF for Free File/TurboTax import`
+        );
+        txfResults = await runTxfExport(
+          taxReturnId,
+          body.client_name || body.client_id || "unknown",
+          year
+        );
         pdfResults = await runPdfFill();
       } else {
-        console.log(`[generate] AGI $${agi} > $84,000 — generating IRS PDF forms`);
+        console.log(
+          `[generate] AGI $${agi} > $84,000 — generating IRS PDF forms`
+        );
         pdfResults = await runPdfFill();
-        txfResults = await runTxfExport(taxReturnId, body.client_name || body.client_id || "unknown", year);
+        txfResults = await runTxfExport(
+          taxReturnId,
+          body.client_name || body.client_id || "unknown",
+          year
+        );
       }
 
       return {
@@ -209,18 +312,22 @@ serve(async (req) => {
         data: {
           json_summary: generated.json_summary,
           worksheet: generated.worksheet,
-          filing_recommendation: generated.filing_recommendation,
+          filing_recommendation: recommendation,
           tax_return_id: taxReturnId,
           pdf_results: pdfResults,
           txf_results: txfResults,
           ingestion_results: ingestionResults[String(year)] || null,
           agi,
-          output_strategy: agi <= 84000 ? "txf_primary_pdf_backup" : "pdf_primary_txf_supplementary",
+          output_strategy:
+            agi <= 84000
+              ? "txf_primary_pdf_backup"
+              : "pdf_primary_txf_supplementary",
         },
       };
     }
 
     const yearResults = await Promise.all(taxYears.map((y) => processYear(y)));
+
     const results: Record<string, any> = {};
     for (const r of yearResults) {
       results[r.year] = r.data;
@@ -228,14 +335,14 @@ serve(async (req) => {
 
     return new Response(
       JSON.stringify({ ok: true, tax_years: taxYears, results }),
-      { headers: { ...corsHeaders, "Content-Type": "application/json" } },
+      { headers: { ...corsHeaders, "Content-Type": "application/json" } }
     );
   } catch (err: unknown) {
     const msg = err instanceof Error ? err.message : String(err);
     console.error("generate-tax-documents error:", msg);
-    return new Response(
-      JSON.stringify({ ok: false, error: msg }),
-      { status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" } },
-    );
+    return new Response(JSON.stringify({ ok: false, error: msg }), {
+      status: 500,
+      headers: { ...corsHeaders, "Content-Type": "application/json" },
+    });
   }
 });
