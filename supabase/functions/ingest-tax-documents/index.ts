@@ -1,6 +1,5 @@
 import { serve } from 'https://deno.land/std@0.168.0/http/server.ts';
-import { getAccessToken } from '../_shared/googleDriveUpload.ts';
-import { findClientTaxFolder, listDriveFolder, downloadDriveFile } from '../_shared/googleDriveRead.ts';
+import { findClientTaxFolder, listFilesInFolder, downloadFile } from '../_shared/googleDriveRead.ts';
 
 const corsHeaders = {
   'Access-Control-Allow-Origin': '*',
@@ -43,15 +42,6 @@ interface PLSummary {
   net_income: number;
 }
 
-function arrayBufferToBase64(buffer: ArrayBuffer): string {
-  const bytes = new Uint8Array(buffer);
-  let binary = '';
-  for (let i = 0; i < bytes.byteLength; i++) {
-    binary += String.fromCharCode(bytes[i]);
-  }
-  return btoa(binary);
-}
-
 async function analyzeDocumentWithClaude(
   base64Content: string,
   fileName: string,
@@ -64,6 +54,7 @@ async function analyzeDocumentWithClaude(
   const isPdf = mimeType === 'application/pdf';
 
   const systemPrompt = `You are a tax document analyzer. Extract ALL financial data from this document.
+
 Return ONLY valid JSON with this exact structure:
 {
   "doc_type": "W-2" | "1099-NEC" | "1099-K" | "1099-MISC" | "1099-INT" | "1099-DIV" | "1099-B" | "1098" | "receipt" | "invoice" | "bank_statement" | "other",
@@ -77,25 +68,42 @@ Return ONLY valid JSON with this exact structure:
 
   const content: Array<Record<string, unknown>> = [];
 
-  if (isImage || isPdf) {
-    const mediaType = isPdf ? 'application/pdf' : mimeType;
+  if (isPdf) {
     content.push({
-      type: 'image',
+      type: 'document',
       source: {
         type: 'base64',
-        media_type: mediaType,
+        media_type: 'application/pdf',
         data: base64Content,
       },
     });
     content.push({
       type: 'text',
-      text: `Analyze this tax document (${fileName}). Extract all financial data.`,
+      text: `Analyze this tax document (${fileName}). Extract all financial data including dollar amounts, payer names, EINs, and dates.`,
     });
-  } else {
-    const decoded = atob(base64Content);
+  } else if (isImage) {
+    content.push({
+      type: 'image',
+      source: {
+        type: 'base64',
+        media_type: mimeType,
+        data: base64Content,
+      },
+    });
     content.push({
       type: 'text',
-      text: `Analyze this tax document (${fileName}). Content:\n\n${decoded}\n\nExtract all financial data.`,
+      text: `Analyze this tax document (${fileName}). Extract all financial data including dollar amounts, payer names, EINs, and dates.`,
+    });
+  } else {
+    let decodedText: string;
+    try {
+      decodedText = atob(base64Content);
+    } catch {
+      decodedText = base64Content;
+    }
+    content.push({
+      type: 'text',
+      text: `Analyze this tax document (${fileName}). Content:\n\n${decodedText}\n\nExtract all financial data.`,
     });
   }
 
@@ -104,7 +112,7 @@ Return ONLY valid JSON with this exact structure:
     headers: {
       'Content-Type': 'application/json',
       'x-api-key': apiKey,
-      'anthropic-version': '2023-06-01',
+      'anthropic-version': '2024-10-22',
     },
     body: JSON.stringify({
       model: 'claude-sonnet-4-20250514',
@@ -229,6 +237,7 @@ async function writeToTaxSupabase(
     const errText = await res.text();
     throw new Error(`Supabase write error (${endpoint}): ${res.status} - ${errText}`);
   }
+
   return res.json();
 }
 
@@ -256,24 +265,21 @@ serve(async (req: Request) => {
 
     console.log(`[ingest-tax-documents] Starting ingestion for ${client_name} ${tax_year}`);
 
-    // Step 1: Get Google Drive access
-    const accessToken = await getAccessToken();
-    console.log('[ingest-tax-documents] Got Drive access token');
+    const folderResult = await findClientTaxFolder(client_name, tax_year);
 
-    // Step 2: Find the client tax folder
-    const folderId = await findClientTaxFolder(accessToken, client_name, tax_year);
-    if (!folderId) {
+    if (!folderResult) {
       return new Response(
         JSON.stringify({
-          error: `No tax folder found for ${client_name} ${tax_year}. Searched patterns: ${client_name.toUpperCase()} ${tax_year} TAXES, ${client_name.toUpperCase()} TAXES, etc.`,
+          error: `No tax folder found for ${client_name} ${tax_year}. Searched patterns: ${client_name.toUpperCase()} ${tax_year} TAXES, ${client_name.toUpperCase().split(/\s+/)[0]} ${tax_year} TAXES, etc.`,
         }),
         { status: 404, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
       );
     }
-    console.log(`[ingest-tax-documents] Found folder: ${folderId}`);
 
-    // Step 3: List all files in the folder
-    const files = await listDriveFolder(accessToken, folderId);
+    const { folderId, folderName } = folderResult;
+    console.log(`[ingest-tax-documents] Found folder: ${folderName} (${folderId})`);
+
+    const files = await listFilesInFolder(folderId);
     console.log(`[ingest-tax-documents] Found ${files.length} files in folder`);
 
     if (files.length === 0) {
@@ -283,7 +289,6 @@ serve(async (req: Request) => {
       );
     }
 
-    // Step 4: Process each file
     const allExtracted: ExtractedData[] = [];
     const processedFiles: Array<{ name: string; doc_type: string; status: string }> = [];
     const errors: Array<{ name: string; error: string }> = [];
@@ -292,15 +297,12 @@ serve(async (req: Request) => {
       try {
         console.log(`[ingest-tax-documents] Processing: ${file.name} (${file.mimeType})`);
 
-        // Download the file
-        const content = await downloadDriveFile(accessToken, file.id, file.mimeType);
-        const base64 = arrayBufferToBase64(content);
+        const { base64, downloadMime } = await downloadFile(file.id, file.mimeType);
+        console.log(`[ingest-tax-documents] Downloaded ${file.name}, mime: ${downloadMime}, base64 length: ${base64.length}`);
 
-        // Analyze with Claude
-        const extracted = await analyzeDocumentWithClaude(base64, file.name, file.mimeType);
+        const extracted = await analyzeDocumentWithClaude(base64, file.name, downloadMime);
         allExtracted.push(extracted);
 
-        // Write document record to Supabase
         await writeToTaxSupabase('documents', {
           client_id: client_id || null,
           client_name,
@@ -313,8 +315,8 @@ serve(async (req: Request) => {
           processed_at: new Date().toISOString(),
         });
 
-        // Write individual transactions
         const transactions: Record<string, unknown>[] = [];
+
         for (const income of extracted.extracted_data.income_items) {
           transactions.push({
             client_id: client_id || null,
@@ -330,6 +332,7 @@ serve(async (req: Request) => {
             source_document: file.name,
           });
         }
+
         for (const expense of extracted.extracted_data.expense_items) {
           transactions.push({
             client_id: client_id || null,
@@ -354,7 +357,8 @@ serve(async (req: Request) => {
           doc_type: extracted.doc_type,
           status: 'success',
         });
-        console.log(`[ingest-tax-documents] Done: ${file.name} -> ${extracted.doc_type}`);
+
+        console.log(`[ingest-tax-documents] Done: ${file.name} -> ${extracted.doc_type} (${extracted.extracted_data.income_items.length} income, ${extracted.extracted_data.expense_items.length} expense items)`);
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
         console.error(`[ingest-tax-documents] Error processing ${file.name}: ${message}`);
@@ -367,11 +371,11 @@ serve(async (req: Request) => {
       }
     }
 
-    // Step 5: Generate P&L summary
     const plSummary = aggregatePL(allExtracted);
-    console.log(`[ingest-tax-documents] P&L: Income=${plSummary.total_income}, Expenses=${plSummary.total_expenses}, Net=${plSummary.net_income}`);
+    console.log(
+      `[ingest-tax-documents] P&L: Income=${plSummary.total_income}, Expenses=${plSummary.total_expenses}, Net=${plSummary.net_income}`
+    );
 
-    // Write P&L report to Supabase
     await writeToTaxSupabase('pl_reports', {
       client_id: client_id || null,
       client_name,
@@ -385,12 +389,12 @@ serve(async (req: Request) => {
       generated_at: new Date().toISOString(),
     });
 
-    // Step 6: Return summary
     const summary = {
       success: true,
       client_name,
       tax_year,
       folder_id: folderId,
+      folder_name: folderName,
       files_processed: processedFiles.length,
       files_with_errors: errors.length,
       processed_files: processedFiles,
@@ -406,9 +410,9 @@ serve(async (req: Request) => {
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     console.error(`[ingest-tax-documents] Fatal error: ${message}`);
-    return new Response(
-      JSON.stringify({ error: message }),
-      { status: 500, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
-    );
+    return new Response(JSON.stringify({ error: message }), {
+      status: 500,
+      headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+    });
   }
 });
