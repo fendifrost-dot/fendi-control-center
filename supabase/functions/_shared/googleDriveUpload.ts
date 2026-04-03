@@ -1,140 +1,239 @@
 // supabase/functions/_shared/googleDriveUpload.ts
-// Google Drive upload using service account JWT auth.
+// Google Drive integration for tax document uploads
 
-interface ServiceAccountCredentials {
-  client_email: string;
-  private_key: string;
-  token_uri: string;
+function base64UrlEncode(data: Uint8Array): string {
+  const binString = Array.from(data, (byte) => String.fromCharCode(byte)).join("");
+  return btoa(binString).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
 }
 
-function base64url(input: string | Uint8Array): string {
-  const bytes = typeof input === "string" ? new TextEncoder().encode(input) : input;
-  const bin = String.fromCharCode(...bytes);
-  return btoa(bin).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/g, "");
+function textToBase64Url(text: string): string {
+  return base64UrlEncode(new TextEncoder().encode(text));
 }
 
-async function importPrivateKey(pem: string): Promise<CryptoKey> {
-  const pemClean = pem
-    .replace(/-----BEGIN (?:RSA )?PRIVATE KEY-----/g, "")
-    .replace(/-----END (?:RSA )?PRIVATE KEY-----/g, "")
+async function importRsaKey(pem: string): Promise<CryptoKey> {
+  const pemContents = pem
+    .replace(/-----BEGIN PRIVATE KEY-----/, "")
+    .replace(/-----END PRIVATE KEY-----/, "")
     .replace(/\s/g, "");
-  const der = Uint8Array.from(atob(pemClean), (c) => c.charCodeAt(0));
-  return crypto.subtle.importKey("pkcs8", der, { name: "RSASSA-PKCS1-v1_5", hash: "SHA-256" }, false, ["sign"]);
+  const binaryDer = Uint8Array.from(atob(pemContents), (c) => c.charCodeAt(0));
+  return crypto.subtle.importKey(
+    "pkcs8",
+    binaryDer,
+    { name: "RSASSA-PKCS1-v1_5", hash: "SHA-256" },
+    false,
+    ["sign"]
+  );
 }
 
-async function createSignedJwt(creds: ServiceAccountCredentials): Promise<string> {
+async function createSignedJwt(
+  serviceAccount: { client_email: string; private_key: string },
+  scopes: string[]
+): Promise<string> {
   const now = Math.floor(Date.now() / 1000);
   const header = { alg: "RS256", typ: "JWT" };
   const payload = {
-    iss: creds.client_email,
-    scope: "https://www.googleapis.com/auth/drive",
-    aud: creds.token_uri || "https://oauth2.googleapis.com/token",
-    iat: now, exp: now + 3600,
+    iss: serviceAccount.client_email,
+    scope: scopes.join(" "),
+    aud: "https://oauth2.googleapis.com/token",
+    iat: now,
+    exp: now + 3600,
   };
-  const headerB64 = base64url(JSON.stringify(header));
-  const payloadB64 = base64url(JSON.stringify(payload));
-  const signingInput = headerB64 + "." + payloadB64;
-  const key = await importPrivateKey(creds.private_key);
-  const signature = await crypto.subtle.sign("RSASSA-PKCS1-v1_5", key, new TextEncoder().encode(signingInput));
-  return signingInput + "." + base64url(new Uint8Array(signature));
+
+  const encodedHeader = textToBase64Url(JSON.stringify(header));
+  const encodedPayload = textToBase64Url(JSON.stringify(payload));
+  const signingInput = `${encodedHeader}.${encodedPayload}`;
+
+  const key = await importRsaKey(serviceAccount.private_key);
+  const signature = await crypto.subtle.sign(
+    "RSASSA-PKCS1-v1_5",
+    key,
+    new TextEncoder().encode(signingInput)
+  );
+
+  const encodedSignature = base64UrlEncode(new Uint8Array(signature));
+  return `${signingInput}.${encodedSignature}`;
 }
 
-let cachedToken: { token: string; expiresAt: number } | null = null;
+export async function getAccessToken(): Promise<string> {
+  const serviceAccountJson = Deno.env.get("GOOGLE_SERVICE_ACCOUNT_JSON");
+  if (!serviceAccountJson) {
+    throw new Error("GOOGLE_SERVICE_ACCOUNT_JSON environment variable is not set");
+  }
+  const serviceAccount = JSON.parse(serviceAccountJson);
 
-async function getAccessToken(creds: ServiceAccountCredentials): Promise<string> {
-  if (cachedToken && Date.now() < cachedToken.expiresAt - 60000) return cachedToken.token;
-  const jwt = await createSignedJwt(creds);
-  const tokenUri = creds.token_uri || "https://oauth2.googleapis.com/token";
-  const resp = await fetch(tokenUri, {
+  const jwt = await createSignedJwt(serviceAccount, [
+    "https://www.googleapis.com/auth/drive",
+    "https://www.googleapis.com/auth/drive.file",
+  ]);
+
+  const response = await fetch("https://oauth2.googleapis.com/token", {
     method: "POST",
     headers: { "Content-Type": "application/x-www-form-urlencoded" },
-    body: "grant_type=urn%3Aietf%3Aparams%3Aoauth%3Agrant-type%3Ajwt-bearer&assertion=" + jwt,
+    body: new URLSearchParams({
+      grant_type: "urn:ietf:params:oauth:grant-type:jwt-bearer",
+      assertion: jwt,
+    }),
   });
-  if (!resp.ok) { const detail = await resp.text(); throw new Error("Google token exchange failed (" + resp.status + "): " + detail.slice(0, 300)); }
-  const data = await resp.json();
-  cachedToken = { token: data.access_token, expiresAt: Date.now() + (data.expires_in || 3600) * 1000 };
-  return cachedToken.token;
+
+  if (!response.ok) {
+    const errorText = await response.text();
+    throw new Error(`Failed to get access token: ${response.status} ${errorText}`);
+  }
+
+  const data = await response.json();
+  return data.access_token;
 }
 
-function loadCredentials(): ServiceAccountCredentials {
-  const raw = Deno.env.get("GOOGLE_SERVICE_ACCOUNT_JSON");
-  if (!raw) throw new Error("GOOGLE_SERVICE_ACCOUNT_JSON secret is not set");
-  const parsed = JSON.parse(raw);
-  if (!parsed.client_email || !parsed.private_key) throw new Error("GOOGLE_SERVICE_ACCOUNT_JSON is missing client_email or private_key");
-  return { client_email: parsed.client_email, private_key: parsed.private_key, token_uri: parsed.token_uri || "https://oauth2.googleapis.com/token" };
+export async function searchDriveFolder(
+  accessToken: string,
+  folderName: string,
+  parentId?: string
+): Promise<string | null> {
+  let query = `name='${folderName}' and mimeType='application/vnd.google-apps.folder' and trashed=false`;
+  if (parentId) {
+    query += ` and '${parentId}' in parents`;
+  }
+
+  const url = `https://www.googleapis.com/drive/v3/files?q=${encodeURIComponent(query)}&fields=files(id,name)&supportsAllDrives=true&includeItemsFromAllDrives=true`;
+  const response = await fetch(url, {
+    headers: { Authorization: `Bearer ${accessToken}` },
+  });
+
+  if (!response.ok) {
+    console.error(`Drive search failed: ${response.status} ${await response.text()}`);
+    return null;
+  }
+
+  const data = await response.json();
+  return data.files && data.files.length > 0 ? data.files[0].id : null;
 }
 
-const DRIVE_API = "https://www.googleapis.com/drive/v3";
-const UPLOAD_API = "https://www.googleapis.com/upload/drive/v3";
+export async function createDriveFolder(
+  accessToken: string,
+  folderName: string,
+  parentId?: string
+): Promise<string> {
+  const metadata: Record<string, unknown> = {
+    name: folderName,
+    mimeType: "application/vnd.google-apps.folder",
+  };
+  if (parentId) {
+    metadata.parents = [parentId];
+  }
 
-export async function findFolder(parentId: string, folderName: string): Promise<string | null> {
-  const creds = loadCredentials();
-  const token = await getAccessToken(creds);
-  const q = "'" + parentId + "' in parents and name = '" + folderName + "' and mimeType = 'application/vnd.google-apps.folder' and trashed = false";
-  const url = DRIVE_API + "/files?q=" + encodeURIComponent(q) + "&fields=files(id,name)";
-  const resp = await fetch(url, { headers: { Authorization: "Bearer " + token } });
-  if (!resp.ok) throw new Error("Drive search failed: " + resp.status);
-  const data = await resp.json();
-  return data.files?.[0]?.id || null;
-}
-
-export async function createDriveFolder(parentFolderId: string, folderName: string): Promise<string> {
-  const creds = loadCredentials();
-  const token = await getAccessToken(creds);
-  const existing = await findFolder(parentFolderId, folderName);
-  if (existing) return existing;
-  const resp = await fetch(DRIVE_API + "/files", {
+  const response = await fetch("https://www.googleapis.com/drive/v3/files?supportsAllDrives=true", {
     method: "POST",
-    headers: { Authorization: "Bearer " + token, "Content-Type": "application/json" },
-    body: JSON.stringify({ name: folderName, mimeType: "application/vnd.google-apps.folder", parents: [parentFolderId] }),
+    headers: {
+      Authorization: `Bearer ${accessToken}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify(metadata),
   });
-  if (!resp.ok) { const detail = await resp.text(); throw new Error("Failed to create Drive folder (" + resp.status + "): " + detail.slice(0, 300)); }
-  const data = await resp.json();
+
+  if (!response.ok) {
+    const errorText = await response.text();
+    throw new Error(`Failed to create folder '${folderName}': ${response.status} ${errorText}`);
+  }
+
+  const data = await response.json();
   return data.id;
 }
 
-export async function uploadToDrive(
-  folderId: string, fileName: string, fileBytes: Uint8Array, mimeType = "application/pdf"
-): Promise<{ fileId: string; webViewLink: string }> {
-  const creds = loadCredentials();
-  const token = await getAccessToken(creds);
-  const metadata = JSON.stringify({ name: fileName, parents: [folderId] });
-  const boundary = "----FormBoundary" + Date.now();
-  const bodyParts = [
-    "--" + boundary + "\r\n",
-    "Content-Type: application/json; charset=UTF-8\r\n\r\n",
-    metadata,
-    "\r\n--" + boundary + "\r\n",
-    "Content-Type: " + mimeType + "\r\n",
-    "Content-Transfer-Encoding: binary\r\n\r\n",
-  ].join("");
-  const bodyEnd = "\r\n--" + boundary + "--";
-  const enc = new TextEncoder();
-  const bodyStart = enc.encode(bodyParts);
-  const bodyEndBytes = enc.encode(bodyEnd);
-  const fullBody = new Uint8Array(bodyStart.length + fileBytes.length + bodyEndBytes.length);
-  fullBody.set(bodyStart, 0);
-  fullBody.set(fileBytes, bodyStart.length);
-  fullBody.set(bodyEndBytes, bodyStart.length + fileBytes.length);
-  const resp = await fetch(
-    UPLOAD_API + "/files?uploadType=multipart&fields=id,webViewLink",
-    { method: "POST", headers: { Authorization: "Bearer " + token, "Content-Type": "multipart/related; boundary=" + boundary }, body: fullBody }
+export async function uploadFileToDrive(
+  accessToken: string,
+  fileName: string,
+  fileContent: Uint8Array,
+  mimeType: string,
+  folderId: string
+): Promise<{ id: string; name: string; webViewLink?: string }> {
+  const metadata = {
+    name: fileName,
+    parents: [folderId],
+  };
+
+  const boundary = "-------boundary" + Date.now();
+  const metadataStr = JSON.stringify(metadata);
+
+  // Build multipart body
+  const encoder = new TextEncoder();
+  const parts: Uint8Array[] = [];
+
+  const metaPart = encoder.encode(
+    `--${boundary}\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n${metadataStr}\r\n`
   );
-  if (!resp.ok) { const detail = await resp.text(); throw new Error("Drive upload failed (" + resp.status + "): " + detail.slice(0, 300)); }
-  const data = await resp.json();
-  return { fileId: data.id, webViewLink: data.webViewLink || "https://drive.google.com/file/d/" + data.id + "/view" };
+  const filePart = encoder.encode(
+    `--${boundary}\r\nContent-Type: ${mimeType}\r\nContent-Transfer-Encoding: binary\r\n\r\n`
+  );
+  const endPart = encoder.encode(`\r\n--${boundary}--`);
+
+  // Combine all parts
+  const totalLength = metaPart.length + filePart.length + fileContent.length + endPart.length;
+  const body = new Uint8Array(totalLength);
+  let offset = 0;
+  body.set(metaPart, offset); offset += metaPart.length;
+  body.set(filePart, offset); offset += filePart.length;
+  body.set(fileContent, offset); offset += fileContent.length;
+  body.set(endPart, offset);
+
+  const response = await fetch(
+    "https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart&fields=id,name,webViewLink&supportsAllDrives=true",
+    {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${accessToken}`,
+        "Content-Type": `multipart/related; boundary=${boundary}`,
+      },
+      body,
+    }
+  );
+
+  if (!response.ok) {
+    const errorText = await response.text();
+    throw new Error(`Failed to upload file '${fileName}': ${response.status} ${errorText}`);
+  }
+
+  return await response.json();
 }
 
 export async function getOrCreateClientTaxFolder(
-  clientName: string, year: number
-): Promise<{ folderId: string; folderUrl: string }> {
-  const rootFolderId = Deno.env.get("DRIVE_FOLDER_ID");
-  if (!rootFolderId) throw new Error("DRIVE_FOLDER_ID is not set");
-  const cleanRoot = rootFolderId.includes("/folders/")
-    ? rootFolderId.split("/folders/").pop()!.split("?")[0]
-    : rootFolderId;
-  const taxReturnsFolder = await createDriveFolder(cleanRoot, "Tax Returns");
-  const clientFolder = await createDriveFolder(taxReturnsFolder, clientName);
-  const yearFolder = await createDriveFolder(clientFolder, String(year));
-  return { folderId: yearFolder, folderUrl: "https://drive.google.com/drive/folders/" + yearFolder };
+  accessToken: string,
+  clientName: string,
+  year: number | string
+): Promise<string> {
+  const name = clientName.toUpperCase().trim();
+  const yr = String(year);
+
+  // 1. Search for "{NAME} {YEAR} TAXES" (exact match - user's naming convention)
+  const exactFolderName = `${name} ${yr} TAXES`;
+  console.log(`Searching for folder: "${exactFolderName}"`);
+  const exactId = await searchDriveFolder(accessToken, exactFolderName);
+  if (exactId) {
+    console.log(`Found exact folder: "${exactFolderName}" (${exactId})`);
+    return exactId;
+  }
+
+  // 2. Search for "{NAME} TAXES" as a parent folder, then look for year subfolder
+  const parentFolderName = `${name} TAXES`;
+  console.log(`Searching for parent folder: "${parentFolderName}"`);
+  const parentId = await searchDriveFolder(accessToken, parentFolderName);
+  if (parentId) {
+    console.log(`Found parent folder: "${parentFolderName}" (${parentId})`);
+    // Check if year subfolder exists inside
+    const yearSubId = await searchDriveFolder(accessToken, yr, parentId);
+    if (yearSubId) {
+      console.log(`Found year subfolder: "${yr}" inside "${parentFolderName}" (${yearSubId})`);
+      return yearSubId;
+    }
+    // Create year subfolder inside parent
+    console.log(`Creating year subfolder "${yr}" inside "${parentFolderName}"`);
+    const newSubId = await createDriveFolder(accessToken, yr, parentId);
+    console.log(`Created year subfolder (${newSubId})`);
+    return newSubId;
+  }
+
+  // 3. Create new "{NAME} {YEAR} TAXES" folder at root
+  console.log(`Creating new folder: "${exactFolderName}"`);
+  const newFolderId = await createDriveFolder(accessToken, exactFolderName);
+  console.log(`Created folder: "${exactFolderName}" (${newFolderId})`);
+  return newFolderId;
 }
