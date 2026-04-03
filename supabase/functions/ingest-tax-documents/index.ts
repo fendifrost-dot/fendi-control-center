@@ -230,6 +230,7 @@ async function writeToTaxSupabase(
     throw new Error(`Supabase write error (${endpoint}): ${res.status} - ${errText}`);
   }
   return res.json();
+}
 
 serve(async (req: Request) => {
   if (req.method === 'OPTIONS') {
