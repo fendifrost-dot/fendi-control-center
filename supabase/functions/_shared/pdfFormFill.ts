@@ -1,200 +1,290 @@
 // supabase/functions/_shared/pdfFormFill.ts
-// Fills IRS PDF forms using pdf-lib. Downloads blank forms from IRS.gov,
-// maps computed tax data to form field names, and returns filled PDF bytes.
+// PDF form filling for IRS tax documents using pdf-lib
 
-import { PDFDocument, rgb, StandardFonts, degrees } from "https://esm.sh/pdf-lib@1.17.1";
+import { PDFDocument, rgb, degrees, StandardFonts } from "https://esm.sh/pdf-lib@1.17.1";
 
-// IRS PDF URLs (prior-year so forms stay stable)
-const IRS_PDF_URLS: Record<string, string> = {
-  "1040_2024": "https://www.irs.gov/pub/irs-prior/f1040--2024.pdf",
-  "1040_2023": "https://www.irs.gov/pub/irs-prior/f1040--2023.pdf",
-  "1040_2022": "https://www.irs.gov/pub/irs-prior/f1040--2022.pdf",
-  "schedule_c_2024": "https://www.irs.gov/pub/irs-prior/f1040sc--2024.pdf",
-  "schedule_c_2023": "https://www.irs.gov/pub/irs-prior/f1040sc--2023.pdf",
-  "schedule_c_2022": "https://www.irs.gov/pub/irs-prior/f1040sc--2022.pdf",
-  "schedule_se_2024": "https://www.irs.gov/pub/irs-prior/f1040sse--2024.pdf",
-  "schedule_se_2023": "https://www.irs.gov/pub/irs-prior/f1040sse--2023.pdf",
-  "schedule_se_2022": "https://www.irs.gov/pub/irs-prior/f1040sse--2022.pdf",
-};
+export { PDFDocument };
 
-const pdfCache = new Map<string, Uint8Array>();
+/**
+ * Get the IRS.gov URL for a tax form PDF
+ */
+export function getIrsFormUrl(formType: string, year: number | string): string {
+  const yr = Number(year);
+  const currentYear = new Date().getFullYear();
+  // Normalize form type: remove spaces and special chars for URL
+  const formSlug = formType.toLowerCase().replace(/[^a-z0-9]/g, "");
 
-export interface FieldMapping {
-  pdfField: string;
-  dataKey: string;
-  format?: "currency" | "integer" | "text" | "ssn" | "ein" | "checkbox";
-  fallbackX?: number;
-  fallbackY?: number;
-  fallbackPage?: number;
-}
-
-// Form 1040 field mappings
-export const FORM_1040_FIELDS: FieldMapping[] = [
-  { pdfField: "topmostSubform[0].Page1[0].f1_02[0]", dataKey: "first_name", format: "text" },
-  { pdfField: "topmostSubform[0].Page1[0].f1_03[0]", dataKey: "last_name", format: "text" },
-  { pdfField: "topmostSubform[0].Page1[0].f1_04[0]", dataKey: "ssn", format: "ssn" },
-  { pdfField: "topmostSubform[0].Page1[0].f1_07[0]", dataKey: "wages_salaries", format: "currency", fallbackX: 530, fallbackY: 420, fallbackPage: 0 },
-  { pdfField: "topmostSubform[0].Page1[0].Line9[0].f1_10[0]", dataKey: "total_income", format: "currency", fallbackX: 530, fallbackY: 350, fallbackPage: 0 },
-  { pdfField: "topmostSubform[0].Page1[0].f1_13[0]", dataKey: "adjusted_gross_income", format: "currency", fallbackX: 530, fallbackY: 290, fallbackPage: 0 },
-  { pdfField: "topmostSubform[0].Page2[0].f2_02[0]", dataKey: "standard_deduction", format: "currency", fallbackX: 530, fallbackY: 660, fallbackPage: 1 },
-  { pdfField: "topmostSubform[0].Page2[0].f2_04[0]", dataKey: "taxable_income", format: "currency", fallbackX: 530, fallbackY: 620, fallbackPage: 1 },
-  { pdfField: "topmostSubform[0].Page2[0].f2_06[0]", dataKey: "total_tax", format: "currency", fallbackX: 530, fallbackY: 500, fallbackPage: 1 },
-  { pdfField: "topmostSubform[0].Page2[0].f2_13[0]", dataKey: "total_payments", format: "currency", fallbackX: 530, fallbackY: 340, fallbackPage: 1 },
-  { pdfField: "topmostSubform[0].Page2[0].f2_14[0]", dataKey: "amount_owed", format: "currency", fallbackX: 530, fallbackY: 280, fallbackPage: 1 },
-  { pdfField: "topmostSubform[0].Page2[0].f2_15[0]", dataKey: "refund_amount", format: "currency", fallbackX: 530, fallbackY: 240, fallbackPage: 1 },
-];
-
-// Schedule C field mappings
-export const SCHEDULE_C_FIELDS: FieldMapping[] = [
-  { pdfField: "topmostSubform[0].Page1[0].f1_01[0]", dataKey: "proprietor_name", format: "text" },
-  { pdfField: "topmostSubform[0].Page1[0].f1_02[0]", dataKey: "ssn", format: "ssn" },
-  { pdfField: "topmostSubform[0].Page1[0].f1_03[0]", dataKey: "business_name", format: "text" },
-  { pdfField: "topmostSubform[0].Page1[0].f1_05[0]", dataKey: "business_code", format: "text" },
-  { pdfField: "topmostSubform[0].Page1[0].f1_07[0]", dataKey: "gross_receipts", format: "currency", fallbackX: 530, fallbackY: 498, fallbackPage: 0 },
-  { pdfField: "topmostSubform[0].Page1[0].f1_09[0]", dataKey: "gross_income", format: "currency", fallbackX: 530, fallbackY: 458, fallbackPage: 0 },
-  { pdfField: "topmostSubform[0].Page1[0].f1_10[0]", dataKey: "advertising", format: "currency" },
-  { pdfField: "topmostSubform[0].Page1[0].f1_12[0]", dataKey: "car_truck_expenses", format: "currency" },
-  { pdfField: "topmostSubform[0].Page1[0].f1_15[0]", dataKey: "insurance", format: "currency" },
-  { pdfField: "topmostSubform[0].Page1[0].f1_18[0]", dataKey: "office_expense", format: "currency" },
-  { pdfField: "topmostSubform[0].Page1[0].f1_24[0]", dataKey: "supplies", format: "currency" },
-  { pdfField: "topmostSubform[0].Page1[0].f1_28[0]", dataKey: "total_expenses", format: "currency", fallbackX: 530, fallbackY: 126, fallbackPage: 0 },
-  { pdfField: "topmostSubform[0].Page1[0].f1_29[0]", dataKey: "net_profit_or_loss", format: "currency", fallbackX: 530, fallbackY: 106, fallbackPage: 0 },
-];
-
-// Schedule SE field mappings
-export const SCHEDULE_SE_FIELDS: FieldMapping[] = [
-  { pdfField: "topmostSubform[0].Page1[0].f1_01[0]", dataKey: "proprietor_name", format: "text" },
-  { pdfField: "topmostSubform[0].Page1[0].f1_02[0]", dataKey: "ssn", format: "ssn" },
-  { pdfField: "topmostSubform[0].Page1[0].Section1Short[0].f1_03[0]", dataKey: "net_earnings", format: "currency", fallbackX: 530, fallbackY: 478, fallbackPage: 0 },
-  { pdfField: "topmostSubform[0].Page1[0].Section1Short[0].f1_04[0]", dataKey: "se_tax_multiplied", format: "currency", fallbackX: 530, fallbackY: 450, fallbackPage: 0 },
-  { pdfField: "topmostSubform[0].Page1[0].Section1Short[0].f1_05[0]", dataKey: "self_employment_tax", format: "currency", fallbackX: 530, fallbackY: 420, fallbackPage: 0 },
-  { pdfField: "topmostSubform[0].Page1[0].Section1Short[0].f1_06[0]", dataKey: "deductible_half_se", format: "currency", fallbackX: 530, fallbackY: 392, fallbackPage: 0 },
-];
-
-export const FIELD_MAPPINGS: Record<string, FieldMapping[]> = {
-  "1040": FORM_1040_FIELDS,
-  "schedule_c": SCHEDULE_C_FIELDS,
-  "schedule_se": SCHEDULE_SE_FIELDS,
-};
-
-async function downloadBlankPdf(formType: string, formYear: number): Promise<Uint8Array> {
-  const cacheKey = formType + "_" + formYear;
-  if (pdfCache.has(cacheKey)) return pdfCache.get(cacheKey)!;
-  const url = IRS_PDF_URLS[cacheKey];
-  if (!url) throw new Error("No IRS PDF URL configured for " + formType + " year " + formYear);
-  console.log("Downloading blank PDF: " + url);
-  const resp = await fetch(url);
-  if (!resp.ok) throw new Error("Failed to download IRS PDF (" + resp.status + "): " + url);
-  const bytes = new Uint8Array(await resp.arrayBuffer());
-  pdfCache.set(cacheKey, bytes);
-  return bytes;
-}
-
-function formatValue(value: unknown, format?: string): string {
-  if (value === null || value === undefined) return "";
-  const str = String(value);
-  switch (format) {
-    case "currency": {
-      const num = parseFloat(str);
-      if (isNaN(num)) return str;
-      return num.toLocaleString("en-US", { minimumFractionDigits: 0, maximumFractionDigits: 0 });
-    }
-    case "integer": return String(Math.round(parseFloat(str) || 0));
-    case "ssn": return str.replace(/^(\d{3})(\d{2})(\d{4})$/, "$1-$2-$3");
-    case "ein": return str.replace(/^(\d{2})(\d{7})$/, "$1-$2");
-    default: return str;
+  if (yr >= currentYear) {
+    // Current year - use latest
+    return `https://www.irs.gov/pub/irs-pdf/f${formSlug}.pdf`;
+  } else {
+    // Prior year
+    return `https://www.irs.gov/pub/irs-prior/f${formSlug}--${yr}.pdf`;
   }
 }
 
 /**
- * Fill an IRS PDF form with computed tax data.
- * Strategy: Try AcroForm field filling first, fall back to text overlay.
+ * Determine which IRS forms are required based on computed tax data.
+ * Checks both flat and nested key patterns.
  */
-export async function fillPdfForm(
-  formType: string,
-  formYear: number,
-  computedData: Record<string, unknown>,
-  customFieldMappings?: FieldMapping[]
-): Promise<{ pdfBytes: Uint8Array; filledFields: string[]; failedFields: string[] }> {
-  const blankBytes = await downloadBlankPdf(formType, formYear);
-  const pdfDoc = await PDFDocument.load(blankBytes, { ignoreEncryption: true });
-  const fieldMappings = customFieldMappings || FIELD_MAPPINGS[formType] || [];
-  const filledFields: string[] = [];
-  const failedFields: string[] = [];
+export function determineRequiredForms(computedData: Record<string, unknown>): string[] {
+  const forms: string[] = ["1040"]; // Always need the main form
 
-  let form: any = null;
-  try { form = pdfDoc.getForm(); } catch (e) {
-    console.warn("No AcroForm found in " + formType + " " + formYear + ", using text overlay only");
-  }
-  const font = await pdfDoc.embedFont(StandardFonts.Helvetica);
+  // Helper to check if a key pattern exists in the data
+  const hasKey = (patterns: string[]): boolean => {
+    for (const pattern of patterns) {
+      // Check flat keys
+      if (computedData[pattern] !== undefined && computedData[pattern] !== null) return true;
 
-  for (const mapping of fieldMappings) {
-    const value = computedData[mapping.dataKey];
-    if (value === null || value === undefined || value === "") continue;
-    const formatted = formatValue(value, mapping.format);
-    let filled = false;
-
-    if (form) {
-      try {
-        const field = form.getTextField(mapping.pdfField);
-        field.setText(formatted);
-        filled = true;
-        filledFields.push(mapping.dataKey);
-      } catch (_) {
-        if (mapping.format === "checkbox") {
-          try { const cb = form.getCheckBox(mapping.pdfField); if (value) cb.check(); filled = true; filledFields.push(mapping.dataKey); } catch (_) {}
+      // Check nested keys (dot notation)
+      const parts = pattern.split(".");
+      let current: unknown = computedData;
+      let found = true;
+      for (const part of parts) {
+        if (current && typeof current === "object" && part in (current as Record<string, unknown>)) {
+          current = (current as Record<string, unknown>)[part];
+        } else {
+          found = false;
+          break;
         }
       }
+      if (found && current !== undefined && current !== null) return true;
     }
+    return false;
+  };
 
-    if (!filled && mapping.fallbackX !== undefined && mapping.fallbackY !== undefined) {
-      const pageIdx = mapping.fallbackPage ?? 0;
-      const pages = pdfDoc.getPages();
-      if (pageIdx < pages.length) {
-        pages[pageIdx].drawText(formatted, { x: mapping.fallbackX, y: mapping.fallbackY, size: 10, font, color: rgb(0, 0, 0) });
-        filled = true;
-        filledFields.push(mapping.dataKey + " (overlay)");
+  // Schedule C - Business income
+  if (hasKey([
+    "schedule_c", "scheduleC", "schedule_c_profit", "scheduleCProfit",
+    "business_income", "businessIncome", "self_employment_income",
+    "form_1040.schedule_c", "form1040.scheduleC",
+    "schedules.c", "schedules.schedule_c",
+  ])) {
+    forms.push("1040sc");
+  }
+
+  // Schedule SE - Self-employment tax
+  if (hasKey([
+    "schedule_se", "scheduleSE", "self_employment_tax", "selfEmploymentTax",
+    "se_tax", "seTax",
+    "form_1040.schedule_se", "form1040.scheduleSE",
+    "schedules.se", "schedules.schedule_se",
+  ])) {
+    forms.push("1040sse");
+  }
+
+  // Schedule D - Capital gains
+  if (hasKey([
+    "schedule_d", "scheduleD", "capital_gains", "capitalGains",
+    "form_1040.schedule_d", "form1040.scheduleD",
+    "schedules.d", "schedules.schedule_d",
+  ])) {
+    forms.push("1040sd");
+  }
+
+  // Schedule E - Rental/Royalty income
+  if (hasKey([
+    "schedule_e", "scheduleE", "rental_income", "rentalIncome", "royalty_income",
+    "form_1040.schedule_e", "form1040.scheduleE",
+    "schedules.e", "schedules.schedule_e",
+  ])) {
+    forms.push("1040se");
+  }
+
+  // Schedule A - Itemized deductions
+  if (hasKey([
+    "schedule_a", "scheduleA", "itemized_deductions", "itemizedDeductions",
+    "form_1040.schedule_a", "form1040.scheduleA",
+    "schedules.a", "schedules.schedule_a",
+  ])) {
+    forms.push("1040sa");
+  }
+
+  // Schedule B - Interest and dividends
+  if (hasKey([
+    "schedule_b", "scheduleB", "interest_income", "dividend_income",
+    "form_1040.schedule_b", "form1040.scheduleB",
+    "schedules.b", "schedules.schedule_b",
+  ])) {
+    forms.push("1040sb");
+  }
+
+  // Schedule 1 - Additional income
+  if (hasKey([
+    "schedule_1", "schedule1", "additional_income", "additionalIncome",
+    "form_1040.schedule_1", "form1040.schedule1",
+    "schedules.1", "schedules.schedule_1",
+  ])) {
+    forms.push("1040s1");
+  }
+
+  // Schedule 2 - Additional taxes
+  if (hasKey([
+    "schedule_2", "schedule2", "additional_taxes", "additionalTaxes",
+    "form_1040.schedule_2", "form1040.schedule2",
+    "schedules.2", "schedules.schedule_2",
+  ])) {
+    forms.push("1040s2");
+  }
+
+  // Schedule 3 - Additional credits
+  if (hasKey([
+    "schedule_3", "schedule3", "additional_credits", "additionalCredits",
+    "form_1040.schedule_3", "form1040.schedule3",
+    "schedules.3", "schedules.schedule_3",
+  ])) {
+    forms.push("1040s3");
+  }
+
+  // If Schedule C is present, usually need Schedule SE too
+  if (forms.includes("1040sc") && !forms.includes("1040sse")) {
+    forms.push("1040sse");
+  }
+
+  // If Schedule C or SE, usually need Schedule 1 and 2
+  if ((forms.includes("1040sc") || forms.includes("1040sse")) && !forms.includes("1040s1")) {
+    forms.push("1040s1");
+  }
+  if (forms.includes("1040sse") && !forms.includes("1040s2")) {
+    forms.push("1040s2");
+  }
+
+  return [...new Set(forms)]; // Deduplicate
+}
+
+/**
+ * Fill a PDF form using AcroForm API with text overlay fallback
+ */
+export async function fillPdfForm(
+  pdfBytes: Uint8Array,
+  fieldMappings: Record<string, string>,
+  values: Record<string, unknown>
+): Promise<PDFDocument> {
+  const pdfDoc = await PDFDocument.load(pdfBytes, { ignoreEncryption: true });
+  const form = pdfDoc.getForm();
+  const fields = form.getFields();
+  const font = await pdfDoc.embedFont(StandardFonts.Helvetica);
+
+  let filledCount = 0;
+  const failedFields: string[] = [];
+
+  for (const [valueKey, fieldName] of Object.entries(fieldMappings)) {
+    const value = values[valueKey];
+    if (value === undefined || value === null || value === "") continue;
+
+    const strValue = String(value);
+
+    try {
+      // Try AcroForm field first
+      const field = fields.find(
+        (f) => f.getName() === fieldName || f.getName().includes(fieldName)
+      );
+
+      if (field) {
+        try {
+          const textField = form.getTextField(field.getName());
+          textField.setText(strValue);
+          filledCount++;
+          continue;
+        } catch {
+          // Field might be a checkbox or other type
+          try {
+            const checkbox = form.getCheckBox(field.getName());
+            if (strValue === "true" || strValue === "1" || strValue.toLowerCase() === "yes" || strValue.toLowerCase() === "x") {
+              checkbox.check();
+            } else {
+              checkbox.uncheck();
+            }
+            filledCount++;
+            continue;
+          } catch {
+            failedFields.push(fieldName);
+          }
+        }
+      } else {
+        failedFields.push(fieldName);
+      }
+    } catch (err) {
+      console.error(`Error filling field "${fieldName}": ${err}`);
+      failedFields.push(fieldName);
+    }
+  }
+
+  console.log(`Filled ${filledCount} fields via AcroForm. ${failedFields.length} fields need text overlay fallback.`);
+
+  // Text overlay fallback for fields that couldn't be filled via AcroForm
+  if (failedFields.length > 0) {
+    console.log(`Text overlay fallback fields: ${failedFields.join(", ")}`);
+    // For fields we couldn't fill, add text annotations on the first page
+    const pages = pdfDoc.getPages();
+    if (pages.length > 0) {
+      const firstPage = pages[0];
+      let yOffset = 50; // Start near bottom
+      for (const fieldName of failedFields) {
+        // Find the original value key for this field
+        const valueKey = Object.entries(fieldMappings).find(([_, v]) => v === fieldName)?.[0];
+        if (!valueKey) continue;
+        const value = values[valueKey];
+        if (value === undefined || value === null || value === "") continue;
+
+        // Add small text annotation
+        firstPage.drawText(`${fieldName}: ${String(value)}`, {
+          x: 10,
+          y: yOffset,
+          size: 7,
+          font,
+          color: rgb(0.2, 0.2, 0.2),
+        });
+        yOffset += 12;
       }
     }
-    if (!filled) failedFields.push(mapping.dataKey);
   }
 
-  if (form) { try { form.flatten(); } catch (e) { console.warn("Could not flatten form:", e); } }
-  const pdfBytes = await pdfDoc.save();
-  return { pdfBytes: new Uint8Array(pdfBytes), filledFields, failedFields };
+  // Flatten form fields to prevent editing
+  try {
+    form.flatten();
+  } catch (err) {
+    console.warn(`Could not flatten form: ${err}`);
+  }
+
+  return pdfDoc;
 }
 
-/** Add a DRAFT watermark to every page of a PDF. */
-export async function addDraftWatermark(pdfBytes: Uint8Array): Promise<Uint8Array> {
-  const pdfDoc = await PDFDocument.load(pdfBytes);
+/**
+ * Add a diagonal DRAFT watermark to all pages
+ */
+export async function addDraftWatermark(pdfDoc: PDFDocument): Promise<void> {
+  const pages = pdfDoc.getPages();
   const font = await pdfDoc.embedFont(StandardFonts.HelveticaBold);
-  for (const page of pdfDoc.getPages()) {
+
+  for (const page of pages) {
     const { width, height } = page.getSize();
-    page.drawText("DRAFT - NOT FOR FILING", {
-      x: width / 2 - 180, y: height / 2 - 20, size: 40, font,
-      color: rgb(0.9, 0.1, 0.1), opacity: 0.25, rotate: degrees(45),
+    const text = "DRAFT";
+    const fontSize = Math.min(width, height) * 0.15;
+    const textWidth = font.widthOfTextAtSize(text, fontSize);
+
+    page.drawText(text, {
+      x: (width - textWidth) / 2,
+      y: height / 2 - fontSize / 2,
+      size: fontSize,
+      font,
+      color: rgb(0.85, 0.85, 0.85),
+      rotate: degrees(45),
+      opacity: 0.35,
     });
   }
-  return new Uint8Array(await pdfDoc.save());
 }
 
-/** Inspect a PDF and return all AcroForm field names. */
-export async function inspectPdfFields(formType: string, formYear: number): Promise<{ name: string; type: string }[]> {
-  const blankBytes = await downloadBlankPdf(formType, formYear);
-  const pdfDoc = await PDFDocument.load(blankBytes, { ignoreEncryption: true });
-  try {
-    const form = pdfDoc.getForm();
-    return form.getFields().map((field: any) => ({ name: field.getName(), type: field.constructor.name }));
-  } catch (e) {
-    return [{ name: "ERROR", type: "Could not read form: " + e }];
-  }
-}
+/**
+ * Inspect and list all form fields in a PDF
+ */
+export async function inspectPdfFields(pdfBytes: Uint8Array): Promise<Array<{ name: string; type: string }>> {
+  const pdfDoc = await PDFDocument.load(pdfBytes, { ignoreEncryption: true });
+  const form = pdfDoc.getForm();
+  const fields = form.getFields();
 
-/** Determine which forms are needed for a given tax return. */
-export function determineRequiredForms(computedData: Record<string, unknown>): string[] {
-  const forms = ["1040"];
-  if (computedData.gross_receipts || computedData.net_profit_or_loss || computedData.business_name) forms.push("schedule_c");
-  const netEarnings = Number(computedData.net_earnings || computedData.net_profit_or_loss || 0);
-  if (netEarnings > 400) forms.push("schedule_se");
-  return forms;
+  return fields.map((field) => ({
+    name: field.getName(),
+    type: field.constructor.name,
+  }));
 }
