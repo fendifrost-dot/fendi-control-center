@@ -1508,9 +1508,9 @@ const AGENT_TOOLS: ToolDef[] = [
         } else {
           summary += `\n⚠️ No Drive document analysis available`;
         }
-        summary += `\n• AGI: $${rec?.agi?.toLocaleString() ?? "N/A"}`;
-        summary += `\n• Recommended filing method: ${rec?.method ?? "N/A"}`;
-        summary += `\n• Filing readiness: ${readiness?.score ?? "N/A"}/100 ${readiness?.ready_to_file ? "✅" : "⚠️"}`;
+        summary += `\n• AGI: $${(r.agi ?? rec?.agi ?? 0).toLocaleString()}`;
+        summary += `\n• Recommended filing method: ${(rec?.method && rec.method !== "Undecided") ? rec.method : ((r.agi ?? 0) <= 84000 ? "IRS Free File / TurboTax" : "Paper filing with IRS PDF forms")}`;
+        summary += `\n• Filing readiness: ${readiness?.score ?? readiness?.percentage ?? "N/A"}/100 ${readiness?.ready_to_file ? "✅" : "⚠️"}`;
         summary += `\n• Missing items: ${readiness?.missing_items?.length ? readiness.missing_items.join(", ") : "None"}`;
         summary += `\n• Documents generated: ${docList.join(", ")}`;
         if (rec?.steps?.length) {
