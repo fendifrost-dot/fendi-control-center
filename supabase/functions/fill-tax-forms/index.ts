@@ -116,7 +116,7 @@ async function ensureStorageBucket(supabase: any, bucketName: string) {
 }
 
 async function processForm(
-  supabase: ReturnType<typeof createClient>,
+  supabase: any,
   driveAccessToken: string,
   driveFolderId: string,
   formType: string,
