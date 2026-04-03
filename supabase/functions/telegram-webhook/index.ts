@@ -1487,6 +1487,7 @@ const AGENT_TOOLS: ToolDef[] = [
         const r = mergedResults[y];
         const readiness = r.json_summary?.filing_readiness;
         const rec = r.filing_recommendation;
+        const ingestion = r.ingestion_results;
         const docList = [
           "Form 1040 JSON summary",
           "Human-readable worksheet",
@@ -1496,6 +1497,17 @@ const AGENT_TOOLS: ToolDef[] = [
           "Filing recommendation",
         ];
         let summary = `📋 Tax Year ${y}:`;
+        // Ingestion status
+        if (ingestion?.success) {
+          summary += `\n📂 Drive docs analyzed: ${ingestion.files_processed ?? 0} files from "${ingestion.client_name ?? "unknown"}" folder`;
+          if (ingestion.pl_summary) {
+            summary += `\n   P&L: Income $${ingestion.pl_summary.total_income?.toLocaleString() ?? "0"}, Expenses $${ingestion.pl_summary.total_expenses?.toLocaleString() ?? "0"}`;
+          }
+        } else if (ingestion?.error) {
+          summary += `\n⚠️ Drive ingestion issue: ${ingestion.error}`;
+        } else {
+          summary += `\n⚠️ No Drive document analysis available`;
+        }
         summary += `\n• AGI: $${rec?.agi?.toLocaleString() ?? "N/A"}`;
         summary += `\n• Recommended filing method: ${rec?.method ?? "N/A"}`;
         summary += `\n• Filing readiness: ${readiness?.score ?? "N/A"}/100 ${readiness?.ready_to_file ? "✅" : "⚠️"}`;
@@ -1506,7 +1518,7 @@ const AGENT_TOOLS: ToolDef[] = [
         }
         return summary;
       });
-      return `Tax prep documents generated for ${years.join(", ")}:\n\n${summaries.join("\n\n")}\n\n⚠️ Disclaimer: These are preparation documents only — not a tax filing. Review all figures before submitting.`;
+      return `Tax prep documents generated for ${years.join(", ")}:\n\n${summaries.join("\n\n")}\n\n⚠️ Disclaimer: These are preparation documents only — not a tax filing. Review all figures before submitting.`
     },
   },
   {
