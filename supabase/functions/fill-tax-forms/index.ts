@@ -1,226 +1,341 @@
 // supabase/functions/fill-tax-forms/index.ts
-// Fills IRS PDF forms with computed tax data, uploads to Supabase Storage + Google Drive,
-// and records each filled form in the tax_form_instances table.
+// Edge function to fill IRS tax form PDFs and upload to Drive + Supabase storage
 
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
-import { createClient } from "https://esm.sh/@supabase/supabase-js@2.49.1";
-import { fillPdfForm, addDraftWatermark, determineRequiredForms } from "../_shared/pdfFormFill.ts";
-import { uploadToDrive, getOrCreateClientTaxFolder } from "../_shared/googleDriveUpload.ts";
-import { insertFormInstance, updateFormInstance, getFormTemplate, logAudit } from "../_shared/taxReturns.ts";
+import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
+import {
+  getIrsFormUrl,
+  determineRequiredForms,
+  fillPdfForm,
+  addDraftWatermark,
+  inspectPdfFields,
+} from "../_shared/pdfFormFill.ts";
+import {
+  getAccessToken,
+  uploadFileToDrive,
+  getOrCreateClientTaxFolder,
+} from "../_shared/googleDriveUpload.ts";
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
   "Access-Control-Allow-Headers": "authorization, x-client-info, apikey, content-type",
 };
 
-const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
-const SUPABASE_SERVICE_ROLE_KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
-const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
+/**
+ * Flatten nested computed data into a flat key-value map.
+ * e.g. { form_1040: { line_1: "50000" } } => { "form_1040.line_1": "50000", "line_1": "50000" }
+ */
+function flattenComputedData(
+  data: Record<string, unknown>,
+  prefix = ""
+): Record<string, unknown> {
+  const result: Record<string, unknown> = {};
 
-const FORM_DISPLAY_NAMES: Record<string, string> = {
-  "1040": "Form 1040 - U.S. Individual Income Tax Return",
-  "schedule_c": "Schedule C - Profit or Loss From Business",
-  "schedule_se": "Schedule SE - Self-Employment Tax",
-};
+  for (const [key, value] of Object.entries(data)) {
+    const fullKey = prefix ? `${prefix}.${key}` : key;
 
-serve(async (req) => {
-  if (req.method === "OPTIONS") return new Response(null, { headers: corsHeaders });
-
-  try {
-    const body = await req.json();
-    const {
-      tax_return_id,
-      client_id,
-      client_name,
-      tax_year,
-      computed_data,
-      draft_mode = true,
-    } = body;
-
-    if (!tax_return_id) throw new Error("tax_return_id is required");
-    if (!tax_year) throw new Error("tax_year is required");
-    if (!computed_data || typeof computed_data !== "object") throw new Error("computed_data object is required");
-
-    console.log("Filling tax forms for return " + tax_return_id + " year " + tax_year);
-
-    // Determine which forms to generate
-    const requiredForms = determineRequiredForms(computed_data);
-    console.log("Required forms: " + requiredForms.join(", "));
-
-    // Get or create Drive folder for this client/year
-    let driveFolderId: string | null = null;
-    let driveFolderUrl: string | null = null;
-    try {
-      const folder = await getOrCreateClientTaxFolder(client_name || client_id, tax_year);
-      driveFolderId = folder.folderId;
-      driveFolderUrl = folder.folderUrl;
-      console.log("Drive folder: " + driveFolderUrl);
-    } catch (driveErr) {
-      console.warn("Drive folder creation failed (continuing without Drive): " + driveErr);
-    }
-
-    const results: Array<{
-      form_type: string;
-      form_name: string;
-      instance_id: string;
-      pdf_url: string | null;
-      drive_url: string | null;
-      filled_fields: string[];
-      failed_fields: string[];
-      status: string;
-    }> = [];
-
-    // Process forms in parallel batches of 3
-    const batchSize = 3;
-    for (let i = 0; i < requiredForms.length; i += batchSize) {
-      const batch = requiredForms.slice(i, i + batchSize);
-      const batchResults = await Promise.allSettled(
-        batch.map(async (formType) => {
-          const formName = FORM_DISPLAY_NAMES[formType] || formType;
-          console.log("Processing " + formType + "...");
-
-          // Create a pending form instance
-          const instanceId = await insertFormInstance(supabase, {
-            tax_return_id,
-            form_type: formType,
-            form_year: tax_year,
-            status: "pending",
-            field_data: computed_data,
-          });
-
-          try {
-            // Fill the PDF
-            const { pdfBytes, filledFields, failedFields } = await fillPdfForm(
-              formType, tax_year, computed_data
-            );
-
-            // Add DRAFT watermark if in draft mode
-            const finalPdf = draft_mode
-              ? await addDraftWatermark(pdfBytes)
-              : pdfBytes;
-
-            // Upload to Supabase Storage
-            const fileName = formType + "_" + tax_year + "_" + (client_name || client_id).replace(/[^a-zA-Z0-9]/g, "_") + ".pdf";
-            const storagePath = "tax-forms/" + tax_return_id + "/" + fileName;
-
-            const { error: uploadError } = await supabase.storage
-              .from("tax-documents")
-              .upload(storagePath, finalPdf, {
-                contentType: "application/pdf",
-                upsert: true,
-              });
-
-            let pdfUrl: string | null = null;
-            if (uploadError) {
-              console.warn("Storage upload failed for " + formType + ": " + uploadError.message);
-            } else {
-              const { data: urlData } = supabase.storage
-                .from("tax-documents")
-                .getPublicUrl(storagePath);
-              pdfUrl = urlData?.publicUrl || null;
-            }
-
-            // Upload to Google Drive
-            let driveUrl: string | null = null;
-            if (driveFolderId) {
-              try {
-                const driveResult = await uploadToDrive(
-                  driveFolderId,
-                  (draft_mode ? "DRAFT_" : "") + formName.replace(/[^a-zA-Z0-9 ]/g, "") + "_" + tax_year + ".pdf",
-                  finalPdf
-                );
-                driveUrl = driveResult.webViewLink;
-              } catch (driveErr) {
-                console.warn("Drive upload failed for " + formType + ": " + driveErr);
-              }
-            }
-
-            // Update the form instance with results
-            await updateFormInstance(supabase, instanceId, {
-              status: "filled",
-              pdf_url: pdfUrl || driveUrl || undefined,
-              drive_file_id: driveUrl ? driveUrl.split("/d/")[1]?.split("/")[0] : undefined,
-            });
-
-            return {
-              form_type: formType,
-              form_name: formName,
-              instance_id: instanceId,
-              pdf_url: pdfUrl,
-              drive_url: driveUrl,
-              filled_fields: filledFields,
-              failed_fields: failedFields,
-              status: "filled",
-            };
-          } catch (fillErr) {
-            const errMsg = fillErr instanceof Error ? fillErr.message : String(fillErr);
-            console.error("Failed to fill " + formType + ": " + errMsg);
-
-            await updateFormInstance(supabase, instanceId, {
-              status: "error",
-              error_message: errMsg,
-            });
-
-            return {
-              form_type: formType,
-              form_name: formName,
-              instance_id: instanceId,
-              pdf_url: null,
-              drive_url: null,
-              filled_fields: [],
-              failed_fields: [],
-              status: "error: " + errMsg,
-            };
-          }
-        })
-      );
-
-      for (const result of batchResults) {
-        if (result.status === "fulfilled") {
-          results.push(result.value);
+    if (value && typeof value === "object" && !Array.isArray(value)) {
+      // Recurse into nested objects
+      const nested = flattenComputedData(value as Record<string, unknown>, fullKey);
+      Object.assign(result, nested);
+      // Also keep short key for convenience
+      const shortNested = flattenComputedData(value as Record<string, unknown>, "");
+      for (const [shortKey, shortVal] of Object.entries(shortNested)) {
+        if (!result[shortKey]) {
+          result[shortKey] = shortVal;
         }
       }
+    } else {
+      result[fullKey] = value;
+      // Also store without prefix for flat access
+      if (prefix && !result[key]) {
+        result[key] = value;
+      }
     }
+  }
 
-    // Update Drive folder URL on the tax return
-    if (driveFolderUrl) {
-      await supabase
-        .from("tax_returns")
-        .update({ drive_folder_url: driveFolderUrl, updated_at: new Date().toISOString() })
-        .eq("id", tax_return_id);
+  return result;
+}
+
+/**
+ * Build basic field mappings for common 1040 fields.
+ * Maps computed_data keys to PDF form field names.
+ */
+function getFieldMappings(formType: string): Record<string, string> {
+  const mappings: Record<string, Record<string, string>> = {
+    "1040": {
+      first_name: "topmostSubform[0].Page1[0].f1_02[0]",
+      last_name: "topmostSubform[0].Page1[0].f1_03[0]",
+      ssn: "topmostSubform[0].Page1[0].f1_04[0]",
+      address: "topmostSubform[0].Page1[0].f1_06[0]",
+      city_state_zip: "topmostSubform[0].Page1[0].f1_07[0]",
+      filing_status: "topmostSubform[0].Page1[0].c1_1[0]",
+      wages: "topmostSubform[0].Page1[0].f1_10[0]",
+      interest_income: "topmostSubform[0].Page1[0].f1_12[0]",
+      total_income: "topmostSubform[0].Page1[0].f1_22[0]",
+      adjusted_gross_income: "topmostSubform[0].Page1[0].f1_26[0]",
+      standard_deduction: "topmostSubform[0].Page2[0].f2_02[0]",
+      taxable_income: "topmostSubform[0].Page2[0].f2_04[0]",
+      tax: "topmostSubform[0].Page2[0].f2_06[0]",
+      total_tax: "topmostSubform[0].Page2[0].f2_14[0]",
+      total_payments: "topmostSubform[0].Page2[0].f2_18[0]",
+      refund: "topmostSubform[0].Page2[0].f2_20[0]",
+      amount_owed: "topmostSubform[0].Page2[0].f2_24[0]",
+    },
+    "1040sc": {
+      business_name: "topmostSubform[0].Page1[0].f1_02[0]",
+      principal_business: "topmostSubform[0].Page1[0].f1_01[0]",
+      business_code: "topmostSubform[0].Page1[0].f1_03[0]",
+      ein: "topmostSubform[0].Page1[0].f1_04[0]",
+      gross_receipts: "topmostSubform[0].Page1[0].f1_07[0]",
+      total_expenses: "topmostSubform[0].Page1[0].f1_30[0]",
+      net_profit: "topmostSubform[0].Page1[0].f1_31[0]",
+    },
+    "1040sse": {
+      net_earnings: "topmostSubform[0].Page1[0].f1_03[0]",
+      se_tax: "topmostSubform[0].Page1[0].f1_11[0]",
+      deduction: "topmostSubform[0].Page1[0].f1_12[0]",
+    },
+  };
+
+  return mappings[formType] || {};
+}
+
+async function ensureStorageBucket(supabase: ReturnType<typeof createClient>, bucketName: string) {
+  const { data: buckets } = await supabase.storage.listBuckets();
+  const exists = buckets?.some((b: { name: string }) => b.name === bucketName);
+  if (!exists) {
+    const { error } = await supabase.storage.createBucket(bucketName, {
+      public: false,
+      fileSizeLimit: 52428800, // 50MB
+    });
+    if (error && !error.message?.includes("already exists")) {
+      console.error(`Failed to create bucket: ${error.message}`);
     }
+  }
+}
 
-    // Audit log
-    await logAudit(supabase, {
-      tax_return_id,
-      action: "forms_filled",
-      actor: "fill-tax-forms",
-      new_values: {
-        forms_generated: results.map((r) => r.form_type),
-        drive_folder_url: driveFolderUrl,
-        draft_mode,
-      },
+async function processForm(
+  supabase: ReturnType<typeof createClient>,
+  driveAccessToken: string,
+  driveFolderId: string,
+  formType: string,
+  taxYear: number,
+  taxReturnId: string,
+  clientName: string,
+  flatData: Record<string, unknown>
+): Promise<Record<string, unknown>> {
+  const formLabel = formType.toUpperCase();
+  console.log(`Processing form: ${formLabel} for ${taxYear}`);
+
+  // 1. Fetch blank IRS PDF
+  const pdfUrl = getIrsFormUrl(formType, taxYear);
+  console.log(`Fetching PDF from: ${pdfUrl}`);
+
+  let pdfResponse: Response;
+  try {
+    pdfResponse = await fetch(pdfUrl);
+    if (!pdfResponse.ok) {
+      // Fallback to current year form if prior year not available
+      const fallbackUrl = getIrsFormUrl(formType, new Date().getFullYear());
+      console.log(`Prior year PDF not found, trying current: ${fallbackUrl}`);
+      pdfResponse = await fetch(fallbackUrl);
+      if (!pdfResponse.ok) {
+        throw new Error(`Failed to fetch form ${formType}: ${pdfResponse.status}`);
+      }
+    }
+  } catch (err) {
+    return { form: formType, status: "error", error: `Failed to fetch PDF: ${err}` };
+  }
+
+  const pdfBytes = new Uint8Array(await pdfResponse.arrayBuffer());
+
+  // 2. Inspect fields for debugging
+  try {
+    const fields = await inspectPdfFields(pdfBytes);
+    console.log(`Form ${formType} has ${fields.length} fields: ${fields.slice(0, 5).map(f => f.name).join(", ")}...`);
+  } catch (err) {
+    console.warn(`Could not inspect fields: ${err}`);
+  }
+
+  // 3. Fill fields
+  const fieldMappings = getFieldMappings(formType);
+  let filledDoc;
+  try {
+    filledDoc = await fillPdfForm(pdfBytes, fieldMappings, flatData);
+  } catch (err) {
+    return { form: formType, status: "error", error: `Failed to fill PDF: ${err}` };
+  }
+
+  // 4. Add DRAFT watermark
+  await addDraftWatermark(filledDoc);
+
+  // 5. Save filled PDF
+  const filledPdfBytes = await filledDoc.save();
+  const fileName = `${clientName.replace(/\s+/g, "_")}_${taxYear}_${formType}_DRAFT.pdf`;
+  const storagePath = `${taxReturnId}/${fileName}`;
+
+  // 6. Upload to Supabase storage
+  const bucketName = "tax-documents";
+  await ensureStorageBucket(supabase, bucketName);
+
+  const { error: uploadError } = await supabase.storage
+    .from(bucketName)
+    .upload(storagePath, filledPdfBytes, {
+      contentType: "application/pdf",
+      upsert: true,
     });
 
-    const summary = {
-      ok: true,
+  if (uploadError) {
+    console.error(`Storage upload error: ${uploadError.message}`);
+  }
+
+  // 7. Upload to Google Drive
+  let driveResult = null;
+  try {
+    driveResult = await uploadFileToDrive(
+      driveAccessToken,
+      fileName,
+      new Uint8Array(filledPdfBytes),
+      "application/pdf",
+      driveFolderId
+    );
+    console.log(`Uploaded to Drive: ${driveResult.name} (${driveResult.id})`);
+  } catch (err) {
+    console.error(`Drive upload error: ${err}`);
+  }
+
+  // 8. Insert tax_form_instances row
+  const { error: dbError } = await supabase.from("tax_form_instances").insert({
+    tax_return_id: taxReturnId,
+    form_type: formType,
+    tax_year: taxYear,
+    status: "draft",
+    storage_path: storagePath,
+    drive_file_id: driveResult?.id || null,
+    drive_link: driveResult?.webViewLink || null,
+    field_count: Object.keys(fieldMappings).length,
+    created_at: new Date().toISOString(),
+  });
+
+  if (dbError) {
+    console.error(`DB insert error: ${dbError.message}`);
+  }
+
+  return {
+    form: formType,
+    status: "success",
+    fileName,
+    storagePath,
+    driveFileId: driveResult?.id || null,
+    driveLink: driveResult?.webViewLink || null,
+  };
+}
+
+serve(async (req: Request) => {
+  // Handle CORS preflight
+  if (req.method === "OPTIONS") {
+    return new Response("ok", { headers: corsHeaders });
+  }
+
+  try {
+    const supabaseUrl = Deno.env.get("SUPABASE_URL")!;
+    const supabaseServiceKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
+    const supabase = createClient(supabaseUrl, supabaseServiceKey);
+
+    const {
       tax_return_id,
       tax_year,
-      forms_generated: results.length,
-      drive_folder_url: driveFolderUrl,
-      forms: results,
-    };
+      client_name,
+      client_id,
+      computed_data,
+    } = await req.json();
 
-    console.log("Fill complete: " + results.length + " forms generated");
-    return new Response(JSON.stringify(summary), {
-      headers: { ...corsHeaders, "Content-Type": "application/json" },
-    });
-  } catch (err: unknown) {
-    const msg = err instanceof Error ? err.message : String(err);
-    console.error("fill-tax-forms error: " + msg);
-    return new Response(JSON.stringify({ ok: false, error: msg }), {
-      status: 500,
-      headers: { ...corsHeaders, "Content-Type": "application/json" },
-    });
+    if (!tax_return_id || !tax_year || !client_name || !computed_data) {
+      return new Response(
+        JSON.stringify({ error: "Missing required fields: tax_return_id, tax_year, client_name, computed_data" }),
+        { status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+      );
+    }
+
+    console.log(`=== Fill Tax Forms: ${client_name} ${tax_year} (return: ${tax_return_id}) ===`);
+
+    // Flatten computed data
+    const flatData = flattenComputedData(computed_data);
+    console.log(`Flattened data keys: ${Object.keys(flatData).slice(0, 20).join(", ")}...`);
+
+    // Determine required forms
+    const requiredForms = determineRequiredForms(computed_data);
+    console.log(`Required forms: ${requiredForms.join(", ")}`);
+
+    // Get Google Drive access
+    let driveAccessToken: string;
+    let driveFolderId: string;
+    try {
+      driveAccessToken = await getAccessToken();
+      driveFolderId = await getOrCreateClientTaxFolder(driveAccessToken, client_name, tax_year);
+      console.log(`Drive folder ID: ${driveFolderId}`);
+    } catch (err) {
+      console.error(`Google Drive auth failed: ${err}`);
+      return new Response(
+        JSON.stringify({ error: `Google Drive authentication failed: ${err}` }),
+        { status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+      );
+    }
+
+    // Process forms in batches of 3
+    const results: Record<string, unknown>[] = [];
+    for (let i = 0; i < requiredForms.length; i += 3) {
+      const batch = requiredForms.slice(i, i + 3);
+      console.log(`Processing batch ${Math.floor(i / 3) + 1}: ${batch.join(", ")}`);
+
+      const batchResults = await Promise.all(
+        batch.map((formType) =>
+          processForm(
+            supabase,
+            driveAccessToken,
+            driveFolderId,
+            formType,
+            Number(tax_year),
+            tax_return_id,
+            client_name,
+            flatData
+          )
+        )
+      );
+      results.push(...batchResults);
+    }
+
+    // Update tax return status
+    await supabase
+      .from("tax_returns")
+      .update({ status: "forms_generated", forms_generated_at: new Date().toISOString() })
+      .eq("id", tax_return_id);
+
+    const successCount = results.filter((r) => r.status === "success").length;
+    const errorCount = results.filter((r) => r.status === "error").length;
+
+    console.log(`=== Complete: ${successCount} success, ${errorCount} errors ===`);
+
+    return new Response(
+      JSON.stringify({
+        success: true,
+        tax_return_id,
+        client_name,
+        tax_year,
+        forms_processed: results.length,
+        successful: successCount,
+        errors: errorCount,
+        results,
+        drive_folder_id: driveFolderId,
+      }),
+      { headers: { ...corsHeaders, "Content-Type": "application/json" } }
+    );
+  } catch (err) {
+    console.error(`Unhandled error: ${err}`);
+    return new Response(
+      JSON.stringify({ error: String(err) }),
+      { status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+    );
   }
 });
