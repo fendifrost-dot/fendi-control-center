@@ -3939,8 +3939,10 @@ serve(async (req) => {
     let autoPromotedWorkflow: WorkflowEntry | undefined;
     const newClientIntent = isNewClientCreditIntent(lowerText);
     const existingClientIntent = isExistingClientProgressIntent(lowerText);
-    const taxIntent = isTaxIntent(lowerText);
-    const taxDocIntent =
+    // /tax status and /tax forms are shortcut commands — skip intent routing for them
+    const isTaxShortcut = lowerText.startsWith("/tax status") || lowerText.startsWith("/tax forms");
+    const taxIntent = isTaxShortcut ? false : isTaxIntent(lowerText);
+    const taxDocIntent = isTaxShortcut ? false : (
       /\bprepare\b.*\btax/i.test(lowerText) ||
       /\bcomplete\b.*\btax/i.test(lowerText) ||
       /\bfile\b.*\btax/i.test(lowerText) ||
@@ -3948,7 +3950,7 @@ serve(async (req) => {
       /\bgenerate\b.*\btax\s+doc/i.test(lowerText) ||
       /\btax\s+preparation\b/i.test(lowerText) ||
       /\bturbotax\s+export\b/i.test(lowerText) ||
-      /\btax.*(20\d{2})/i.test(lowerText);
+      /\btax.*(20\d{2})/i.test(lowerText));
     const creditIntent =
       /\banalyze\b.*\bcredit\b/i.test(lowerText) ||
       /\bcredit strategy\b/i.test(lowerText) ||
