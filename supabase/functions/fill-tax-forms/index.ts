@@ -101,7 +101,7 @@ function getFieldMappings(formType: string): Record<string, string> {
   return mappings[formType] || {};
 }
 
-async function ensureStorageBucket(supabase: ReturnType<typeof createClient>, bucketName: string) {
+async function ensureStorageBucket(supabase: any, bucketName: string) {
   const { data: buckets } = await supabase.storage.listBuckets();
   const exists = buckets?.some((b: { name: string }) => b.name === bucketName);
   if (!exists) {
