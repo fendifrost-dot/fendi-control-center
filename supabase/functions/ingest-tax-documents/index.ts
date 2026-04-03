@@ -248,7 +248,7 @@ async function writeToTaxSupabase(
   return res.json();
 }
 
-Deno.serve(async (req: Request) => {
+serve(async (req: Request) => {
   if (req.method === 'OPTIONS') {
     return new Response('ok', { headers: corsHeaders });
   }
