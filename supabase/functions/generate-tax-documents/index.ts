@@ -182,6 +182,7 @@ serve(async (req) => {
 
       // Merge CC Tax data with ingestion results so Claude sees real document data
       const ingestionData = ingestionResults[String(year)] || null;
+      const ingestionIncome = Number(ingestionData?.aggregated_data?.total_income) || 0;
       const taxDataPayload = JSON.stringify({
         tax_year: year,
         workflow_status: workflowStatus,
@@ -191,6 +192,8 @@ serve(async (req) => {
         reconciliations,
         discrepancies,
         pl_report: plReport,
+        // CRITICAL: Verified income from analyzed documents — use as AGI if CC Tax data is empty
+        ingestion_income: ingestionIncome,
         // Ingestion results from actual Drive documents (1099s, W-2s, receipts)
         ingested_documents: ingestionData?.documents || [],
         ingestion_totals: ingestionData?.aggregated_data || null,
