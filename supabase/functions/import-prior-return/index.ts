@@ -1,5 +1,4 @@
 import { serve } from 'https://deno.land/std@0.168.0/http/server.ts';
-import { getAccessToken } from '../_shared/googleDriveUpload.ts';
 import { downloadFile as downloadDriveFile } from '../_shared/googleDriveRead.ts';
 
 const corsHeaders = {
@@ -238,9 +237,8 @@ Deno.serve(async (req: Request) => {
       console.log('[import-prior-return] Using provided PDF base64');
     } else {
       console.log(`[import-prior-return] Downloading from Drive: ${drive_file_id}`);
-      const accessToken = await getAccessToken();
-      const buffer = await downloadDriveFile(accessToken, drive_file_id, 'application/pdf');
-      base64Content = arrayBufferToBase64(buffer);
+      const result = await downloadDriveFile(drive_file_id, 'application/pdf');
+      base64Content = result.base64;
       console.log('[import-prior-return] Downloaded from Drive');
     }
 
