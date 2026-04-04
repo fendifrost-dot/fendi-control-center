@@ -304,44 +304,31 @@ serve(async (req: Request) => {
         allExtracted.push(extracted);
 
         await writeToTaxSupabase('documents', {
-          client_name,
           tax_year,
           file_name: file.name,
-          drive_file_id: file.id,
-          doc_type: extracted.doc_type,
-          classification: extracted.classification,
-          extracted_data: extracted.extracted_data,
-          processed_at: new Date().toISOString(),
+          type: extracted.doc_type,
+          source_reference: file.id,
         });
 
         const transactions: Record<string, unknown>[] = [];
 
         for (const income of extracted.extracted_data.income_items) {
           transactions.push({
-            client_name,
             tax_year,
-            type: 'income',
-            category: income.type,
-            source: income.source,
+            description: `${income.type}: ${income.source}`,
+            source: income.payer_name || income.source,
             amount: income.amount,
-            payer_name: income.payer_name || null,
-            payer_ein: income.payer_ein || null,
-            date: income.date || null,
-            source_document: file.name,
+            date: income.date || new Date().toISOString().split('T')[0],
           });
         }
 
         for (const expense of extracted.extracted_data.expense_items) {
           transactions.push({
-            client_name,
             tax_year,
-            type: 'expense',
-            category: expense.category,
-            source: expense.description,
-            amount: expense.amount,
-            payee: expense.payee || null,
-            date: expense.date || null,
-            source_document: file.name,
+            description: `${expense.category}: ${expense.description}`,
+            source: expense.payee || expense.description,
+            amount: -Math.abs(expense.amount),
+            date: expense.date || new Date().toISOString().split('T')[0],
           });
         }
 
@@ -374,14 +361,15 @@ serve(async (req: Request) => {
     );
 
     await writeToTaxSupabase('pl_reports', {
-      client_name,
       tax_year,
-      total_income: plSummary.total_income,
-      income_by_category: plSummary.income_by_category,
+      period: `${tax_year} Annual`,
+      gross_income: plSummary.total_income,
       total_expenses: plSummary.total_expenses,
-      expenses_by_category: plSummary.expenses_by_category,
-      net_income: plSummary.net_income,
-      documents_processed: processedFiles.length,
+      net_profit: plSummary.net_income,
+      category_breakdown: {
+        income_by_category: plSummary.income_by_category,
+        expenses_by_category: plSummary.expenses_by_category,
+      },
       generated_at: new Date().toISOString(),
     });
 
