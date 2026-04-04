@@ -246,19 +246,24 @@ export async function findClientTaxFolder(
 
   // Strategy 1: Try exact folder names within root (if root is set)
   if (cleanRoot) {
-    const candidateNames = [
+    // Year-specific patterns first (higher priority)
+    const yearSpecificNames = [
       nameUpper + " " + yearStr + " TAXES",
       firstName + " " + yearStr + " TAXES",
       nameUpper + " TAXES " + yearStr,
       firstName + " TAXES " + yearStr,
+    ];
+    // General patterns last (lower priority)
+    const generalNames = [
       firstName + " TAXES",
       nameUpper + " TAXES",
     ];
 
-    for (const candidate of candidateNames) {
+    // Try year-specific exact matches first
+    for (const candidate of yearSpecificNames) {
       const found = await findFolderInParent(cleanRoot, candidate);
       if (found) {
-        console.log("Found exact Drive folder: " + candidate);
+        console.log("Found year-specific Drive folder: " + candidate);
         return { folderId: found, folderName: candidate };
       }
     }
@@ -266,23 +271,68 @@ export async function findClientTaxFolder(
     // Strategy 2: List all subfolders and fuzzy match
     try {
       const subfolders = await listSubfolders(cleanRoot);
+
+      // Pass 1: folders matching firstName AND year (best match)
       for (const folder of subfolders) {
         const folderUpper = folder.name.toUpperCase();
         if (folderUpper.includes(firstName) && folderUpper.includes(yearStr)) {
-          console.log("Fuzzy matched Drive folder: " + folder.name);
+          console.log("Fuzzy matched year-specific Drive folder: " + folder.name);
           return { folderId: folder.id, folderName: folder.name };
         }
       }
+
+      // Pass 2: folders matching firstName+TAX but NOT year — always check for year subfolders
       for (const folder of subfolders) {
         const folderUpper = folder.name.toUpperCase();
-        if (folderUpper.includes(firstName) && folderUpper.includes("TAX")) {
+        if (folderUpper.includes(firstName) && folderUpper.includes("TAX") && !folderUpper.includes(yearStr)) {
+          // Look for year subfolder inside this general tax folder
           const yearFolder = await findFolderInParent(folder.id, yearStr);
           if (yearFolder) {
-            console.log("Found year subfolder inside " + folder.name);
+            console.log("Found year subfolder " + yearStr + " inside " + folder.name);
             return { folderId: yearFolder, folderName: folder.name + "/" + yearStr };
           }
-          console.log("Using general tax folder: " + folder.name);
+          // Also check for year-specific subfolders like "SAM 2022 TAXES"
+          try {
+            const innerFolders = await listSubfolders(folder.id);
+            for (const inner of innerFolders) {
+              const innerUpper = inner.name.toUpperCase();
+              if (innerUpper.includes(yearStr)) {
+                console.log("Found year-specific subfolder: " + inner.name + " inside " + folder.name);
+                return { folderId: inner.id, folderName: folder.name + "/" + inner.name };
+              }
+            }
+          } catch (innerErr) {
+            console.warn("Could not list inner subfolders: " + innerErr);
+          }
+          // No year subfolder found — fall back to general folder as last resort
+          console.log("No year subfolder found, using general tax folder: " + folder.name);
           return { folderId: folder.id, folderName: folder.name };
+        }
+      }
+
+      // Pass 3: Try exact match on general names (no year) and drill into year subfolders
+      for (const candidate of generalNames) {
+        const found = await findFolderInParent(cleanRoot, candidate);
+        if (found) {
+          const yearFolder = await findFolderInParent(found, yearStr);
+          if (yearFolder) {
+            console.log("Found year subfolder " + yearStr + " inside exact match " + candidate);
+            return { folderId: yearFolder, folderName: candidate + "/" + yearStr };
+          }
+          // Check for year-named subfolders
+          try {
+            const innerFolders = await listSubfolders(found);
+            for (const inner of innerFolders) {
+              if (inner.name.toUpperCase().includes(yearStr)) {
+                console.log("Found year subfolder: " + inner.name + " inside " + candidate);
+                return { folderId: inner.id, folderName: candidate + "/" + inner.name };
+              }
+            }
+          } catch (innerErr) {
+            console.warn("Could not list subfolders of " + candidate + ": " + innerErr);
+          }
+          console.log("No year subfolder, using general folder: " + candidate);
+          return { folderId: found, folderName: candidate };
         }
       }
     } catch (listErr) {
