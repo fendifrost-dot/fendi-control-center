@@ -26,11 +26,43 @@ IMPORTANT: The ingestion_income field contains verified income from analyzed doc
 
 Respond with valid JSON only. The json_summary MUST include form_1040.adjusted_gross_income as a real number based on the data provided. Always include a "filing_recommendation" key with at minimum { "method": "...", "agi": <number>, "steps": ["..."] }.`;
 
+/** Ingest response uses pl_summary (ingest-tax-documents); aggregated_data is legacy/alternate. */
+function extractIngestionIncome(ingestionData: Record<string, unknown> | null): number {
+  if (!ingestionData) return 0;
+  const pl = ingestionData.pl_summary;
+  if (pl && typeof pl === "object") {
+    const n = Number((pl as Record<string, unknown>).total_income);
+    if (Number.isFinite(n) && n > 0) return n;
+  }
+  const agg = ingestionData.aggregated_data;
+  if (agg && typeof agg === "object") {
+    const n = Number((agg as Record<string, unknown>).total_income);
+    if (Number.isFinite(n) && n > 0) return n;
+  }
+  const top = Number(ingestionData.total_income);
+  return Number.isFinite(top) && top > 0 ? top : 0;
+}
+
+function currentAgiFromJsonSummary(
+  jsonSummary: Record<string, unknown> | undefined,
+): unknown {
+  const f = jsonSummary?.form_1040;
+  if (f && typeof f === "object") {
+    return (f as Record<string, unknown>).adjusted_gross_income;
+  }
+  return undefined;
+}
+
 /** After Claude: if AGI is missing/zero, fall back to document ingestion total. */
 function normalizeTaxGenerationOutput(
   result: { json_summary: Record<string, unknown> },
   taxDataPayload: { ingestion_income?: number },
 ): void {
+  const currentAgi = currentAgiFromJsonSummary(result.json_summary);
+  console.log(
+    `AGI override check: ingestion_income=${taxDataPayload?.ingestion_income}, current AGI=${currentAgi}`,
+  );
+
   const ingestionIncome = Number(taxDataPayload?.ingestion_income) || 0;
   if (ingestionIncome <= 0) return;
 
@@ -59,28 +91,38 @@ function normalizeTaxGenerationOutput(
   };
 }
 
+/** Never throws — returns { error: string } on failure so ingestion + Claude still run. */
 async function fetchCCTaxData(action: string, taxYear?: number): Promise<any> {
-  const CC_TAX_URL = Deno.env.get("CC_TAX_URL");
-  const CC_TAX_KEY = Deno.env.get("CC_TAX_KEY");
-  if (!CC_TAX_URL) throw new Error("CC_TAX_URL is not configured");
-  if (!CC_TAX_KEY) throw new Error("CC_TAX_KEY is not configured");
+  try {
+    const CC_TAX_URL = Deno.env.get("CC_TAX_URL");
+    const CC_TAX_KEY = Deno.env.get("CC_TAX_KEY");
+    if (!CC_TAX_URL) {
+      return { error: "CC_TAX_URL is not configured" };
+    }
+    if (!CC_TAX_KEY) {
+      return { error: "CC_TAX_KEY is not configured" };
+    }
 
-  const resp = await fetch(`${CC_TAX_URL}/functions/v1/control-center-api`, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${CC_TAX_KEY}`,
-    },
-    body: JSON.stringify({ action, tax_year: taxYear }),
-  });
+    const resp = await fetch(`${CC_TAX_URL}/functions/v1/control-center-api`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${CC_TAX_KEY}`,
+      },
+      body: JSON.stringify({ action, tax_year: taxYear }),
+    });
 
-  if (!resp.ok) {
-    const detail = await resp.text();
-    throw new Error(
-      `CC Tax ${action} failed (${resp.status}): ${detail.slice(0, 500)}`
-    );
+    if (!resp.ok) {
+      const detail = await resp.text();
+      return {
+        error: `CC Tax ${action} failed (${resp.status}): ${detail.slice(0, 500)}`,
+      };
+    }
+    return await resp.json();
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    return { error: `CC Tax ${action} request failed: ${msg}` };
   }
-  return resp.json();
 }
 
 async function runTxfExport(
@@ -192,33 +234,27 @@ serve(async (req) => {
         discrepancies,
         plReport,
       ] = await Promise.all([
-        fetchCCTaxData("get_workflow_status", year).catch((e) => ({
-          error: e.message,
-        })),
-        fetchCCTaxData("get_year_config", year).catch((e) => ({
-          error: e.message,
-        })),
-        fetchCCTaxData("get_documents", year).catch((e) => ({
-          error: e.message,
-        })),
-        fetchCCTaxData("get_transactions", year).catch((e) => ({
-          error: e.message,
-        })),
-        fetchCCTaxData("get_reconciliations", year).catch((e) => ({
-          error: e.message,
-        })),
-        fetchCCTaxData("get_discrepancies", year).catch((e) => ({
-          error: e.message,
-        })),
-        fetchCCTaxData("get_pl_report", year).catch((e) => ({
-          error: e.message,
-        })),
+        fetchCCTaxData("get_workflow_status", year),
+        fetchCCTaxData("get_year_config", year),
+        fetchCCTaxData("get_documents", year),
+        fetchCCTaxData("get_transactions", year),
+        fetchCCTaxData("get_reconciliations", year),
+        fetchCCTaxData("get_discrepancies", year),
+        fetchCCTaxData("get_pl_report", year),
       ]);
 
       // Merge CC Tax data with ingestion results so Claude sees real document data
-      const ingestionData = ingestionResults[String(year)] || null;
-      const ingestionIncome =
-        Number(ingestionData?.aggregated_data?.total_income) || 0;
+      const ingestionData = (ingestionResults[String(year)] || null) as
+        | Record<string, unknown>
+        | null;
+      const ingestionIncome = extractIngestionIncome(ingestionData);
+      const ingestTotals =
+        (ingestionData?.aggregated_data && typeof ingestionData.aggregated_data === "object"
+          ? ingestionData.aggregated_data
+          : null) ??
+        (ingestionData?.pl_summary && typeof ingestionData.pl_summary === "object"
+          ? ingestionData.pl_summary
+          : null);
 
       const taxDataPayloadObj = {
         tax_year: year,
@@ -232,18 +268,33 @@ serve(async (req) => {
         // CRITICAL: Verified income from analyzed documents — use as AGI if CC Tax data is empty
         ingestion_income: ingestionIncome,
         // Ingestion results from actual Drive documents (1099s, W-2s, receipts)
-        ingested_documents: ingestionData?.documents || [],
-        ingestion_totals: ingestionData?.aggregated_data || null,
-        ingestion_pl: ingestionData?.aggregated_data || null,
+        ingested_documents: Array.isArray(ingestionData?.processed_files)
+          ? ingestionData.processed_files
+          : (ingestionData?.documents || []),
+        ingestion_totals: ingestTotals,
+        ingestion_pl: ingestTotals,
         ingestion_summary: ingestionData
           ? {
-            files_processed: ingestionData?.documents?.length || 0,
-            total_income: ingestionData?.aggregated_data?.total_income || 0,
-            total_expenses: ingestionData?.aggregated_data?.total_expenses || 0,
-            net_profit: ingestionData?.aggregated_data?.net_profit || 0,
-            document_types: (ingestionData?.documents || []).map((d: any) =>
-              d.doc_type || d.file_name
-            ),
+            files_processed: Number(ingestionData.files_processed) ||
+              (Array.isArray(ingestionData.processed_files)
+                ? ingestionData.processed_files.length
+                : 0),
+            total_income: extractIngestionIncome(ingestionData),
+            total_expenses:
+              ingestTotals && typeof ingestTotals === "object"
+                ? Number((ingestTotals as Record<string, unknown>).total_expenses) || 0
+                : 0,
+            net_profit:
+              ingestTotals && typeof ingestTotals === "object"
+                ? Number((ingestTotals as Record<string, unknown>).net_income) ||
+                  Number((ingestTotals as Record<string, unknown>).net_profit) ||
+                  0
+                : 0,
+            document_types: Array.isArray(ingestionData.processed_files)
+              ? (ingestionData.processed_files as { doc_type?: string; name?: string }[]).map(
+                (d) => d.doc_type || d.name || "unknown",
+              )
+              : [],
           }
           : null,
       };
