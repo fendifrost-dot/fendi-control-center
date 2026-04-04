@@ -318,7 +318,6 @@ serve(async (req: Request) => {
 
         for (const income of extracted.extracted_data.income_items) {
           transactions.push({
-            client_id: client_id || null,
             client_name,
             tax_year,
             type: 'income',
