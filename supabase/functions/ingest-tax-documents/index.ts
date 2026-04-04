@@ -361,14 +361,15 @@ serve(async (req: Request) => {
     );
 
     await writeToTaxSupabase('pl_reports', {
-      client_name,
       tax_year,
-      total_income: plSummary.total_income,
-      income_by_category: plSummary.income_by_category,
+      period: `${tax_year} Annual`,
+      gross_income: plSummary.total_income,
       total_expenses: plSummary.total_expenses,
-      expenses_by_category: plSummary.expenses_by_category,
-      net_income: plSummary.net_income,
-      documents_processed: processedFiles.length,
+      net_profit: plSummary.net_income,
+      category_breakdown: {
+        income_by_category: plSummary.income_by_category,
+        expenses_by_category: plSummary.expenses_by_category,
+      },
       generated_at: new Date().toISOString(),
     });
 
