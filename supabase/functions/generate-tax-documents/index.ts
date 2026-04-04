@@ -22,7 +22,42 @@ IMPORTANT: We are NOT filing taxes — only preparing documents so the client is
 
 CRITICAL: The "ingestion_income" field contains VERIFIED income extracted directly from analyzed tax documents (1099-K, W-2, etc.). If the CC Tax data (transactions, pl_report) is empty, shows errors, or shows $0, you MUST use ingestion_income as the adjusted_gross_income. NEVER return AGI=$0 when ingestion_income > 0.
 
+IMPORTANT: The ingestion_income field contains verified income from analyzed documents. If other income data is $0 or empty, use ingestion_income as the adjusted_gross_income.
+
 Respond with valid JSON only. The json_summary MUST include form_1040.adjusted_gross_income as a real number based on the data provided. Always include a "filing_recommendation" key with at minimum { "method": "...", "agi": <number>, "steps": ["..."] }.`;
+
+/** After Claude: if AGI is missing/zero, fall back to document ingestion total. */
+function normalizeTaxGenerationOutput(
+  result: { json_summary: Record<string, unknown> },
+  taxDataPayload: { ingestion_income?: number },
+): void {
+  const ingestionIncome = Number(taxDataPayload?.ingestion_income) || 0;
+  if (ingestionIncome <= 0) return;
+
+  const summary = result.json_summary as Record<string, unknown> | undefined;
+  if (!summary || typeof summary !== "object") return;
+
+  const form1040Raw = summary.form_1040;
+  const form1040 =
+    form1040Raw && typeof form1040Raw === "object"
+      ? (form1040Raw as Record<string, unknown>)
+      : {};
+
+  const agiRaw = form1040.adjusted_gross_income;
+  const agiNum = Number(agiRaw);
+  const missingOrZero =
+    agiRaw == null ||
+    agiRaw === "" ||
+    !Number.isFinite(agiNum) ||
+    agiNum === 0;
+
+  if (!missingOrZero) return;
+
+  summary.form_1040 = {
+    ...form1040,
+    adjusted_gross_income: ingestionIncome,
+  };
+}
 
 async function fetchCCTaxData(action: string, taxYear?: number): Promise<any> {
   const CC_TAX_URL = Deno.env.get("CC_TAX_URL");
@@ -182,8 +217,10 @@ serve(async (req) => {
 
       // Merge CC Tax data with ingestion results so Claude sees real document data
       const ingestionData = ingestionResults[String(year)] || null;
-      const ingestionIncome = Number(ingestionData?.aggregated_data?.total_income) || 0;
-      const taxDataPayload = JSON.stringify({
+      const ingestionIncome =
+        Number(ingestionData?.aggregated_data?.total_income) || 0;
+
+      const taxDataPayloadObj = {
         tax_year: year,
         workflow_status: workflowStatus,
         year_config: yearConfig,
@@ -198,18 +235,24 @@ serve(async (req) => {
         ingested_documents: ingestionData?.documents || [],
         ingestion_totals: ingestionData?.aggregated_data || null,
         ingestion_pl: ingestionData?.aggregated_data || null,
-        ingestion_summary: ingestionData ? {
-          files_processed: ingestionData?.documents?.length || 0,
-          total_income: ingestionData?.aggregated_data?.total_income || 0,
-          total_expenses: ingestionData?.aggregated_data?.total_expenses || 0,
-          net_profit: ingestionData?.aggregated_data?.net_profit || 0,
-          document_types: (ingestionData?.documents || []).map((d: any) => d.doc_type || d.file_name),
-        } : null,
-      });
+        ingestion_summary: ingestionData
+          ? {
+            files_processed: ingestionData?.documents?.length || 0,
+            total_income: ingestionData?.aggregated_data?.total_income || 0,
+            total_expenses: ingestionData?.aggregated_data?.total_expenses || 0,
+            net_profit: ingestionData?.aggregated_data?.net_profit || 0,
+            document_types: (ingestionData?.documents || []).map((d: any) =>
+              d.doc_type || d.file_name
+            ),
+          }
+          : null,
+      };
+
+      const taxDataPayload = JSON.stringify(taxDataPayloadObj);
 
       const userPrompt = `Generate all three tax document outputs for tax year ${year}. Be concise.
 
-CRITICAL: ingestion_totals contains the REAL aggregated income from analyzed documents. Use ingestion_totals.total_income as the PRIMARY source for total_income and AGI. Do NOT return AGI=$0 if ingestion_totals.total_income > 0.
+CRITICAL: ingestion_income and ingestion_totals contain the REAL aggregated income from analyzed documents. Use them as the PRIMARY source for total_income and AGI. Do NOT return AGI=$0 if ingestion_income > 0 or ingestion_totals.total_income > 0.
 
 IMPORTANT: The "ingested_documents" section contains data extracted directly from the client's actual tax documents (1099-K forms, W-2s, receipts, etc.) found in their Google Drive folder. Use this data as the PRIMARY source of truth for income figures, especially if the CC Tax data (transactions, pl_report) is empty or shows errors.
 
@@ -226,6 +269,8 @@ ${taxDataPayload}`;
         TAX_SYSTEM_PROMPT,
         userPrompt,
         { required: ["json_summary", "worksheet"] }, 8192);
+
+      normalizeTaxGenerationOutput(generated, taxDataPayloadObj);
 
       // Provide sensible default for filing_recommendation if Claude didn't return it
       const summary = generated.json_summary as Record<string, any>;
