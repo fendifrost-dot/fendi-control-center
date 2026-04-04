@@ -333,7 +333,6 @@ serve(async (req: Request) => {
 
         for (const expense of extracted.extracted_data.expense_items) {
           transactions.push({
-            client_id: client_id || null,
             client_name,
             tax_year,
             type: 'expense',
