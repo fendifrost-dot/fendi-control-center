@@ -234,7 +234,14 @@ ${taxDataPayload}`;
         string,
         any
       >;
-      const agi = Number(form1040.adjusted_gross_income) || 0;
+      // AGI fallback: if Claude returned $0 but ingestion found real income, override
+      let agi = Number(form1040.adjusted_gross_income) || 0;
+      if (agi === 0 && ingestionIncome > 0) {
+        console.log(`[generate] AGI was $0 but ingestion_income is $${ingestionIncome} — overriding AGI`);
+        agi = ingestionIncome;
+        form1040.adjusted_gross_income = ingestionIncome;
+        form1040.total_income = ingestionIncome;
+      }
 
       const recommendation = (generated.filing_recommendation || {
         method: agi <= 84000 ? "IRS Free File / TurboTax import (TXF)" : "Paper filing with IRS PDF forms",
