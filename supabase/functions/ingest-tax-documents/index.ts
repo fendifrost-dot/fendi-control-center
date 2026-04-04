@@ -314,16 +314,11 @@ serve(async (req: Request) => {
 
         for (const income of extracted.extracted_data.income_items) {
           transactions.push({
-            client_name,
             tax_year,
-            type: 'income',
-            category: income.type,
-            source: income.source,
+            description: `${income.type}: ${income.source}`,
+            source: income.payer_name || income.source,
             amount: income.amount,
-            payer_name: income.payer_name || null,
-            payer_ein: income.payer_ein || null,
-            date: income.date || null,
-            source_document: file.name,
+            date: income.date || new Date().toISOString().split('T')[0],
           });
         }
 
