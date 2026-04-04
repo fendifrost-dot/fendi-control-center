@@ -345,16 +345,39 @@ export async function findClientTaxFolder(
   // Strategy 3: Global Drive API search (works without DRIVE_FOLDER_ID)
   const globalQueries = [
     firstName + " " + yearStr + " TAXES",
-    firstName + " TAXES",
     nameUpper + " " + yearStr,
+    firstName + " TAXES",
   ];
 
   for (const query of globalQueries) {
     const searchResults = await searchFolders(query);
+    // Prefer year-specific matches first
     for (const result of searchResults) {
       const nameUp = result.name.toUpperCase();
-      if (nameUp.includes(firstName) && (nameUp.includes(yearStr) || nameUp.includes("TAX"))) {
-        console.log("Found folder via global search: " + result.name);
+      if (nameUp.includes(firstName) && nameUp.includes(yearStr)) {
+        console.log("Found year-specific folder via global search: " + result.name);
+        return { folderId: result.id, folderName: result.name };
+      }
+    }
+    // Then check general tax folders for year subfolders
+    for (const result of searchResults) {
+      const nameUp = result.name.toUpperCase();
+      if (nameUp.includes(firstName) && nameUp.includes("TAX") && !nameUp.includes(yearStr)) {
+        const yearFolder = await findFolderInParent(result.id, yearStr);
+        if (yearFolder) {
+          console.log("Found year subfolder " + yearStr + " inside global match " + result.name);
+          return { folderId: yearFolder, folderName: result.name + "/" + yearStr };
+        }
+        try {
+          const innerFolders = await listSubfolders(result.id);
+          for (const inner of innerFolders) {
+            if (inner.name.toUpperCase().includes(yearStr)) {
+              console.log("Found year subfolder: " + inner.name + " via global search in " + result.name);
+              return { folderId: inner.id, folderName: result.name + "/" + inner.name };
+            }
+          }
+        } catch (_) { /* ignore */ }
+        console.log("No year subfolder, using global match: " + result.name);
         return { folderId: result.id, folderName: result.name };
       }
     }
