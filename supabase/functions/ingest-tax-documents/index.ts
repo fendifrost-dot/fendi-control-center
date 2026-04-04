@@ -304,14 +304,10 @@ serve(async (req: Request) => {
         allExtracted.push(extracted);
 
         await writeToTaxSupabase('documents', {
-          client_name,
           tax_year,
           file_name: file.name,
-          drive_file_id: file.id,
-          doc_type: extracted.doc_type,
-          classification: extracted.classification,
-          extracted_data: extracted.extracted_data,
-          processed_at: new Date().toISOString(),
+          type: extracted.doc_type,
+          source_reference: file.id,
         });
 
         const transactions: Record<string, unknown>[] = [];
