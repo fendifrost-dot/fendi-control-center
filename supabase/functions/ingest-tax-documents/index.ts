@@ -304,7 +304,6 @@ serve(async (req: Request) => {
         allExtracted.push(extracted);
 
         await writeToTaxSupabase('documents', {
-          client_id: client_id || null,
           client_name,
           tax_year,
           file_name: file.name,
@@ -319,7 +318,6 @@ serve(async (req: Request) => {
 
         for (const income of extracted.extracted_data.income_items) {
           transactions.push({
-            client_id: client_id || null,
             client_name,
             tax_year,
             type: 'income',
@@ -335,7 +333,6 @@ serve(async (req: Request) => {
 
         for (const expense of extracted.extracted_data.expense_items) {
           transactions.push({
-            client_id: client_id || null,
             client_name,
             tax_year,
             type: 'expense',
@@ -377,7 +374,6 @@ serve(async (req: Request) => {
     );
 
     await writeToTaxSupabase('pl_reports', {
-      client_id: client_id || null,
       client_name,
       tax_year,
       total_income: plSummary.total_income,
