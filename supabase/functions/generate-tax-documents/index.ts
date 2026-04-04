@@ -193,6 +193,13 @@ serve(async (req) => {
         ingested_documents: ingestionData?.documents || [],
         ingestion_totals: ingestionData?.aggregated_data || null,
         ingestion_pl: ingestionData?.aggregated_data || null,
+        ingestion_summary: ingestionData ? {
+          files_processed: ingestionData?.documents?.length || 0,
+          total_income: ingestionData?.aggregated_data?.total_income || 0,
+          total_expenses: ingestionData?.aggregated_data?.total_expenses || 0,
+          net_profit: ingestionData?.aggregated_data?.net_profit || 0,
+          document_types: (ingestionData?.documents || []).map((d: any) => d.doc_type || d.file_name),
+        } : null,
       });
 
       const userPrompt = `Generate all three tax document outputs for tax year ${year}. Be concise.
