@@ -1,5 +1,4 @@
 import { serve } from 'https://deno.land/std@0.168.0/http/server.ts';
-import { getAccessToken } from '../_shared/googleDriveUpload.ts';
 import { downloadFile as downloadDriveFile } from '../_shared/googleDriveRead.ts';
 
 const corsHeaders = {
