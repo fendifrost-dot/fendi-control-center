@@ -20,6 +20,8 @@ IMPORTANT: We are NOT filing taxes — only preparing documents so the client is
 2. Worksheet — clean printable text.
 3. Filing method recommendation based on AGI.
 
+CRITICAL: The "ingestion_income" field contains VERIFIED income extracted directly from analyzed tax documents (1099-K, W-2, etc.). If the CC Tax data (transactions, pl_report) is empty, shows errors, or shows $0, you MUST use ingestion_income as the adjusted_gross_income. NEVER return AGI=$0 when ingestion_income > 0.
+
 Respond with valid JSON only. The json_summary MUST include form_1040.adjusted_gross_income as a real number based on the data provided. Always include a "filing_recommendation" key with at minimum { "method": "...", "agi": <number>, "steps": ["..."] }.`;
 
 async function fetchCCTaxData(action: string, taxYear?: number): Promise<any> {
