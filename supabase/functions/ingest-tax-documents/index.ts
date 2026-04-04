@@ -374,7 +374,6 @@ serve(async (req: Request) => {
     );
 
     await writeToTaxSupabase('pl_reports', {
-      client_id: client_id || null,
       client_name,
       tax_year,
       total_income: plSummary.total_income,
