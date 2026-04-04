@@ -347,9 +347,9 @@ Deno.serve(async (req: Request) => {
 
       // Try to find the client's tax folder for upload
       const { findClientTaxFolder } = await import('../_shared/googleDriveRead.ts');
-      const folderId = await findClientTaxFolder(accessToken, txfData.client_name, txfData.tax_year);
+      const folderResult = await findClientTaxFolder(txfData.client_name, txfData.tax_year);
 
-      driveUrl = await uploadToDrive(accessToken, fileName, txfContent, folderId || undefined);
+      driveUrl = await uploadToDrive(accessToken, fileName, txfContent, folderResult?.folderId || undefined);
       console.log(`[export-txf] Uploaded to Drive: ${driveUrl}`);
     } catch (err) {
       console.error(`[export-txf] Drive upload failed: ${err instanceof Error ? err.message : err}`);
