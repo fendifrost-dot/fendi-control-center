@@ -20,7 +20,7 @@ IMPORTANT: We are NOT filing taxes — only preparing documents so the client is
 2. Worksheet — clean printable text.
 3. Filing method recommendation based on AGI.
 
-Respond with valid JSON only. Always include a "filing_recommendation" key with at minimum { "method": "...", "agi": <number>, "steps": ["..."] }.`;
+Respond with valid JSON only. The json_summary MUST include form_1040.adjusted_gross_income as a real number based on the data provided. Always include a "filing_recommendation" key with at minimum { "method": "...", "agi": <number>, "steps": ["..."] }.`;
 
 async function fetchCCTaxData(action: string, taxYear?: number): Promise<any> {
   const CC_TAX_URL = Deno.env.get("CC_TAX_URL");
@@ -190,12 +190,14 @@ serve(async (req) => {
         discrepancies,
         pl_report: plReport,
         // Ingestion results from actual Drive documents (1099s, W-2s, receipts)
-        ingested_documents: ingestionData?.processed_files || [],
-        ingestion_totals: ingestionData?.totals || null,
-        ingestion_pl: ingestionData?.pl_summary || null,
+        ingested_documents: ingestionData?.documents || [],
+        ingestion_totals: ingestionData?.aggregated_data || null,
+        ingestion_pl: ingestionData?.aggregated_data || null,
       });
 
       const userPrompt = `Generate all three tax document outputs for tax year ${year}. Be concise.
+
+CRITICAL: ingestion_totals contains the REAL aggregated income from analyzed documents. Use ingestion_totals.total_income as the PRIMARY source for total_income and AGI. Do NOT return AGI=$0 if ingestion_totals.total_income > 0.
 
 IMPORTANT: The "ingested_documents" section contains data extracted directly from the client's actual tax documents (1099-K forms, W-2s, receipts, etc.) found in their Google Drive folder. Use this data as the PRIMARY source of truth for income figures, especially if the CC Tax data (transactions, pl_report) is empty or shows errors.
 
@@ -211,9 +213,7 @@ ${taxDataPayload}`;
       }>(
         TAX_SYSTEM_PROMPT,
         userPrompt,
-        { required: ["json_summary", "worksheet"] },
-        4096
-      );
+        { required: ["json_summary", "worksheet"] }, 8192);
 
       // Provide sensible default for filing_recommendation if Claude didn't return it
       const summary = generated.json_summary as Record<string, any>;
