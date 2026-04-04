@@ -178,6 +178,8 @@ serve(async (req) => {
         })),
       ]);
 
+      // Merge CC Tax data with ingestion results so Claude sees real document data
+      const ingestionData = ingestionResults[String(year)] || null;
       const taxDataPayload = JSON.stringify({
         tax_year: year,
         workflow_status: workflowStatus,
@@ -187,9 +189,19 @@ serve(async (req) => {
         reconciliations,
         discrepancies,
         pl_report: plReport,
+        // Ingestion results from actual Drive documents (1099s, W-2s, receipts)
+        ingested_documents: ingestionData?.processed_files || [],
+        ingestion_totals: ingestionData?.totals || null,
+        ingestion_pl: ingestionData?.pl_summary || null,
       });
 
-      const userPrompt = `Generate all three tax document outputs for tax year ${year}. Be concise.\n\nHere is the tax data:\n\n${taxDataPayload}`;
+      const userPrompt = `Generate all three tax document outputs for tax year ${year}. Be concise.
+
+IMPORTANT: The "ingested_documents" section contains data extracted directly from the client's actual tax documents (1099-K forms, W-2s, receipts, etc.) found in their Google Drive folder. Use this data as the PRIMARY source of truth for income figures, especially if the CC Tax data (transactions, pl_report) is empty or shows errors.
+
+Here is the tax data:
+
+${taxDataPayload}`;
 
       // Only require json_summary and worksheet — filing_recommendation is optional
       const generated = await callClaudeJSON<{
