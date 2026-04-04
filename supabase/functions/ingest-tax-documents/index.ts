@@ -324,15 +324,11 @@ serve(async (req: Request) => {
 
         for (const expense of extracted.extracted_data.expense_items) {
           transactions.push({
-            client_name,
             tax_year,
-            type: 'expense',
-            category: expense.category,
-            source: expense.description,
-            amount: expense.amount,
-            payee: expense.payee || null,
-            date: expense.date || null,
-            source_document: file.name,
+            description: `${expense.category}: ${expense.description}`,
+            source: expense.payee || expense.description,
+            amount: -Math.abs(expense.amount),
+            date: expense.date || new Date().toISOString().split('T')[0],
           });
         }
 
