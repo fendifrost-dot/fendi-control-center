@@ -304,7 +304,6 @@ serve(async (req: Request) => {
         allExtracted.push(extracted);
 
         await writeToTaxSupabase('documents', {
-          client_id: client_id || null,
           client_name,
           tax_year,
           file_name: file.name,
