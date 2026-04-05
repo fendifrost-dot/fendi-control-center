@@ -204,7 +204,7 @@ export default function YearWorkspacePage() {
       const parsed = JSON.parse(analyzedJson) as Record<string, unknown>;
       const { error } = await supabase
         .from("tax_returns")
-        .update({ analyzed_data: parsed, updated_at: new Date().toISOString() })
+        .update({ analyzed_data: parsed, updated_at: new Date().toISOString() } as any)
         .eq("id", taxReturnId);
       if (error) throw error;
       toast({ title: "Analysis saved" });
