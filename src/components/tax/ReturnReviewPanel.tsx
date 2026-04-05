@@ -16,8 +16,10 @@ import { Textarea } from "@/components/ui/textarea";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Loader2, AlertTriangle, FileDown } from "lucide-react";
 import { useToast } from "@/hooks/use-toast";
+import type { Database, Json } from "@/integrations/supabase/types";
 
 type FormRow = { id: string; form_type: string; pdf_url: string | null };
+type TaxReturnUpdate = Database["public"]["Tables"]["tax_returns"]["Update"];
 
 function num(v: string): number | undefined {
   const n = parseFloat(v);
@@ -127,8 +129,13 @@ export function ReturnReviewPanel({
     if (!taxReturnId) return;
     setSaving(true);
     try {
-      const patch = summaryToRowPatch(summary, filingRec);
-      const { error } = await supabase.from("tax_returns").update(patch as any).eq("id", taxReturnId);
+      const raw = summaryToRowPatch(summary, filingRec);
+      const patch: TaxReturnUpdate = {
+        ...raw,
+        json_summary: raw.json_summary as Json,
+        filing_recommendation: raw.filing_recommendation as Json,
+      };
+      const { error } = await supabase.from("tax_returns").update(patch).eq("id", taxReturnId);
       if (error) throw error;
       toast({ title: "Return saved" });
       await onRefresh();

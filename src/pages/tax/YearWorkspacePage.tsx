@@ -20,12 +20,9 @@ import { useToast } from "@/hooks/use-toast";
 import type { Database } from "@/integrations/supabase/types";
 import { ReturnReviewPanel } from "@/components/tax/ReturnReviewPanel";
 
-/** Extended doc row — includes columns added by migration that may not yet be in generated types. */
-type DocRow = Database["public"]["Tables"]["documents"]["Row"] & {
-  storage_object_path?: string | null;
-  tax_year?: number | null;
-  source?: string | null;
-};
+type DocRow = Database["public"]["Tables"]["documents"]["Row"];
+type DocInsert = Database["public"]["Tables"]["documents"]["Insert"];
+type TaxReturnUpdate = Database["public"]["Tables"]["tax_returns"]["Update"];
 
 /** Path in `tax-source-documents` for workspace uploads — not the same as Google `drive_file_id`. */
 function taxUploadStoragePath(d: DocRow): string | null {
@@ -64,14 +61,15 @@ export default function YearWorkspacePage() {
 
   const loadDocs = useCallback(async () => {
     if (!clientId || !Number.isFinite(year)) return;
-    const q = supabase
+    const { data } = await supabase
       .from("documents")
       .select("*")
       .eq("client_id", clientId)
+      .eq("tax_year", year)
+      .eq("source", "upload")
       .eq("is_deleted", false)
-      .order("created_at", { ascending: false }) as any;
-    const { data } = await q.eq("tax_year", year).eq("source", "upload");
-    setDocs((data as unknown as DocRow[]) ?? []);
+      .order("created_at", { ascending: false });
+    setDocs((data as DocRow[]) ?? []);
   }, [clientId, year]);
 
   const loadTaxReturn = useCallback(async () => {
@@ -138,20 +136,21 @@ export default function YearWorkspacePage() {
         });
         if (upErr) throw upErr;
 
-        const { error: insErr } = await supabase.from("documents").insert({
+        const row: DocInsert = {
           client_id: clientId,
           file_name: file.name,
           mime_type: file.type || "application/octet-stream",
           original_mime_type: file.type || "application/octet-stream",
           processed_mime_type: file.type || "application/pdf",
           sha256: hash,
-          drive_file_id: `upload-${crypto.randomUUID()}`,
+          drive_file_id: null,
           drive_modified_time: new Date().toISOString(),
           tax_year: year,
           storage_object_path: path,
           source: "upload",
           status: "pending",
-        } as any);
+        };
+        const { error: insErr } = await supabase.from("documents").insert(row);
         if (insErr) throw insErr;
       }
       toast({ title: "Upload complete" });
@@ -217,10 +216,8 @@ export default function YearWorkspacePage() {
     setSavingAnalysis(true);
     try {
       const parsed = JSON.parse(analyzedJson) as Record<string, unknown>;
-      const { error } = await supabase
-        .from("tax_returns")
-        .update({ analyzed_data: parsed, updated_at: new Date().toISOString() } as any)
-        .eq("id", taxReturnId);
+      const upd: TaxReturnUpdate = { analyzed_data: parsed, updated_at: new Date().toISOString() };
+      const { error } = await supabase.from("tax_returns").update(upd).eq("id", taxReturnId);
       if (error) throw error;
       toast({ title: "Analysis saved" });
       await loadTaxReturn();
@@ -240,10 +237,8 @@ export default function YearWorkspacePage() {
     setSavingSettings(true);
     try {
       const parsed = JSON.parse(settingsJson) as Record<string, unknown>;
-      const { error } = await supabase
-        .from("tax_returns")
-        .update({ workspace_settings: parsed, updated_at: new Date().toISOString() } as any)
-        .eq("id", taxReturnId);
+      const upd: TaxReturnUpdate = { workspace_settings: parsed, updated_at: new Date().toISOString() };
+      const { error } = await supabase.from("tax_returns").update(upd).eq("id", taxReturnId);
       if (error) throw error;
       toast({ title: "Settings saved" });
     } catch (e) {
