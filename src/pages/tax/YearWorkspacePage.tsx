@@ -20,7 +20,12 @@ import { useToast } from "@/hooks/use-toast";
 import type { Database } from "@/integrations/supabase/types";
 import { ReturnReviewPanel } from "@/components/tax/ReturnReviewPanel";
 
-type DocRow = Database["public"]["Tables"]["documents"]["Row"];
+/** Extended doc row — includes columns added by migration that may not yet be in generated types. */
+type DocRow = Database["public"]["Tables"]["documents"]["Row"] & {
+  storage_object_path?: string | null;
+  tax_year?: number | null;
+  source?: string | null;
+};
 
 /** Path in `tax-source-documents` for workspace uploads — not the same as Google `drive_file_id`. */
 function taxUploadStoragePath(d: DocRow): string | null {
@@ -59,15 +64,14 @@ export default function YearWorkspacePage() {
 
   const loadDocs = useCallback(async () => {
     if (!clientId || !Number.isFinite(year)) return;
-    const { data } = await supabase
+    const q = supabase
       .from("documents")
       .select("*")
       .eq("client_id", clientId)
-      .eq("tax_year", year)
-      .eq("source", "upload")
       .eq("is_deleted", false)
-      .order("created_at", { ascending: false });
-    setDocs((data as DocRow[]) ?? []);
+      .order("created_at", { ascending: false }) as any;
+    const { data } = await q.eq("tax_year", year).eq("source", "upload");
+    setDocs((data as unknown as DocRow[]) ?? []);
   }, [clientId, year]);
 
   const loadTaxReturn = useCallback(async () => {
@@ -141,13 +145,13 @@ export default function YearWorkspacePage() {
           original_mime_type: file.type || "application/octet-stream",
           processed_mime_type: file.type || "application/pdf",
           sha256: hash,
-          drive_file_id: null,
+          drive_file_id: `upload-${crypto.randomUUID()}`,
           drive_modified_time: new Date().toISOString(),
           tax_year: year,
           storage_object_path: path,
           source: "upload",
           status: "pending",
-        });
+        } as any);
         if (insErr) throw insErr;
       }
       toast({ title: "Upload complete" });
