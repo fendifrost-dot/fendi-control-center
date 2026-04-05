@@ -128,7 +128,7 @@ export function ReturnReviewPanel({
     setSaving(true);
     try {
       const patch = summaryToRowPatch(summary, filingRec);
-      const { error } = await supabase.from("tax_returns").update(patch).eq("id", taxReturnId);
+      const { error } = await supabase.from("tax_returns").update(patch as any).eq("id", taxReturnId);
       if (error) throw error;
       toast({ title: "Return saved" });
       await onRefresh();

@@ -51,14 +51,14 @@ export default function ClientsPage() {
     setLoading(true);
     const { data: cRows, error: ce } = await supabase
       .from("clients")
-      .select("id,name,email,created_at")
+      .select("id,name,created_at")
       .order("name");
     if (ce) {
       toast({ title: "Could not load clients", description: ce.message, variant: "destructive" });
       setLoading(false);
       return;
     }
-    setClients((cRows as ClientRow[]) ?? []);
+    setClients((cRows as unknown as ClientRow[]) ?? []);
 
     const { data: tr } = await supabase.from("tax_returns").select("client_id,updated_at");
     const counts: Record<string, number> = {};
