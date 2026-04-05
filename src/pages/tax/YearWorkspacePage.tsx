@@ -133,13 +133,10 @@ export default function YearWorkspacePage() {
           original_mime_type: file.type || "application/octet-stream",
           processed_mime_type: file.type || "application/pdf",
           sha256: hash,
-          drive_file_id: null,
+          drive_file_id: path,
           drive_modified_time: new Date().toISOString(),
-          tax_year: year,
-          storage_object_path: path,
-          source: "upload",
           status: "pending",
-        });
+        } as any);
         if (insErr) throw insErr;
       }
       toast({ title: "Upload complete" });
