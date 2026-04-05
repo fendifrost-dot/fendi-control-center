@@ -7,7 +7,7 @@ import { fetchCreditGuardian } from "../_shared/creditGuardian.ts";
 import { getTaxReturn, listTaxReturns, getFormInstances } from "../_shared/taxReturns.ts";
 
 const BOT_TOKEN = Deno.env.get("FendiAIbot")!;
-const CHAT_ID = Deno.env.get("TELEGRAM_CHAT_ID")!;
+const CHAT_ID = Deno.env.get("TELEGRAM_CHAT_ID") ?? "";
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
 const SUPABASE_SERVICE_ROLE_KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
 const GEMINI_KEY = Deno.env.get("Frost_Gemini")!;
@@ -3290,17 +3290,203 @@ async function handleExplainMore(jobId: string): Promise<string> {
 }
 
 // âââ Main Webhook Handler âââââââââââââââââââââââââââââââââââââââ
+
+const TELEGRAM_SECRET_HEADER = "x-telegram-bot-api-secret-token";
+
+function timingSafeEqualString(a: string, b: string): boolean {
+  if (!a || !b) return false;
+  const enc = new TextEncoder();
+  const aBytes = enc.encode(a);
+  const bBytes = enc.encode(b);
+  if (aBytes.length !== bBytes.length) return false;
+  let diff = 0;
+  for (let i = 0; i < aBytes.length; i++) diff |= aBytes[i]! ^ bBytes[i]!;
+  return diff === 0;
+}
+
+function coarseIpHint(xff: string | null): string | null {
+  if (!xff) return null;
+  const first = xff.split(",")[0]?.trim();
+  if (!first) return null;
+  const m = first.match(/^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.\d{1,3}$/);
+  if (m) return `${m[1]}.${m[2]}.${m[3]}.x`;
+  if (first.includes(":")) return "ipv6";
+  return "opaque";
+}
+
+function logTelegramSecurityEvent(payload: Record<string, unknown>): void {
+  console.log(JSON.stringify({ source: "telegram-webhook", ...payload }));
+}
+
+function chatIdFromUpdate(update: Record<string, unknown>): number | null {
+  const readChatId = (obj: unknown): number | null => {
+    if (!obj || typeof obj !== "object") return null;
+    const c = (obj as { chat?: unknown }).chat;
+    if (!c || typeof c !== "object") return null;
+    const id = (c as { id?: unknown }).id;
+    return typeof id === "number" ? id : null;
+  };
+  const cq = update.callback_query;
+  if (cq && typeof cq === "object") {
+    const fromCb = readChatId((cq as { message?: unknown }).message);
+    if (fromCb != null) return fromCb;
+  }
+  for (const key of ["message", "edited_message", "channel_post"] as const) {
+    const v = update[key];
+    if (v) {
+      const id = readChatId(v);
+      if (id != null) return id;
+    }
+  }
+  return null;
+}
+
+function telegramUpdateType(update: Record<string, unknown>): string {
+  if (update.callback_query) return "callback_query";
+  if (update.edited_message) return "edited_message";
+  if (update.channel_post) return "channel_post";
+  if (update.message) return "message";
+  return "other";
+}
+
+function telegramFromId(update: Record<string, unknown>): number | null {
+  const readFrom = (obj: unknown): number | null => {
+    if (!obj || typeof obj !== "object") return null;
+    const f = (obj as { from?: unknown }).from;
+    if (!f || typeof f !== "object") return null;
+    const id = (f as { id?: unknown }).id;
+    return typeof id === "number" ? id : null;
+  };
+  const cq = update.callback_query;
+  if (cq && typeof cq === "object") {
+    const id = readFrom(cq);
+    if (id != null) return id;
+  }
+  for (const key of ["message", "edited_message", "channel_post"] as const) {
+    const v = update[key];
+    const id = readFrom(v);
+    if (id != null) return id;
+  }
+  return null;
+}
+
+function firstSlashCommand(text: unknown): string | null {
+  if (typeof text !== "string") return null;
+  const m = text.trim().match(/^\/[a-zA-Z0-9_]+/);
+  return m ? m[0]!.toLowerCase() : null;
+}
+
+function logTelegramWebhookAccepted(update: Record<string, unknown>, updateId: number): void {
+  const msg = update.message as { text?: string } | undefined;
+  const text = msg?.text;
+  const payload: Record<string, unknown> = {
+    event: "telegram_webhook_received",
+    update_id: updateId,
+    update_type: telegramUpdateType(update),
+    chat_id: "allowed",
+    from_id: telegramFromId(update),
+    command: firstSlashCommand(text),
+    text_length: typeof text === "string" ? text.length : null,
+    correlation_id: `tg_${updateId}`,
+    status: "accepted",
+    at: new Date().toISOString(),
+  };
+  if (Deno.env.get("TELEGRAM_WEBHOOK_DEBUG_LOG") === "1" && typeof text === "string" && text.length > 0) {
+    payload.debug_text_excerpt = text.slice(0, 80);
+  }
+  console.log(JSON.stringify(payload));
+}
+
 serve(async (req) => {
+  if (req.method !== "POST") {
+    return new Response("Method Not Allowed", { status: 405, headers: { Allow: "POST" } });
+  }
+
+  const expectedSecret = Deno.env.get("TELEGRAM_WEBHOOK_SECRET_TOKEN") ?? "";
+  const providedSecret = req.headers.get(TELEGRAM_SECRET_HEADER) ?? "";
+
+  if (!expectedSecret || !timingSafeEqualString(providedSecret, expectedSecret)) {
+    logTelegramSecurityEvent({
+      event: "telegram_webhook_denied",
+      reason: "invalid_secret_token",
+      has_secret_header: providedSecret.length > 0,
+      method: req.method,
+      user_agent: req.headers.get("user-agent"),
+      ip_hint: coarseIpHint(req.headers.get("x-forwarded-for")),
+    });
+    return new Response("Forbidden", { status: 403 });
+  }
+
+  let update: Record<string, unknown>;
   try {
-    const update = await req.json();
-    console.log("ð¨ Update:", JSON.stringify(update).slice(0, 500));
+    update = await req.json() as Record<string, unknown>;
+  } catch {
+    logTelegramSecurityEvent({
+      event: "telegram_webhook_denied",
+      reason: "bad_json_after_valid_secret",
+      method: req.method,
+      user_agent: req.headers.get("user-agent"),
+      ip_hint: coarseIpHint(req.headers.get("x-forwarded-for")),
+    });
+    return new Response("Bad Request", { status: 400 });
+  }
+
+  const updateId = typeof update.update_id === "number" ? update.update_id : null;
+  const resolvedChatId = chatIdFromUpdate(update);
+
+  if (!CHAT_ID || String(resolvedChatId ?? "") !== String(CHAT_ID)) {
+    logTelegramSecurityEvent({
+      event: "telegram_webhook_denied",
+      reason: "forbidden_chat_not_allowed",
+      method: req.method,
+      update_id: updateId,
+      chat_id: resolvedChatId != null ? String(resolvedChatId) : null,
+      user_agent: req.headers.get("user-agent"),
+      ip_hint: coarseIpHint(req.headers.get("x-forwarded-for")),
+    });
+    return new Response("Forbidden", { status: 403 });
+  }
+
+  if (updateId === null) {
+    logTelegramSecurityEvent({
+      event: "telegram_webhook_denied",
+      reason: "missing_update_id",
+      method: req.method,
+      user_agent: req.headers.get("user-agent"),
+      ip_hint: coarseIpHint(req.headers.get("x-forwarded-for")),
+    });
+    return new Response("Bad Request", { status: 400 });
+  }
+
+  const { error: idemError } = await supabase
+    .from("telegram_webhook_processed_updates")
+    .insert({ update_id: updateId });
+
+  if (idemError?.code === "23505") {
+    console.log(JSON.stringify({
+      event: "telegram_webhook_duplicate_ignored",
+      source: "telegram-webhook",
+      update_id: updateId,
+      at: new Date().toISOString(),
+    }));
+    return new Response("ok");
+  }
+
+  if (idemError) {
+    console.error("[telegram-webhook] idempotency insert failed:", idemError.message);
+    return new Response("Internal Server Error", { status: 500 });
+  }
+
+  const tgChatId = String(resolvedChatId);
+
+  try {
+    logTelegramWebhookAccepted(update, updateId);
     _currentTaskId = null;
 
     // ââ Callback queries (inline button presses) ââ
     if (update.callback_query) {
       const cb = update.callback_query;
-      const cbChatId = String(cb.message.chat.id);
-      if (cbChatId !== CHAT_ID) return new Response("ok");
+      const cbChatId = tgChatId;
 
       // Create task for callback observability + outbox routing
       try {
@@ -3341,13 +3527,8 @@ serve(async (req) => {
     const message = update.message;
     if (!message?.text) return new Response("ok");
 
-    const chatId = String(message.chat.id);
+    const chatId = tgChatId;
     const text = message.text.trim();
-
-    if (chatId !== CHAT_ID) {
-      console.log(`🚫 Blocked message from unauthorized chat: ${chatId}`);
-      return new Response("ok");
-    }
 
     // ─── DETERMINISTIC SPINE: resolve session + create task ───
     let session: { id: string; active_model: string };
