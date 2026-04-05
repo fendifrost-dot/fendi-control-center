@@ -124,10 +124,11 @@ serve(async (req) => {
 
       case "lookup_user": {
         // Look up an Instagram user by username via Business Discovery API
-        const username = (await req.json().catch(() => ({})))?.username || recipient_id;
+        // Pass the username as recipient_id (e.g. "synthwave_nation")
+        const username = recipient_id;
         if (!username) {
           return new Response(
-            JSON.stringify({ error: "username (or recipient_id) is required for lookup_user" }),
+            JSON.stringify({ error: "recipient_id (username) is required for lookup_user" }),
             { status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" } }
           );
         }
