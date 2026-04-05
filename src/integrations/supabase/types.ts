@@ -96,22 +96,31 @@ export type Database = {
       }
       clients: {
         Row: {
+          business_type: string | null
           created_at: string | null
-          drive_folder_id: string
+          drive_folder_id: string | null
+          email: string | null
           id: string
           name: string
+          phone: string | null
         }
         Insert: {
+          business_type?: string | null
           created_at?: string | null
-          drive_folder_id: string
+          drive_folder_id?: string | null
+          email?: string | null
           id?: string
           name: string
+          phone?: string | null
         }
         Update: {
+          business_type?: string | null
           created_at?: string | null
-          drive_folder_id?: string
+          drive_folder_id?: string | null
+          email?: string | null
           id?: string
           name?: string
+          phone?: string | null
         }
         Relationships: []
       }
@@ -265,7 +274,7 @@ export type Database = {
           conversion_status: string | null
           created_at: string | null
           doc_type: string | null
-          drive_file_id: string
+          drive_file_id: string | null
           drive_modified_time: string
           drive_parent_folder_id: string | null
           file_name: string
@@ -279,8 +288,11 @@ export type Database = {
           replaced_by_document_id: string | null
           report_date: string | null
           sha256: string
+          source: string
           source_version: number
           status: string
+          storage_object_path: string | null
+          tax_year: number | null
           updated_at: string | null
         }
         Insert: {
@@ -289,7 +301,7 @@ export type Database = {
           conversion_status?: string | null
           created_at?: string | null
           doc_type?: string | null
-          drive_file_id: string
+          drive_file_id?: string | null
           drive_modified_time: string
           drive_parent_folder_id?: string | null
           file_name: string
@@ -303,8 +315,11 @@ export type Database = {
           replaced_by_document_id?: string | null
           report_date?: string | null
           sha256: string
+          source?: string
           source_version?: number
           status?: string
+          storage_object_path?: string | null
+          tax_year?: number | null
           updated_at?: string | null
         }
         Update: {
@@ -313,7 +328,7 @@ export type Database = {
           conversion_status?: string | null
           created_at?: string | null
           doc_type?: string | null
-          drive_file_id?: string
+          drive_file_id?: string | null
           drive_modified_time?: string
           drive_parent_folder_id?: string | null
           file_name?: string
@@ -327,8 +342,11 @@ export type Database = {
           replaced_by_document_id?: string | null
           report_date?: string | null
           sha256?: string
+          source?: string
           source_version?: number
           status?: string
+          storage_object_path?: string | null
+          tax_year?: number | null
           updated_at?: string | null
         }
         Relationships: [
@@ -984,6 +1002,7 @@ export type Database = {
         Row: {
           agi: number | null
           amount_owed_or_refund: number | null
+          analyzed_data: Json | null
           client_id: string
           client_name: string | null
           confirmation_number: string | null
@@ -1006,10 +1025,12 @@ export type Database = {
           total_tax: number | null
           updated_at: string | null
           worksheet: string | null
+          workspace_settings: Json | null
         }
         Insert: {
           agi?: number | null
           amount_owed_or_refund?: number | null
+          analyzed_data?: Json | null
           client_id: string
           client_name?: string | null
           confirmation_number?: string | null
@@ -1032,10 +1053,12 @@ export type Database = {
           total_tax?: number | null
           updated_at?: string | null
           worksheet?: string | null
+          workspace_settings?: Json | null
         }
         Update: {
           agi?: number | null
           amount_owed_or_refund?: number | null
+          analyzed_data?: Json | null
           client_id?: string
           client_name?: string | null
           confirmation_number?: string | null
@@ -1058,6 +1081,7 @@ export type Database = {
           total_tax?: number | null
           updated_at?: string | null
           worksheet?: string | null
+          workspace_settings?: Json | null
         }
         Relationships: []
       }

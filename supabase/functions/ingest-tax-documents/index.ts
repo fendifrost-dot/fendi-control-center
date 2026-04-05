@@ -1,5 +1,7 @@
 import { serve } from 'https://deno.land/std@0.168.0/http/server.ts';
+import { createClient, type SupabaseClient } from 'https://esm.sh/@supabase/supabase-js@2.49.1';
 import { findClientTaxFolder, listFilesInFolder, downloadFile } from '../_shared/googleDriveRead.ts';
+import { upsertTaxReturn } from '../_shared/taxReturns.ts';
 
 const corsHeaders = {
   'Access-Control-Allow-Origin': '*',
@@ -214,6 +216,207 @@ function aggregatePL(allExtracted: ExtractedData[]): PLSummary {
   };
 }
 
+function arrayBufferToBase64(buffer: ArrayBuffer): string {
+  const bytes = new Uint8Array(buffer);
+  let binary = '';
+  const chunk = 0x8000;
+  for (let i = 0; i < bytes.length; i += chunk) {
+    for (let j = i; j < Math.min(i + chunk, bytes.length); j++) {
+      binary += String.fromCharCode(bytes[j]!);
+    }
+  }
+  return btoa(binary);
+}
+
+async function safeWriteToTaxSupabase(
+  endpoint: string,
+  data: Record<string, unknown> | Record<string, unknown>[],
+): Promise<void> {
+  try {
+    await writeToTaxSupabase(endpoint, data);
+  } catch (e) {
+    console.warn(`[ingest-tax-documents] CC Tax write skipped (${endpoint}):`, e);
+  }
+}
+
+/** Analyze documents uploaded to Supabase Storage (dashboard tax workflow). */
+async function ingestFromUploadedDocuments(
+  hub: SupabaseClient,
+  clientId: string,
+  clientNameIn: string | undefined,
+  taxYear: number,
+): Promise<Record<string, unknown>> {
+  let client_name = clientNameIn?.trim() || '';
+  if (!client_name) {
+    const { data: c } = await hub.from('clients').select('name').eq('id', clientId).maybeSingle();
+    client_name = (c?.name as string) || 'Client';
+  }
+
+  const { data: rows, error: qErr } = await hub
+    .from('documents')
+    .select('id,file_name,mime_type,original_mime_type,storage_object_path')
+    .eq('client_id', clientId)
+    .eq('tax_year', taxYear)
+    .eq('source', 'upload')
+    .eq('is_deleted', false)
+    .not('storage_object_path', 'is', null);
+
+  if (qErr) throw new Error(`Failed to list upload documents: ${qErr.message}`);
+
+  const docRows = (rows || []).filter(
+    (r: { storage_object_path: string | null }) =>
+      r.storage_object_path && String(r.storage_object_path).length > 0,
+  );
+
+  if (docRows.length === 0) {
+    throw new Error(
+      'No uploaded documents found for this client and year. Upload files on the Documents tab first.',
+    );
+  }
+
+  const allExtracted: ExtractedData[] = [];
+  const processedFiles: Array<{ name: string; doc_type: string; status: string }> = [];
+  const errors: Array<{ name: string; error: string }> = [];
+
+  for (const row of docRows as Array<{
+    id: string;
+    file_name: string;
+    mime_type: string;
+    original_mime_type: string;
+    storage_object_path: string;
+  }>) {
+    try {
+      console.log(`[ingest-tax-documents] Storage file: ${row.file_name} (${row.storage_object_path})`);
+      const { data: blob, error: dlErr } = await hub.storage
+        .from('tax-source-documents')
+        .download(row.storage_object_path);
+
+      if (dlErr || !blob) {
+        throw new Error(dlErr?.message || 'Download failed');
+      }
+
+      const ab = await blob.arrayBuffer();
+      const base64 = arrayBufferToBase64(ab);
+      const mime =
+        row.mime_type || row.original_mime_type || 'application/pdf';
+
+      const extracted = await analyzeDocumentWithClaude(base64, row.file_name, mime);
+      allExtracted.push(extracted);
+
+      await hub
+        .from('documents')
+        .update({
+          doc_type: extracted.doc_type,
+          status: 'processed',
+          updated_at: new Date().toISOString(),
+        })
+        .eq('id', row.id);
+
+      await safeWriteToTaxSupabase('documents', {
+        tax_year: taxYear,
+        file_name: row.file_name,
+        type: extracted.doc_type,
+        source_reference: row.id,
+      });
+
+      const transactions: Record<string, unknown>[] = [];
+      for (const income of extracted.extracted_data.income_items) {
+        transactions.push({
+          tax_year: taxYear,
+          description: `${income.type}: ${income.source}`,
+          source: income.payer_name || income.source,
+          amount: income.amount,
+          date: income.date || new Date().toISOString().split('T')[0],
+        });
+      }
+      for (const expense of extracted.extracted_data.expense_items) {
+        transactions.push({
+          tax_year: taxYear,
+          description: `${expense.category}: ${expense.description}`,
+          source: expense.payee || expense.description,
+          amount: -Math.abs(expense.amount),
+          date: expense.date || new Date().toISOString().split('T')[0],
+        });
+      }
+      if (transactions.length > 0) {
+        await safeWriteToTaxSupabase('transactions', transactions);
+      }
+
+      processedFiles.push({
+        name: row.file_name,
+        doc_type: extracted.doc_type,
+        status: 'success',
+      });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      console.error(`[ingest-tax-documents] Storage error ${row.file_name}: ${message}`);
+      errors.push({ name: row.file_name, error: message });
+      processedFiles.push({
+        name: row.file_name,
+        doc_type: 'unknown',
+        status: 'error',
+      });
+    }
+  }
+
+  const plSummary = aggregatePL(allExtracted);
+  console.log(
+    `[ingest-tax-documents] Storage P&L: Income=${plSummary.total_income}, Expenses=${plSummary.total_expenses}`,
+  );
+
+  await safeWriteToTaxSupabase('pl_reports', {
+    tax_year: taxYear,
+    period: `${taxYear} Annual`,
+    gross_income: plSummary.total_income,
+    total_expenses: plSummary.total_expenses,
+    net_profit: plSummary.net_income,
+    category_breakdown: {
+      income_by_category: plSummary.income_by_category,
+      expenses_by_category: plSummary.expenses_by_category,
+    },
+    generated_at: new Date().toISOString(),
+  });
+
+  await upsertTaxReturn(hub, {
+    client_id: clientId,
+    client_name,
+    tax_year: taxYear,
+    status: 'in_progress',
+    analyzed_data: {
+      pl_summary: plSummary,
+      documents: allExtracted,
+      processed_files: processedFiles,
+      errors: errors.length ? errors : undefined,
+      source: 'storage_upload',
+      updated_at: new Date().toISOString(),
+    },
+    created_by: 'ingest-tax-documents',
+  });
+
+  const aggregated_data = {
+    total_income: plSummary.total_income,
+    total_expenses: plSummary.total_expenses,
+    net_profit: plSummary.net_income,
+  };
+
+  return {
+    success: true,
+    client_name,
+    client_id: clientId,
+    tax_year: taxYear,
+    source: 'storage',
+    folder_name: 'Uploaded documents',
+    folder_id: null,
+    files_processed: processedFiles.length,
+    files_with_errors: errors.length,
+    processed_files: processedFiles,
+    errors: errors.length > 0 ? errors : undefined,
+    pl_summary: plSummary,
+    aggregated_data,
+    documents: allExtracted,
+  };
+}
+
 async function writeToTaxSupabase(
   endpoint: string,
   data: Record<string, unknown> | Record<string, unknown>[]
@@ -254,23 +457,70 @@ serve(async (req: Request) => {
       });
     }
 
-    const { client_name, client_id, tax_year } = await req.json();
+    const body = await req.json();
+    const { client_name, client_id, tax_year, analyze_storage_uploads } = body as {
+      client_name?: string;
+      client_id?: string;
+      tax_year?: number;
+      analyze_storage_uploads?: boolean;
+    };
 
-    if (!client_name || !tax_year) {
+    if (tax_year == null || !Number.isFinite(Number(tax_year))) {
+      return new Response(JSON.stringify({ error: 'tax_year is required' }), {
+        status: 400,
+        headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+      });
+    }
+
+    const yearNum = Number(tax_year);
+
+    if (analyze_storage_uploads === true) {
+      if (!client_id || typeof client_id !== 'string') {
+        return new Response(
+          JSON.stringify({ error: 'client_id is required when analyze_storage_uploads is true' }),
+          { status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' } },
+        );
+      }
+      const url = Deno.env.get('SUPABASE_URL');
+      const key = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY');
+      if (!url || !key) {
+        return new Response(JSON.stringify({ error: 'Supabase env not configured' }), {
+          status: 500,
+          headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+        });
+      }
+      const hub = createClient(url, key);
+      console.log(`[ingest-tax-documents] Storage ingestion client=${client_id} year=${yearNum}`);
+      try {
+        const summary = await ingestFromUploadedDocuments(hub, client_id, client_name, yearNum);
+        return new Response(JSON.stringify(summary), {
+          headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+        });
+      } catch (e) {
+        const message = e instanceof Error ? e.message : String(e);
+        const isNoDocs = message.includes('No uploaded documents');
+        return new Response(JSON.stringify({ error: message }), {
+          status: isNoDocs ? 400 : 500,
+          headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+        });
+      }
+    }
+
+    if (!client_name || !yearNum) {
       return new Response(
-        JSON.stringify({ error: 'client_name and tax_year are required' }),
+        JSON.stringify({ error: 'client_name and tax_year are required (or use analyze_storage_uploads with client_id)' }),
         { status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
       );
     }
 
-    console.log(`[ingest-tax-documents] Starting ingestion for ${client_name} ${tax_year}`);
+    console.log(`[ingest-tax-documents] Starting Drive ingestion for ${client_name} ${yearNum}`);
 
-    const folderResult = await findClientTaxFolder(client_name, tax_year);
+    const folderResult = await findClientTaxFolder(client_name, yearNum);
 
     if (!folderResult) {
       return new Response(
         JSON.stringify({
-          error: `No tax folder found for ${client_name} ${tax_year}. Searched patterns: ${client_name.toUpperCase()} ${tax_year} TAXES, ${client_name.toUpperCase().split(/\s+/)[0]} ${tax_year} TAXES, etc.`,
+          error: `No tax folder found for ${client_name} ${yearNum}. Searched patterns: ${client_name.toUpperCase()} ${yearNum} TAXES, ${client_name.toUpperCase().split(/\s+/)[0]} ${yearNum} TAXES, etc.`,
         }),
         { status: 404, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
       );
@@ -304,7 +554,7 @@ serve(async (req: Request) => {
         allExtracted.push(extracted);
 
         await writeToTaxSupabase('documents', {
-          tax_year,
+          tax_year: yearNum,
           file_name: file.name,
           type: extracted.doc_type,
           source_reference: file.id,
@@ -314,7 +564,7 @@ serve(async (req: Request) => {
 
         for (const income of extracted.extracted_data.income_items) {
           transactions.push({
-            tax_year,
+            tax_year: yearNum,
             description: `${income.type}: ${income.source}`,
             source: income.payer_name || income.source,
             amount: income.amount,
@@ -324,7 +574,7 @@ serve(async (req: Request) => {
 
         for (const expense of extracted.extracted_data.expense_items) {
           transactions.push({
-            tax_year,
+            tax_year: yearNum,
             description: `${expense.category}: ${expense.description}`,
             source: expense.payee || expense.description,
             amount: -Math.abs(expense.amount),
@@ -361,8 +611,8 @@ serve(async (req: Request) => {
     );
 
     await writeToTaxSupabase('pl_reports', {
-      tax_year,
-      period: `${tax_year} Annual`,
+      tax_year: yearNum,
+      period: `${yearNum} Annual`,
       gross_income: plSummary.total_income,
       total_expenses: plSummary.total_expenses,
       net_profit: plSummary.net_income,
@@ -376,7 +626,7 @@ serve(async (req: Request) => {
     const summary = {
       success: true,
       client_name,
-      tax_year,
+      tax_year: yearNum,
       folder_id: folderId,
       folder_name: folderName,
       files_processed: processedFiles.length,

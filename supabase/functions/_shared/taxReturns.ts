@@ -23,6 +23,8 @@ export interface TaxReturnUpsert {
   model?: string;
   notes?: string;
   created_by?: string;
+  analyzed_data?: Record<string, unknown>;
+  workspace_settings?: Record<string, unknown>;
 }
 
 export interface TaxFormInstanceInsert {
