@@ -216,7 +216,7 @@ export default function YearWorkspacePage() {
     setSavingAnalysis(true);
     try {
       const parsed = JSON.parse(analyzedJson) as Record<string, unknown>;
-      const upd: TaxReturnUpdate = { analyzed_data: parsed, updated_at: new Date().toISOString() };
+      const upd: TaxReturnUpdate = { analyzed_data: parsed as unknown as import("@/integrations/supabase/types").Json, updated_at: new Date().toISOString() };
       const { error } = await supabase.from("tax_returns").update(upd).eq("id", taxReturnId);
       if (error) throw error;
       toast({ title: "Analysis saved" });
