@@ -216,8 +216,8 @@ export default function YearWorkspacePage() {
     setSavingAnalysis(true);
     try {
       const parsed = JSON.parse(analyzedJson) as Record<string, unknown>;
-      const upd: TaxReturnUpdate = { analyzed_data: parsed, updated_at: new Date().toISOString() };
-      const { error } = await supabase.from("tax_returns").update(upd).eq("id", taxReturnId);
+      const upd = { analyzed_data: parsed, updated_at: new Date().toISOString() };
+      const { error } = await supabase.from("tax_returns").update(upd as any).eq("id", taxReturnId);
       if (error) throw error;
       toast({ title: "Analysis saved" });
       await loadTaxReturn();
@@ -237,8 +237,8 @@ export default function YearWorkspacePage() {
     setSavingSettings(true);
     try {
       const parsed = JSON.parse(settingsJson) as Record<string, unknown>;
-      const upd: TaxReturnUpdate = { workspace_settings: parsed, updated_at: new Date().toISOString() };
-      const { error } = await supabase.from("tax_returns").update(upd).eq("id", taxReturnId);
+      const upd = { workspace_settings: parsed, updated_at: new Date().toISOString() };
+      const { error } = await supabase.from("tax_returns").update(upd as any).eq("id", taxReturnId);
       if (error) throw error;
       toast({ title: "Settings saved" });
     } catch (e) {
