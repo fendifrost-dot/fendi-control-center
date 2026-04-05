@@ -68,11 +68,11 @@ export default function YearWorkspacePage() {
       .from("documents")
       .select("*")
       .eq("client_id", clientId)
-      .eq("tax_year", year)
-      .eq("source", "upload")
+      .eq("tax_year" as any, year)
+      .eq("source" as any, "upload")
       .eq("is_deleted", false)
       .order("created_at", { ascending: false });
-    setDocs((data as DocRow[]) ?? []);
+    setDocs((data as unknown as DocRow[]) ?? []);
   }, [clientId, year]);
 
   const loadTaxReturn = useCallback(async () => {
