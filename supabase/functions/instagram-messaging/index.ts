@@ -122,6 +122,37 @@ serve(async (req) => {
         break;
       }
 
+      case "lookup_user": {
+        // Look up an Instagram user by username via Business Discovery API
+        // Pass the username as recipient_id (e.g. "synthwave_nation")
+        const username = recipient_id;
+        if (!username) {
+          return new Response(
+            JSON.stringify({ error: "recipient_id (username) is required for lookup_user" }),
+            { status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+          );
+        }
+        const cleanUsername = String(username).replace(/^@/, "").trim();
+        const meResp2 = await fetch(`${GRAPH_API}/me?fields=instagram_business_account&access_token=${TOKEN}`);
+        const meData2 = await meResp2.json();
+        const igId2 = meData2.instagram_business_account?.id;
+        if (!igId2) {
+          result = { error: "No Instagram Business Account linked" };
+          break;
+        }
+        const discResp = await fetch(
+          `${GRAPH_API}/${igId2}?fields=business_discovery.fields(username,name,biography,followers_count,media_count,ig_id).username(${cleanUsername})&access_token=${TOKEN}`
+        );
+        const discData = await discResp.json();
+        if (discData.error) {
+          result = { found: false, error: discData.error.message, username: cleanUsername };
+        } else {
+          const bd = discData.business_discovery || {};
+          result = { found: true, username: bd.username, name: bd.name, bio: bd.biography, followers: bd.followers_count, ig_id: bd.ig_id };
+        }
+        break;
+      }
+
       case "get_conversations": {
         // List recent Instagram DM conversations
         const meResp = await fetch(`${GRAPH_API}/me?fields=instagram_business_account&access_token=${TOKEN}`);
@@ -140,7 +171,7 @@ serve(async (req) => {
 
       default:
         return new Response(
-          JSON.stringify({ error: `Unknown action: ${action}. Valid: send_dm, reply_comment, reply_story_mention, get_recent_comments, get_conversations` }),
+          JSON.stringify({ error: `Unknown action: ${action}. Valid: send_dm, reply_comment, reply_story_mention, get_recent_comments, lookup_user, get_conversations` }),
           { status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" } }
         );
     }

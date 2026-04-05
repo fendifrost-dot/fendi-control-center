@@ -43,8 +43,11 @@ serve(async (req) => {
       });
     }
 
+    const channel = String(body.channel || "email").trim();
     const playlistId = String(body.playlist_id || "").trim();
     const trackId = String(body.track_id || "").trim();
+    const curatorName = String(body.curator_name || "").trim();
+    const instagramHandle = String(body.instagram_handle || "").trim();
     if (!playlistId || !trackId) throw new Error("playlist_id and track_id are required");
 
     const context = await callFanFuel({
@@ -53,29 +56,53 @@ serve(async (req) => {
       track_id: trackId,
     });
 
-    const systemPrompt = "You are an expert music pitching copywriter. Write concise, personalized email pitches. Return JSON only.";
-    const userPrompt = [
-      `Playlist ID: ${playlistId}`,
-      `Track ID: ${trackId}`,
-      "Context JSON:",
-      JSON.stringify(context || {}).slice(0, 40_000),
-      "",
-      "Return JSON with keys: subject, body, tone, personalization_points.",
-    ].join("\n");
+    const isInstagram = channel === "instagram";
+
+    const systemPrompt = isInstagram
+      ? "You are a friendly music artist reaching out to a playlist curator via Instagram DM. Write casual, personalized, conversational messages — not formal emails. Keep it under 300 characters. Sound authentic and human, like you're messaging a friend who curates playlists. Return JSON only."
+      : "You are an expert music pitching copywriter. Write concise, personalized email pitches. Return JSON only.";
+
+    const userPrompt = isInstagram
+      ? [
+          `Playlist: ${playlistId}`,
+          `Track: ${trackId}`,
+          curatorName ? `Curator: ${curatorName}` : "",
+          instagramHandle ? `Their IG: @${instagramHandle}` : "",
+          "Context JSON:",
+          JSON.stringify(context || {}).slice(0, 20_000),
+          "",
+          "Return JSON with keys: dm_text (the casual DM message), opening_hook (first line to grab attention), tone.",
+        ].filter(Boolean).join("\n")
+      : [
+          `Playlist ID: ${playlistId}`,
+          `Track ID: ${trackId}`,
+          "Context JSON:",
+          JSON.stringify(context || {}).slice(0, 40_000),
+          "",
+          "Return JSON with keys: subject, body, tone, personalization_points.",
+        ].join("\n");
 
     const draft = await callGPTJSON<Record<string, unknown>>(systemPrompt, userPrompt, {
-      required: ["subject", "body"],
+      required: isInstagram ? ["dm_text"] : ["subject", "body"],
     });
+
+    const insertData: Record<string, unknown> = {
+      playlist_id: playlistId,
+      curator_name: curatorName || null,
+      channel,
+      status: "draft",
+    };
+
+    if (isInstagram) {
+      insertData.dm_content = String(draft.dm_text || "");
+      insertData.instagram_handle = instagramHandle || null;
+    } else {
+      insertData.pitch_content = JSON.stringify(draft);
+    }
 
     const { data: row, error } = await supabase
       .from("pitch_drafts")
-      .insert({
-        research_id: body.research_id ?? null,
-        playlist_id: playlistId,
-        email_subject: String(draft.subject || ""),
-        email_body: String(draft.body || ""),
-        status: "draft",
-      })
+      .insert(insertData)
       .select("id, created_at")
       .single();
     if (error) throw error;

@@ -708,10 +708,13 @@ export type Database = {
       }
       pitch_drafts: {
         Row: {
+          channel: string
           created_at: string | null
           curator_email: string | null
           curator_name: string | null
+          dm_content: string | null
           id: string
+          instagram_handle: string | null
           model: string | null
           pitch_content: string | null
           playlist_id: string | null
@@ -719,10 +722,13 @@ export type Database = {
           updated_at: string | null
         }
         Insert: {
+          channel?: string
           created_at?: string | null
           curator_email?: string | null
           curator_name?: string | null
+          dm_content?: string | null
           id?: string
+          instagram_handle?: string | null
           model?: string | null
           pitch_content?: string | null
           playlist_id?: string | null
@@ -730,10 +736,13 @@ export type Database = {
           updated_at?: string | null
         }
         Update: {
+          channel?: string
           created_at?: string | null
           curator_email?: string | null
           curator_name?: string | null
+          dm_content?: string | null
           id?: string
+          instagram_handle?: string | null
           model?: string | null
           pitch_content?: string | null
           playlist_id?: string | null
