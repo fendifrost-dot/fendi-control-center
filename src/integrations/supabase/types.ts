@@ -265,7 +265,7 @@ export type Database = {
           conversion_status: string | null
           created_at: string | null
           doc_type: string | null
-          drive_file_id: string
+          drive_file_id: string | null
           drive_modified_time: string
           drive_parent_folder_id: string | null
           file_name: string
@@ -279,8 +279,11 @@ export type Database = {
           replaced_by_document_id: string | null
           report_date: string | null
           sha256: string
+          source: string | null
           source_version: number
           status: string
+          storage_object_path: string | null
+          tax_year: number | null
           updated_at: string | null
         }
         Insert: {
@@ -289,7 +292,7 @@ export type Database = {
           conversion_status?: string | null
           created_at?: string | null
           doc_type?: string | null
-          drive_file_id: string
+          drive_file_id?: string | null
           drive_modified_time: string
           drive_parent_folder_id?: string | null
           file_name: string
@@ -303,8 +306,11 @@ export type Database = {
           replaced_by_document_id?: string | null
           report_date?: string | null
           sha256: string
+          source?: string | null
           source_version?: number
           status?: string
+          storage_object_path?: string | null
+          tax_year?: number | null
           updated_at?: string | null
         }
         Update: {
@@ -313,7 +319,7 @@ export type Database = {
           conversion_status?: string | null
           created_at?: string | null
           doc_type?: string | null
-          drive_file_id?: string
+          drive_file_id?: string | null
           drive_modified_time?: string
           drive_parent_folder_id?: string | null
           file_name?: string
@@ -327,8 +333,11 @@ export type Database = {
           replaced_by_document_id?: string | null
           report_date?: string | null
           sha256?: string
+          source?: string | null
           source_version?: number
           status?: string
+          storage_object_path?: string | null
+          tax_year?: number | null
           updated_at?: string | null
         }
         Relationships: [
