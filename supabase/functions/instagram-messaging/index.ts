@@ -170,7 +170,7 @@ serve(async (req) => {
 
       default:
         return new Response(
-          JSON.stringify({ error: `Unknown action: ${action}. Valid: send_dm, reply_comment, reply_story_mention, get_recent_comments, get_conversations` }),
+          JSON.stringify({ error: `Unknown action: ${action}. Valid: send_dm, reply_comment, reply_story_mention, get_recent_comments, lookup_user, get_conversations` }),
           { status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" } }
         );
     }
