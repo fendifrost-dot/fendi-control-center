@@ -279,7 +279,7 @@ export type Database = {
           replaced_by_document_id: string | null
           report_date: string | null
           sha256: string
-          source: string | null
+          source: string
           source_version: number
           status: string
           storage_object_path: string | null
@@ -306,7 +306,7 @@ export type Database = {
           replaced_by_document_id?: string | null
           report_date?: string | null
           sha256: string
-          source?: string | null
+          source?: string
           source_version?: number
           status?: string
           storage_object_path?: string | null
@@ -333,7 +333,7 @@ export type Database = {
           replaced_by_document_id?: string | null
           report_date?: string | null
           sha256?: string
-          source?: string | null
+          source?: string
           source_version?: number
           status?: string
           storage_object_path?: string | null
