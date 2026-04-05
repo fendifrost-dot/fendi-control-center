@@ -260,6 +260,7 @@ If yes, respond with ONLY the matching workflow key. If it is just a question or
 
 Rules:
 - "pitch X to playlists" or "pitch X" → playlist_pitch_workflow
+- "find playlist opportunities", "search playlists for [track]", "playlist opportunities for" → find_playlist_opportunities
 - "analyze credit" or "run credit analysis" → analyze_credit_strategy
 - "generate dispute" or "send dispute" → credit_analysis_and_disputes
 - "check system status" or "system status" → system_status
@@ -4204,10 +4205,34 @@ serve(async (req) => {
 
     // ══════════════════════════════════════════════════════════
     // INTENT-BASED LANE 1 AUTO-PROMOTION (early — before shortcuts/Lane 2)
-    // "Run / execute / start …" → other workflows (playlist NL handled above).
+    // "Run / execute / start …" and plain English ("please execute the search") → Lane 1.
     // ══════════════════════════════════════════════════════════
-    const EXECUTION_INTENT_PREFIXES = ["run ", "execute ", "trigger ", "start "];
-    const hasExecutionIntent = EXECUTION_INTENT_PREFIXES.some(p => lowerText.startsWith(p));
+    const stripLeadingExecutionPhrases = (lower: string): string => {
+      let s = lower.trim();
+      for (let i = 0; i < 6; i++) {
+        const next = s
+          .replace(/^(please\s+|can you\s+|could you\s+)/, "")
+          .replace(/^(go\s+ahead(?:\s+and)?\s+)/, "")
+          .replace(/^(just\s+)/, "")
+          .replace(/^(run|execute|trigger|start)\s+/, "")
+          .trim();
+        if (next === s) break;
+        s = next;
+      }
+      return s;
+    };
+    const hasPlainEnglishExecutionIntent = (lower: string): boolean => {
+      if (["run ", "execute ", "trigger ", "start "].some((p) => lower.startsWith(p))) return true;
+      if (/\bplease\s+(execute|run)\b/.test(lower)) return true;
+      if (/\bgo\s+ahead(?:\s+and)?\s+(execute|run)\b/.test(lower)) return true;
+      if (/\bjust\s+(execute|run)\b/.test(lower)) return true;
+      if (/\b(execute|run)\s+the\s+search\b/.test(lower)) return true;
+      if (/\b(execute|run)\s+(it|that|this)\b/.test(lower)) return true;
+      if (/\b(execute|run)\s+again\b/.test(lower)) return true;
+      if (/\b(execute|run)\s+now\b/.test(lower)) return true;
+      return false;
+    };
+    const hasExecutionIntent = hasPlainEnglishExecutionIntent(lowerText);
 
     let autoPromotedWorkflow: WorkflowEntry | undefined;
     const newClientIntent = isNewClientCreditIntent(lowerText);
@@ -4254,7 +4279,8 @@ serve(async (req) => {
     }
 
     if (hasExecutionIntent) {
-      const intentArg = lowerText.replace(/^(run|execute|trigger|start)\s+/, "").trim();
+      let intentArg = stripLeadingExecutionPhrases(lowerText);
+      if (!intentArg) intentArg = lowerText;
       const intentWorkflows = await fetchWorkflowRegistry();
       const { chosen: intentChosen } = _matchWorkflows(intentArg, intentWorkflows);
       if (intentChosen && IMPLEMENTED_WORKFLOW_KEYS.has(intentChosen.key)) {
@@ -4270,6 +4296,14 @@ serve(async (req) => {
         autoPromotedWorkflow = SYNTHETIC_ANALYZE_CREDIT_STRATEGY;
       } else if (!intentChosen && playlistPitchIntent && IMPLEMENTED_WORKFLOW_KEYS.has("playlist_pitch_workflow")) {
         autoPromotedWorkflow = SYNTHETIC_PLAYLIST_PITCH_WORKFLOW;
+      } else if (!intentChosen && IMPLEMENTED_WORKFLOW_KEYS.has("find_playlist_opportunities")) {
+        const lastPl = await getLastPlaylistResearch(chatId);
+        const playlistRedoCue =
+          /\b(search|opportunities|playlist|playlists|results?|again|rerun|redo|same|spotify|vibe|hip\s*hop)\b/.test(lowerText);
+        const bareExec = /^(please\s+)?(go\s+ahead(?:\s+and)?\s+)?(just\s+)?(execute|run)\s*[!?.]*$/i.test(text.trim());
+        if (lastPl?.track_name && (playlistRedoCue || bareExec)) {
+          autoPromotedWorkflow = SYNTHETIC_FIND_PLAYLIST_OPPORTUNITIES;
+        }
       }
     }
 
@@ -4311,7 +4345,7 @@ serve(async (req) => {
         `ð¯ *${SYSTEM_IDENTITY} â Online (Two-Lane Mode)*`,
         ``,
         `ð¬ *Lane 2 (Default):* Just talk to me â I'll answer, explain, draft, plan.`,
-        `â¡ *Lane 1 (Execute):* Prefix with \`/do\` to run a workflow.`,
+        `â¡ *Lane 1 (Execute):* Say *run* / *execute* + what you want, or use \`/do <workflow>\`.`,
         ``,
         `*Examples:*`,
         `â¢ "What's broken today?" â I'll explain (Lane 2)`,
@@ -4332,7 +4366,7 @@ serve(async (req) => {
         `â¢ /status â health snapshot`,
         `â¢ /metrics â last 20 tasks + durations`,
         ``,
-        `ð I will NEVER execute tools unless you use \`/do\` or a direct command.`,
+        `ð Tools run when you clearly ask to *run* / *execute* / *start* something, use \`/do\`, or use a shortcut command.`,
       ].join("\n"));
       await supabase.from("tasks").update({ status: "succeeded", result_json: { execution_lane: "shortcut", progress_step: "shortcut_start", action: "start_help" } }).eq("id", taskId);
       await sendMessage(chatId, `â Done: \`${taskId}\``);
@@ -4475,7 +4509,7 @@ serve(async (req) => {
         ``,
         `*Two-Lane System:*`,
         `ð¬ Just type normally â Assistant mode (Lane 2)`,
-        `â¡ \`/do <workflow>\` â Execution mode (Lane 1)`,
+        `â¡ Say *run* / *execute* + what you want, or \`/do <workflow>\` â Execution mode (Lane 1)`,
         ``,
         `*Commands:*`,
         `â¢ /status â System status`,
@@ -4483,7 +4517,7 @@ serve(async (req) => {
         `â¢ /ping â Connectivity test`,
         `â¢ /resend\\_failed â Retry failed outbox items`,
         `â¢ /workflows â See all available workflows`,
-        `â¢ /do <workflow> â Execute a specific workflow`,
+        `â¢ /do <workflow> â Execute a workflow (optional if you use *run* / *execute*)`,
         `â¢ /model â Check or switch AI model`,
         ``,
         `ð¡ Tip: run \`/metrics\` to inspect recent task runs and durations.`,
@@ -5031,7 +5065,7 @@ serve(async (req) => {
       // Fetch workflow registry for context (so assistant can suggest /do commands)
       const workflows = await fetchWorkflowRegistry();
       const workflowContext = workflows.length > 0
-        ? `\n\nAvailable workflows (user must run \`/do <workflow>\` to execute):\n${workflows.map(w => `- ${w.name} (\`${w.key}\`): ${w.trigger_phrases.slice(0, 2).join(", ")}`).join("\n")}`
+        ? `\n\nAvailable workflows (execute via *run* / *execute* + intent, or \`/do <workflow_key>\`):\n${workflows.map(w => `- ${w.name} (\`${w.key}\`): ${w.trigger_phrases.slice(0, 2).join(", ")}`).join("\n")}`
         : "";
 
       const assistantSystemPrompt = `You are the ${SYSTEM_IDENTITY}. You serve Fendi Frost as a personal command center assistant.
@@ -5040,9 +5074,7 @@ TWO-LANE RULE â You are in ASSISTANT MODE (Lane 2).
 - Answer questions, explain, draft, brainstorm, plan.
 - Suggest workflows when useful.
 - DO NOT output tool calls. DO NOT claim a tool was used. DO NOT simulate execution.
-- When the user asks to DO something (execute, run, trigger), respond:
-  "This can be executed. Reply with \`/do <workflow>\` to run it."
-  and suggest the matching workflow key.
+- When the user asks to run or execute something in plain English (e.g. "please run the search", "execute again", "go ahead and run it"), do NOT refuse or say you cannot act. Tell them the system auto-routes phrases like *run*, *execute*, *start*, or *trigger* (e.g. "execute the playlist search again") and that \`/do <workflow_key>\` is optional. Do NOT insist that slash syntax is the only way.
 
 CREDIT ANALYSIS ROUTING: When the user asks about credit reports, credit analysis, credit disputes, or anything related to analyzing a client's credit â suggest /do analyze_client_credit. This is the full pipeline that syncs Drive, ingests documents, and runs Credit Guardian analysis. Do NOT suggest /do client_overview for credit analysis requests..
 
