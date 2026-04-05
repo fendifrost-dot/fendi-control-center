@@ -56,11 +56,11 @@ export default function YearWorkspacePage() {
       .from("documents")
       .select("*")
       .eq("client_id", clientId)
-      .eq("tax_year", year)
-      .eq("source", "upload")
       .eq("is_deleted", false)
       .order("created_at", { ascending: false });
-    setDocs((data as DocRow[]) ?? []);
+    // Filter by year client-side since tax_year may not be in schema
+    const filtered = (data ?? []).filter((d: any) => (d as any).tax_year === year);
+    setDocs(filtered as unknown as DocRow[]);
   }, [clientId, year]);
 
   const loadTaxReturn = useCallback(async () => {
