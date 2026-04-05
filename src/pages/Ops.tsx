@@ -11,8 +11,14 @@ import { ScrollArea } from "@/components/ui/scroll-area";
 import { Switch } from "@/components/ui/switch";
 import { RefreshCw, Zap } from "lucide-react";
 import { useToast } from "@/hooks/use-toast";
+import { RequireSession } from "@/components/auth/RequireSession";
 
 const short = (id: string | null) => id ? id.slice(0, 8) : "—";
+
+/** Strip characters that break PostgREST `.or()` / `ilike` filter strings. */
+function sanitizeTaskSearchFilter(s: string): string {
+  return s.trim().replace(/[%*,()]/g, "");
+}
 const truncate = (s: string | null, n = 120) => s ? (s.length > n ? s.slice(0, n) + "…" : s) : "—";
 const fmtDate = (d: string | null) => d ? new Date(d).toLocaleString() : "—";
 const fmtTime = (d: Date) => d.toLocaleTimeString();
@@ -63,7 +69,8 @@ export default function Ops() {
     try {
       let tq = supabase.from("tasks").select("*").order("created_at", { ascending: false }).limit(50);
       if (taskStatusFilter !== "all") tq = tq.eq("status", taskStatusFilter);
-      if (taskSearch) tq = tq.or(`request_text.ilike.%${taskSearch}%,id.ilike.%${taskSearch}%`);
+      const safeSearch = sanitizeTaskSearchFilter(taskSearch);
+      if (safeSearch) tq = tq.or(`request_text.ilike.%${safeSearch}%,id.ilike.%${safeSearch}%`);
       const { data: tData } = await tq;
       setTasks((tData as TaskRow[]) || []);
 
@@ -115,7 +122,8 @@ export default function Ops() {
   const outboxStats = useMemo(() => countByStatus(outbox, ["queued", "sending", "sent", "failed"]), [outbox]);
 
   return (
-    <div className="min-h-screen bg-background p-4">
+    <RequireSession>
+      <div className="min-h-screen bg-background p-4">
       {/* Header */}
       <div className="flex items-center justify-between mb-3">
         <h1 className="text-2xl font-bold text-foreground">Ops Dashboard</h1>
@@ -324,5 +332,6 @@ export default function Ops() {
         </SheetContent>
       </Sheet>
     </div>
+    </RequireSession>
   );
 }

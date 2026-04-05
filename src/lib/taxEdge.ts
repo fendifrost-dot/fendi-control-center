@@ -3,12 +3,22 @@ import { supabase } from "@/integrations/supabase/client";
 const url = import.meta.env.VITE_SUPABASE_URL as string;
 const anon = import.meta.env.VITE_SUPABASE_PUBLISHABLE_KEY as string;
 
+export type InvokeTaxEdgeOptions = {
+  /** Allow falling back to the anon key when no user session (default false — tax actions require sign-in). */
+  allowAnon?: boolean;
+};
+
 export async function invokeTaxEdge<T = unknown>(
   functionName: string,
   body: Record<string, unknown>,
+  options?: InvokeTaxEdgeOptions,
 ): Promise<T> {
   const { data: sess } = await supabase.auth.getSession();
-  const token = sess.session?.access_token ?? anon;
+  const userJwt = sess.session?.access_token;
+  if (!userJwt && !options?.allowAnon) {
+    throw new Error("Sign in required to run this tax action.");
+  }
+  const token = userJwt ?? anon;
   const res = await fetch(`${url}/functions/v1/${functionName}`, {
     method: "POST",
     headers: {

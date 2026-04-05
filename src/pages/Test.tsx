@@ -7,7 +7,8 @@ import { Input } from "@/components/ui/input";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { supabase } from "@/integrations/supabase/client";
 
-const PAGE_PASSWORD = "fendi2026";
+/** Set in `.env` for local/staging only — never commit a real password. */
+const PAGE_PASSWORD = (import.meta.env.VITE_TEST_PAGE_PASSWORD as string | undefined)?.trim() ?? "";
 
 export default function Test() {
   const [unlocked, setUnlocked] = useState(false);
@@ -20,7 +21,23 @@ export default function Test() {
   const [rawResult, setRawResult] = useState<any>(null);
   const { assessment, runAssessment, resetAssessment } = useAssessment();
 
-  // Password gate
+  if (!PAGE_PASSWORD) {
+    return (
+      <div className="flex min-h-screen items-center justify-center bg-background p-4">
+        <Card className="w-full max-w-md">
+          <CardHeader>
+            <CardTitle className="text-lg">Test page disabled</CardTitle>
+          </CardHeader>
+          <CardContent className="text-sm text-muted-foreground">
+            Set <code className="rounded bg-muted px-1">VITE_TEST_PAGE_PASSWORD</code> in your environment to
+            enable this internal page. Do not ship a password in production source code.
+          </CardContent>
+        </Card>
+      </div>
+    );
+  }
+
+  // Password gate (env-supplied secret — still visible to anyone with the built bundle if VITE_* is baked in)
   if (!unlocked) {
     return (
       <div className="min-h-screen flex items-center justify-center bg-background p-4">

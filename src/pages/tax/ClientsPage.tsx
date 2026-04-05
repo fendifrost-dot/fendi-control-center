@@ -102,11 +102,7 @@ export default function ClientsPage() {
   }
 
   if (!session) {
-    return (
-      <div className="mx-auto max-w-md rounded-xl border border-border bg-card p-8 text-center shadow-sm">
-        <p className="text-muted-foreground">Sign in to manage tax clients.</p>
-      </div>
-    );
+    return <p className="text-sm text-muted-foreground">Loading…</p>;
   }
 
   return (

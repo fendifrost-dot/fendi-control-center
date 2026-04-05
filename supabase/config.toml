@@ -35,3 +35,16 @@ verify_jwt = false
 
 [functions.tax-returns]
 verify_jwt = false
+
+# Browser-only tax helpers — require a valid Supabase JWT (user session or anon per project policy).
+[functions.fill-tax-forms]
+verify_jwt = true
+
+[functions.regenerate-tax-pdfs]
+verify_jwt = true
+
+[functions.export-txf]
+verify_jwt = true
+
+[functions.import-prior-return]
+verify_jwt = true
