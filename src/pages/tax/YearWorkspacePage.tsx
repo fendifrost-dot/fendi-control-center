@@ -364,8 +364,8 @@ export default function YearWorkspacePage() {
                         </p>
                       </div>
                       <div className="flex shrink-0 gap-2">
-                        {(d as any).storage_object_path && (
-                          <Button type="button" variant="outline" size="sm" onClick={() => void previewDoc((d as any).storage_object_path)}>
+                        {d.drive_file_id && (
+                          <Button type="button" variant="outline" size="sm" onClick={() => void previewDoc(d.drive_file_id)}>
                             <FileText className="mr-1 h-4 w-4" />
                             Preview
                           </Button>
