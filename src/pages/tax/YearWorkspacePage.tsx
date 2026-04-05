@@ -18,6 +18,7 @@ import type { Session } from "@supabase/supabase-js";
 import { ArrowLeft, FileText, Loader2, Trash2, Upload } from "lucide-react";
 import { useToast } from "@/hooks/use-toast";
 import type { Database } from "@/integrations/supabase/types";
+import { ReturnReviewPanel } from "@/components/tax/ReturnReviewPanel";
 
 type DocRow = Database["public"]["Tables"]["documents"]["Row"];
 
@@ -267,9 +268,6 @@ export default function YearWorkspacePage() {
     }
   }
 
-  const jsonSummary = (taxRow?.json_summary ?? null) as Record<string, unknown> | null;
-  const form1040 = (jsonSummary?.form_1040 ?? {}) as Record<string, unknown>;
-  const filingRec = (taxRow?.filing_recommendation ?? null) as Record<string, unknown> | null;
   const plSummary = (() => {
     try {
       const a = JSON.parse(analyzedJson) as { pl_summary?: Record<string, unknown> };
@@ -431,119 +429,19 @@ export default function YearWorkspacePage() {
         </TabsContent>
 
         <TabsContent value="return" className="space-y-4">
-          <Card>
-            <CardHeader className="flex flex-row flex-wrap items-center justify-between gap-2">
-              <CardTitle className="text-lg">Generate return</CardTitle>
-              <Button type="button" disabled={generating} onClick={() => void generateReturn()}>
-                {generating ? (
-                  <>
-                    <Loader2 className="mr-2 h-4 w-4 animate-spin" /> Working…
-                  </>
-                ) : (
-                  "Generate return"
-                )}
-              </Button>
-            </CardHeader>
-            <CardContent className="space-y-4 text-sm">
-              <div className="grid gap-3 sm:grid-cols-2">
-                <div>
-                  <p className="text-muted-foreground">AGI</p>
-                  <p className="text-xl font-semibold">
-                    {form1040.adjusted_gross_income != null
-                      ? `$${Number(form1040.adjusted_gross_income).toLocaleString()}`
-                      : taxRow?.agi != null
-                        ? `$${Number(taxRow.agi).toLocaleString()}`
-                        : "—"}
-                  </p>
-                </div>
-                <div>
-                  <p className="text-muted-foreground">Total income</p>
-                  <p className="text-xl font-semibold">
-                    {form1040.total_income != null
-                      ? `$${Number(form1040.total_income).toLocaleString()}`
-                      : taxRow?.total_income != null
-                        ? `$${Number(taxRow.total_income).toLocaleString()}`
-                        : "—"}
-                  </p>
-                </div>
-                <div>
-                  <p className="text-muted-foreground">Tax</p>
-                  <p className="text-xl font-semibold">
-                    {form1040.total_tax != null
-                      ? `$${Number(form1040.total_tax).toLocaleString()}`
-                      : taxRow?.total_tax != null
-                        ? `$${Number(taxRow.total_tax).toLocaleString()}`
-                        : "—"}
-                  </p>
-                </div>
-                <div>
-                  <p className="text-muted-foreground">Refund / owed</p>
-                  <p className="text-xl font-semibold">
-                    {form1040.amount_owed_or_refund != null
-                      ? `$${Number(form1040.amount_owed_or_refund).toLocaleString()}`
-                      : taxRow?.amount_owed_or_refund != null
-                        ? `$${Number(taxRow.amount_owed_or_refund).toLocaleString()}`
-                        : "—"}
-                  </p>
-                </div>
-              </div>
-
-              {filingRec && (
-                <div className="rounded-lg border border-border bg-muted/20 p-4">
-                  <p className="font-medium">Filing recommendation</p>
-                  <p className="mt-1 text-muted-foreground">
-                    {String(filingRec.method ?? filingRec.steps ?? "See worksheet and exports below.")}
-                  </p>
-                </div>
-              )}
-
-              <div className="space-y-2">
-                <p className="font-medium">Downloads</p>
-                {formRows.length === 0 ? (
-                  <p className="text-muted-foreground">Generate a return to create filled PDFs.</p>
-                ) : (
-                  <ul className="space-y-1">
-                    {formRows.map((f) => (
-                      <li key={f.id}>
-                        {f.pdf_url ? (
-                          <a href={f.pdf_url} className="text-primary underline" target="_blank" rel="noreferrer">
-                            {f.form_type} PDF
-                          </a>
-                        ) : (
-                          <span className="text-muted-foreground">{f.form_type} (pending)</span>
-                        )}
-                      </li>
-                    ))}
-                  </ul>
-                )}
-                {taxRow?.worksheet && (
-                  <Button
-                    type="button"
-                    variant="outline"
-                    size="sm"
-                    onClick={() => {
-                      const blob = new Blob([String(taxRow.worksheet)], { type: "text/plain" });
-                      const a = document.createElement("a");
-                      a.href = URL.createObjectURL(blob);
-                      a.download = `worksheet-${year}.txt`;
-                      a.click();
-                      URL.revokeObjectURL(a.href);
-                    }}
-                  >
-                    Download worksheet (.txt)
-                  </Button>
-                )}
-                {lastGenerate?.results && (
-                  <details className="text-xs text-muted-foreground">
-                    <summary className="cursor-pointer">Last run details (JSON)</summary>
-                    <pre className="mt-2 max-h-48 overflow-auto rounded bg-muted p-2">
-                      {JSON.stringify(lastGenerate.results, null, 2)}
-                    </pre>
-                  </details>
-                )}
-              </div>
-            </CardContent>
-          </Card>
+          <ReturnReviewPanel
+            taxReturnId={taxReturnId}
+            clientId={clientId}
+            clientName={clientName}
+            year={year}
+            taxRow={taxRow}
+            worksheet={taxRow?.worksheet != null ? String(taxRow.worksheet) : null}
+            formRows={formRows}
+            generating={generating}
+            lastGenerate={lastGenerate}
+            onGenerate={() => void generateReturn()}
+            onRefresh={refreshAll}
+          />
         </TabsContent>
 
         <TabsContent value="settings" className="space-y-4">

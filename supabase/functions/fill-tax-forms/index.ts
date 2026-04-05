@@ -242,22 +242,50 @@ serve(async (req: Request) => {
     const supabaseServiceKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
     const supabase = createClient(supabaseUrl, supabaseServiceKey);
 
+    const body = await req.json();
     const {
       tax_return_id,
       tax_year,
       client_name,
-      client_id,
-      computed_data,
-    } = await req.json();
+      client_id: _clientId,
+      computed_data: computedFromBody,
+    } = body;
 
-    if (!tax_return_id || !tax_year || !client_name || !computed_data) {
+    if (!tax_return_id || !tax_year || !client_name) {
       return new Response(
-        JSON.stringify({ error: "Missing required fields: tax_return_id, tax_year, client_name, computed_data" }),
-        { status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+        JSON.stringify({
+          error: "Missing required fields: tax_return_id, tax_year, client_name",
+        }),
+        { status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" } },
       );
     }
 
+    let computed_data = computedFromBody as Record<string, unknown> | undefined;
+    const missingComputed =
+      !computed_data ||
+      typeof computed_data !== "object" ||
+      Array.isArray(computed_data) ||
+      Object.keys(computed_data).length === 0;
+    if (missingComputed) {
+      const { data: tr, error: trErr } = await supabase
+        .from("tax_returns")
+        .select("json_summary")
+        .eq("id", tax_return_id)
+        .maybeSingle();
+      if (trErr || !tr?.json_summary) {
+        return new Response(
+          JSON.stringify({
+            error: "computed_data missing and no json_summary on tax_returns row",
+          }),
+          { status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" } },
+        );
+      }
+      computed_data = tr.json_summary as Record<string, unknown>;
+    }
+
     console.log(`=== Fill Tax Forms: ${client_name} ${tax_year} (return: ${tax_return_id}) ===`);
+
+    await supabase.from("tax_form_instances").delete().eq("tax_return_id", tax_return_id);
 
     // Flatten computed data
     const flatData = flattenComputedData(computed_data);
@@ -305,10 +333,10 @@ serve(async (req: Request) => {
       results.push(...batchResults);
     }
 
-    // Update tax return status
+    // Mark ready for human review after PDF generation
     await supabase
       .from("tax_returns")
-      .update({ status: "forms_generated", forms_generated_at: new Date().toISOString() })
+      .update({ status: "review", updated_at: new Date().toISOString() })
       .eq("id", tax_return_id);
 
     const successCount = results.filter((r) => r.status === "success").length;

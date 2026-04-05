@@ -28,9 +28,20 @@ serve(async (req) => {
     const taxReturn = await getTaxReturnById(supabase, tax_return_id);
     if (!taxReturn) throw new Error("Tax return not found: " + tax_return_id);
 
-    // Merge overrides with existing json_summary computed data
-    const existingData = taxReturn.json_summary?.form_1040 || {};
-    const mergedData = { ...existingData, ...(computed_data_overrides || {}) };
+    const baseSummary =
+      taxReturn.json_summary && typeof taxReturn.json_summary === "object"
+        ? { ...(taxReturn.json_summary as Record<string, unknown>) }
+        : {};
+
+    const existing1040 =
+      baseSummary.form_1040 && typeof baseSummary.form_1040 === "object"
+        ? { ...(baseSummary.form_1040 as Record<string, unknown>) }
+        : {};
+
+    const merged1040 = { ...existing1040, ...(computed_data_overrides || {}) };
+
+    // Full summary for fill-tax-forms so determineRequiredForms sees schedule_c / schedule_se, etc.
+    const computedForFill = { ...baseSummary, form_1040: merged1040 };
 
     // Delete existing form instances (they will be regenerated)
     const { error: deleteErr } = await supabase
@@ -42,11 +53,10 @@ serve(async (req) => {
 
     // Update the tax return with merged data if overrides were provided
     if (computed_data_overrides) {
-      const updatedSummary = { ...taxReturn.json_summary, form_1040: mergedData };
       await supabase
         .from("tax_returns")
         .update({
-          json_summary: updatedSummary,
+          json_summary: computedForFill,
           updated_at: new Date().toISOString(),
         })
         .eq("id", tax_return_id);
@@ -64,7 +74,7 @@ serve(async (req) => {
         client_id: taxReturn.client_id,
         client_name: taxReturn.client_name,
         tax_year: taxReturn.tax_year,
-        computed_data: mergedData,
+        computed_data: computedForFill,
         draft_mode,
       }),
     });

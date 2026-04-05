@@ -14,6 +14,77 @@ const GEMINI_KEY = Deno.env.get("Frost_Gemini")!;
 const GROK_KEY = Deno.env.get("Frost_Grok")!;
 const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
 const TELEGRAM_API = `https://api.telegram.org/bot${BOT_TOKEN}`;
+
+/** Resolve Control Center client UUID + canonical name for tax generation (Telegram). */
+async function resolveClientIdForTaxGeneration(nameRaw: string | undefined): Promise<
+  { ok: true; id: string; name: string } | { ok: false; message: string }
+> {
+  const trimmed = (nameRaw ?? "").trim();
+  if (!trimmed) {
+    return {
+      ok: false,
+      message:
+        "client_name is required (e.g. the client's full name as shown in Control Center).",
+    };
+  }
+  const escapeIlike = (s: string) =>
+    s.replace(/\\/g, "\\\\").replace(/%/g, "\\%").replace(/_/g, "\\_");
+  const exactPattern = escapeIlike(trimmed);
+
+  const { data: exactRows, error: exErr } = await supabase
+    .from("clients")
+    .select("id,name")
+    .ilike("name", exactPattern);
+  if (exErr) {
+    return { ok: false, message: "Client lookup failed: " + exErr.message };
+  }
+  const rows = (exactRows ?? []) as { id: string; name: string }[];
+  const lower = trimmed.toLowerCase();
+  const norm = (s: string) => s.trim().toLowerCase();
+  const fullExact = rows.filter((r) => norm(r.name) === lower);
+  if (fullExact.length === 1) {
+    return { ok: true, id: fullExact[0].id, name: fullExact[0].name };
+  }
+  if (fullExact.length > 1) {
+    return {
+      ok: false,
+      message:
+        `Multiple clients named "${trimmed}". Open Control Center and use a unique full name. Matches: ${fullExact.map((r) => r.name).join(", ")}`,
+    };
+  }
+
+  const safeContains = trimmed.replace(/[%_\\]/g, "").slice(0, 120);
+  if (!safeContains) {
+    return {
+      ok: false,
+      message: `No client found matching "${trimmed}".`,
+    };
+  }
+  const { data: fuzzyRows, error: fzErr } = await supabase
+    .from("clients")
+    .select("id,name")
+    .ilike("name", `%${escapeIlike(safeContains)}%`)
+    .limit(20);
+  if (fzErr) {
+    return { ok: false, message: "Client lookup failed: " + fzErr.message };
+  }
+  const fuzzy = (fuzzyRows ?? []) as { id: string; name: string }[];
+  if (fuzzy.length === 0) {
+    return {
+      ok: false,
+      message:
+        `No client found for "${trimmed}". Create the client in Control Center or match the name exactly.`,
+    };
+  }
+  if (fuzzy.length === 1) {
+    return { ok: true, id: fuzzy[0].id, name: fuzzy[0].name };
+  }
+  return {
+    ok: false,
+    message:
+      `Several clients match "${trimmed}". Use the full name. Options: ${fuzzy.map((r) => r.name).join("; ")}`,
+  };
+}
 const SYSTEM_IDENTITY = "Fendi Control Center AI";
 // ─── Implemented workflow keys → handler names (deterministic routing) ───
 // Cardinality is IMPLEMENTED_WORKFLOW_KEYS.size (also exposed in /status health); do not hardcode counts in docs.
@@ -1438,14 +1509,19 @@ const AGENT_TOOLS: ToolDef[] = [
         },
         client_name: {
           type: "string",
-          description: "Full name of the client (e.g. 'Sam Higgins'). Used to tag the tax return record.",
+          description:
+            "Client name exactly as in Control Center (required). Resolved to a real client record for Drive ingestion and tax_returns.",
         },
       },
-      required: [],
+      required: ["client_name"],
     },
     destructive: false,
     execute: async (args: { tax_years?: number[]; client_name?: string }) => {
       const ANON_KEY = Deno.env.get("SUPABASE_PUBLISHABLE_KEY") || SUPABASE_SERVICE_ROLE_KEY;
+      const resolved = await resolveClientIdForTaxGeneration(args.client_name);
+      if (!resolved.ok) {
+        return JSON.stringify({ error: resolved.message });
+      }
       const allYears = args.tax_years ?? [new Date().getFullYear()];
       const batchSize = 2;
       const mergedResults: Record<string, any> = {};
@@ -1460,7 +1536,11 @@ const AGENT_TOOLS: ToolDef[] = [
           const resp = await fetch(`${SUPABASE_URL}/functions/v1/generate-tax-documents`, {
             method: "POST",
             headers: { "Content-Type": "application/json", Authorization: `Bearer ${ANON_KEY}` },
-            body: JSON.stringify({ tax_years: batch, client_name: args.client_name || "unknown", client_id: args.client_name?.toLowerCase().replace(/\s+/g, "_") || "unknown" }),
+            body: JSON.stringify({
+              tax_years: batch,
+              client_name: resolved.name,
+              client_id: resolved.id,
+            }),
           });
           const raw = await resp.text();
           if (!resp.ok) throw new Error(`generate-tax-documents failed (${resp.status}): ${raw.slice(0, 400)}`);
