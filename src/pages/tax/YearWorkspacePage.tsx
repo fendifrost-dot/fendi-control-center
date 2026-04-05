@@ -17,7 +17,7 @@ import {
 import type { Session } from "@supabase/supabase-js";
 import { ArrowLeft, FileText, Loader2, Trash2, Upload } from "lucide-react";
 import { useToast } from "@/hooks/use-toast";
-import type { Database } from "@/integrations/supabase/types";
+import type { Database, Json } from "@/integrations/supabase/types";
 import { ReturnReviewPanel } from "@/components/tax/ReturnReviewPanel";
 
 type DocRow = Database["public"]["Tables"]["documents"]["Row"];
@@ -215,7 +215,7 @@ export default function YearWorkspacePage() {
     if (!taxReturnId) return;
     setSavingAnalysis(true);
     try {
-      const parsed = JSON.parse(analyzedJson) as Record<string, unknown>;
+      const parsed = JSON.parse(analyzedJson) as Json;
       const upd: TaxReturnUpdate = { analyzed_data: parsed, updated_at: new Date().toISOString() };
       const { error } = await supabase.from("tax_returns").update(upd).eq("id", taxReturnId);
       if (error) throw error;
@@ -236,7 +236,7 @@ export default function YearWorkspacePage() {
     if (!taxReturnId) return;
     setSavingSettings(true);
     try {
-      const parsed = JSON.parse(settingsJson) as Record<string, unknown>;
+      const parsed = JSON.parse(settingsJson) as Json;
       const upd: TaxReturnUpdate = { workspace_settings: parsed, updated_at: new Date().toISOString() };
       const { error } = await supabase.from("tax_returns").update(upd).eq("id", taxReturnId);
       if (error) throw error;
