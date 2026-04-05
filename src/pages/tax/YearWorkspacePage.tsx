@@ -64,14 +64,13 @@ export default function YearWorkspacePage() {
 
   const loadDocs = useCallback(async () => {
     if (!clientId || !Number.isFinite(year)) return;
-    const { data } = await supabase
+    const q = supabase
       .from("documents")
       .select("*")
       .eq("client_id", clientId)
-      .eq("tax_year" as any, year)
-      .eq("source" as any, "upload")
       .eq("is_deleted", false)
-      .order("created_at", { ascending: false });
+      .order("created_at", { ascending: false }) as any;
+    const { data } = await q.eq("tax_year", year).eq("source", "upload");
     setDocs((data as unknown as DocRow[]) ?? []);
   }, [clientId, year]);
 
