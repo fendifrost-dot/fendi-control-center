@@ -20,7 +20,12 @@ import { useToast } from "@/hooks/use-toast";
 import type { Database } from "@/integrations/supabase/types";
 import { ReturnReviewPanel } from "@/components/tax/ReturnReviewPanel";
 
-type DocRow = Database["public"]["Tables"]["documents"]["Row"];
+/** Extended doc row — includes columns added by migration that may not yet be in generated types. */
+type DocRow = Database["public"]["Tables"]["documents"]["Row"] & {
+  storage_object_path?: string | null;
+  tax_year?: number | null;
+  source?: string | null;
+};
 
 /** Path in `tax-source-documents` for workspace uploads — not the same as Google `drive_file_id`. */
 function taxUploadStoragePath(d: DocRow): string | null {
