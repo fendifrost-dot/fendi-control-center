@@ -164,7 +164,7 @@ export default function YearWorkspacePage() {
   }
 
   async function deleteDoc(d: DocRow) {
-    const storagePath = (d as any).storage_object_path as string | undefined;
+    const storagePath = d.drive_file_id;
     if (!storagePath) return;
     if (!window.confirm(`Remove ${d.file_name}?`)) return;
     await supabase.storage.from("tax-source-documents").remove([storagePath]);
