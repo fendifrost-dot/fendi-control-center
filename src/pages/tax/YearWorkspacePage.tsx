@@ -22,6 +22,13 @@ import { ReturnReviewPanel } from "@/components/tax/ReturnReviewPanel";
 
 type DocRow = Database["public"]["Tables"]["documents"]["Row"];
 
+/** Path in `tax-source-documents` for workspace uploads — not the same as Google `drive_file_id`. */
+function taxUploadStoragePath(d: DocRow): string | null {
+  if (d.storage_object_path) return d.storage_object_path;
+  if (d.source === "upload" && d.drive_file_id?.includes("/")) return d.drive_file_id;
+  return null;
+}
+
 export default function YearWorkspacePage() {
   const { clientId, year: yearParam } = useParams<{ clientId: string; year: string }>();
   const year = yearParam ? parseInt(yearParam, 10) : NaN;
@@ -56,11 +63,11 @@ export default function YearWorkspacePage() {
       .from("documents")
       .select("*")
       .eq("client_id", clientId)
+      .eq("tax_year", year)
+      .eq("source", "upload")
       .eq("is_deleted", false)
       .order("created_at", { ascending: false });
-    // Filter by year client-side since tax_year may not be in schema
-    const filtered = (data ?? []).filter((d: any) => (d as any).tax_year === year);
-    setDocs(filtered as unknown as DocRow[]);
+    setDocs((data as DocRow[]) ?? []);
   }, [clientId, year]);
 
   const loadTaxReturn = useCallback(async () => {
@@ -93,9 +100,10 @@ export default function YearWorkspacePage() {
     if (!tr) return;
 
     setTaxReturnId(tr.id as string);
-    setTaxRow(tr as unknown as Record<string, unknown>);
-    setAnalyzedJson(JSON.stringify((tr as any).analyzed_data ?? {}, null, 2));
-    setSettingsJson(JSON.stringify((tr as any).workspace_settings ?? {}, null, 2));
+    const trRec = tr as Record<string, unknown>;
+    setTaxRow(trRec);
+    setAnalyzedJson(JSON.stringify(trRec.analyzed_data ?? {}, null, 2));
+    setSettingsJson(JSON.stringify(trRec.workspace_settings ?? {}, null, 2));
 
     const { data: forms } = await supabase
       .from("tax_form_instances")
@@ -133,10 +141,13 @@ export default function YearWorkspacePage() {
           original_mime_type: file.type || "application/octet-stream",
           processed_mime_type: file.type || "application/pdf",
           sha256: hash,
-          drive_file_id: path,
+          drive_file_id: null,
           drive_modified_time: new Date().toISOString(),
+          tax_year: year,
+          storage_object_path: path,
+          source: "upload",
           status: "pending",
-        } as any);
+        });
         if (insErr) throw insErr;
       }
       toast({ title: "Upload complete" });
@@ -164,10 +175,10 @@ export default function YearWorkspacePage() {
   }
 
   async function deleteDoc(d: DocRow) {
-    const storagePath = d.drive_file_id;
-    if (!storagePath) return;
+    const path = taxUploadStoragePath(d);
+    if (!path) return;
     if (!window.confirm(`Remove ${d.file_name}?`)) return;
-    await supabase.storage.from("tax-source-documents").remove([storagePath]);
+    await supabase.storage.from("tax-source-documents").remove([path]);
     await supabase.from("documents").delete().eq("id", d.id);
     toast({ title: "Document removed" });
     await loadDocs();
@@ -354,28 +365,36 @@ export default function YearWorkspacePage() {
                 <p className="text-sm text-muted-foreground">No uploads yet.</p>
               ) : (
                 <ul className="divide-y divide-border">
-                  {docs.map((d) => (
-                    <li key={d.id} className="flex flex-wrap items-center justify-between gap-2 py-3 text-sm">
-                      <div className="min-w-0 flex-1">
-                        <p className="truncate font-medium">{d.file_name}</p>
-                        <p className="text-muted-foreground">
-                          {d.doc_type || "Type pending"} ·{" "}
-                          {d.created_at ? new Date(d.created_at).toLocaleString() : "—"}
-                        </p>
-                      </div>
-                      <div className="flex shrink-0 gap-2">
-                        {d.drive_file_id && (
-                          <Button type="button" variant="outline" size="sm" onClick={() => void previewDoc(d.drive_file_id)}>
-                            <FileText className="mr-1 h-4 w-4" />
-                            Preview
+                  {docs.map((d) => {
+                    const storagePath = taxUploadStoragePath(d);
+                    return (
+                      <li key={d.id} className="flex flex-wrap items-center justify-between gap-2 py-3 text-sm">
+                        <div className="min-w-0 flex-1">
+                          <p className="truncate font-medium">{d.file_name}</p>
+                          <p className="text-muted-foreground">
+                            {d.doc_type || "Type pending"} ·{" "}
+                            {d.created_at ? new Date(d.created_at).toLocaleString() : "—"}
+                          </p>
+                        </div>
+                        <div className="flex shrink-0 gap-2">
+                          {storagePath && (
+                            <Button
+                              type="button"
+                              variant="outline"
+                              size="sm"
+                              onClick={() => void previewDoc(storagePath)}
+                            >
+                              <FileText className="mr-1 h-4 w-4" />
+                              Preview
+                            </Button>
+                          )}
+                          <Button type="button" variant="ghost" size="icon" onClick={() => void deleteDoc(d)} aria-label="Delete">
+                            <Trash2 className="h-4 w-4 text-destructive" />
                           </Button>
-                        )}
-                        <Button type="button" variant="ghost" size="icon" onClick={() => void deleteDoc(d)} aria-label="Delete">
-                          <Trash2 className="h-4 w-4 text-destructive" />
-                        </Button>
-                      </div>
-                    </li>
-                  ))}
+                        </div>
+                      </li>
+                    );
+                  })}
                 </ul>
               )}
             </CardContent>
