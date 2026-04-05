@@ -93,9 +93,9 @@ export default function YearWorkspacePage() {
     if (!tr) return;
 
     setTaxReturnId(tr.id as string);
-    setTaxRow(tr as Record<string, unknown>);
-    setAnalyzedJson(JSON.stringify(tr.analyzed_data ?? {}, null, 2));
-    setSettingsJson(JSON.stringify(tr.workspace_settings ?? {}, null, 2));
+    setTaxRow(tr as unknown as Record<string, unknown>);
+    setAnalyzedJson(JSON.stringify((tr as any).analyzed_data ?? {}, null, 2));
+    setSettingsJson(JSON.stringify((tr as any).workspace_settings ?? {}, null, 2));
 
     const { data: forms } = await supabase
       .from("tax_form_instances")
