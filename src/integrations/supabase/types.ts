@@ -1177,6 +1177,21 @@ export type Database = {
           },
         ]
       }
+      telegram_webhook_processed_updates: {
+        Row: {
+          received_at: string
+          update_id: number
+        }
+        Insert: {
+          received_at?: string
+          update_id: number
+        }
+        Update: {
+          received_at?: string
+          update_id?: number
+        }
+        Relationships: []
+      }
       tool_execution_logs: {
         Row: {
           args: Json | null
