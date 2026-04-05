@@ -64,13 +64,12 @@ export default function ClientReturnsPage() {
 
     const { data: docs } = await supabase
       .from("documents")
-      .select("tax_year")
+      .select("*")
       .eq("client_id", clientId)
-      .eq("is_deleted", false)
-      .not("tax_year", "is", null);
+      .eq("is_deleted", false);
     const dc: Record<number, number> = {};
     for (const d of docs || []) {
-      const y = d.tax_year as number | null;
+      const y = (d as unknown as Record<string, unknown>).tax_year as number | null;
       if (y != null) dc[y] = (dc[y] ?? 0) + 1;
     }
     setDocCounts(dc);

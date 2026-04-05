@@ -227,7 +227,7 @@ export default function YearWorkspacePage() {
       const parsed = JSON.parse(settingsJson) as Record<string, unknown>;
       const { error } = await supabase
         .from("tax_returns")
-        .update({ workspace_settings: parsed, updated_at: new Date().toISOString() })
+        .update({ workspace_settings: parsed, updated_at: new Date().toISOString() } as any)
         .eq("id", taxReturnId);
       if (error) throw error;
       toast({ title: "Settings saved" });
