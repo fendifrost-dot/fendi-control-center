@@ -288,11 +288,11 @@ serve(async (req: Request) => {
     await supabase.from("tax_form_instances").delete().eq("tax_return_id", tax_return_id);
 
     // Flatten computed data
-    const flatData = flattenComputedData(computed_data);
+    const flatData = flattenComputedData(computed_data!);
     console.log(`Flattened data keys: ${Object.keys(flatData).slice(0, 20).join(", ")}...`);
 
     // Determine required forms
-    const requiredForms = determineRequiredForms(computed_data);
+    const requiredForms = determineRequiredForms(computed_data!);
     console.log(`Required forms: ${requiredForms.join(", ")}`);
 
     // Get Google Drive access
