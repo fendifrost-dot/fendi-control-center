@@ -96,22 +96,31 @@ export type Database = {
       }
       clients: {
         Row: {
+          business_type: string | null
           created_at: string | null
-          drive_folder_id: string
+          drive_folder_id: string | null
+          email: string | null
           id: string
           name: string
+          phone: string | null
         }
         Insert: {
+          business_type?: string | null
           created_at?: string | null
-          drive_folder_id: string
+          drive_folder_id?: string | null
+          email?: string | null
           id?: string
           name: string
+          phone?: string | null
         }
         Update: {
+          business_type?: string | null
           created_at?: string | null
-          drive_folder_id?: string
+          drive_folder_id?: string | null
+          email?: string | null
           id?: string
           name?: string
+          phone?: string | null
         }
         Relationships: []
       }
