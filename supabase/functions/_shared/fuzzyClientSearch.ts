@@ -93,15 +93,67 @@ export async function fuzzyClientSearch(
   // Source 1: Clients table
   if (searchClientsTable) {
     try {
+      // Contains match with wildcards (e.g. '%Sam Higgins%')
       const { data: exactData } = await supabase
         .from("clients").select("id, name, email, phone")
-        .ilike("name", query).limit(1);
+        .ilike("name", `%${query}%`).limit(5);
       if (exactData?.length) {
-        allMatches.push({
-          id: exactData[0].id, name: exactData[0].name,
-          source: "clients_table", confidence: 1.0,
-          metadata: { email: exactData[0].email, phone: exactData[0].phone },
-        });
+        // Check for true exact match first
+        const trueExact = exactData.find((r: any) => r.name.toLowerCase().trim() === query.toLowerCase().trim());
+        if (trueExact) {
+          allMatches.push({
+            id: trueExact.id, name: trueExact.name,
+            source: "clients_table", confidence: 1.0,
+            metadata: { email: trueExact.email, phone: trueExact.phone },
+          });
+        } else {
+          // Add contains matches with high confidence
+          for (const row of exactData) {
+            allMatches.push({
+              id: row.id, name: row.name,
+              source: "clients_table", confidence: 0.9,
+              metadata: { email: row.email, phone: row.phone },
+            });
+          }
+        }
+      }
+      // First-name prefix fallback
+      if (!exactData?.length) {
+        const firstName = query.split(/[\s\-_]+/)[0];
+        if (firstName && firstName.length >= 2) {
+          const { data: prefixData } = await supabase
+            .from("clients").select("id, name, email, phone")
+            .ilike("name", `${firstName}%`).limit(5);
+          if (prefixData) {
+            for (const row of prefixData) {
+              if (allMatches.some((m) => m.id === row.id)) continue;
+              allMatches.push({
+                id: row.id, name: row.name,
+                source: "clients_table", confidence: 0.75,
+                metadata: { email: row.email, phone: row.phone },
+              });
+            }
+          }
+        }
+      }
+      // tax_returns.client_name fallback
+      if (!allMatches.length) {
+        const { data: trData } = await supabase
+          .from("tax_returns").select("client_id, client_name")
+          .ilike("client_name", `%${query}%`).limit(5);
+        if (trData) {
+          const seen = new Set<string>();
+          for (const row of trData) {
+            if (!row.client_id || seen.has(row.client_id)) continue;
+            seen.add(row.client_id);
+            const score = tokenMatch(query, row.client_name || "");
+            allMatches.push({
+              id: row.client_id, name: row.client_name || query,
+              source: "clients_table", confidence: Math.max(score, 0.6),
+              metadata: { from_tax_returns: true },
+            });
+          }
+        }
       }
       const tokens = query.split(/[\s\-_]+/).filter(Boolean);
       for (const token of tokens) {
