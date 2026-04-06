@@ -91,6 +91,11 @@ async function resolveClientIdForTaxGeneration(nameRaw: string | undefined): Pro
       message: `No client found matching "${trimmed}".`,
     };
   }
+  // Before reporting multiple matches, check for exact name match in contains results
+  const exactInContains = containsMatches.find((r) => norm(r.name) === lower);
+  if (exactInContains) {
+    return { ok: true, id: exactInContains.id, name: exactInContains.name };
+  }
   // Use containsMatches if we already got results, otherwise they were empty
   const fuzzy = containsMatches.length > 0 ? containsMatches : [];
   if (fuzzy.length === 0) {
