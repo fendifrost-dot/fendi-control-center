@@ -31,17 +31,20 @@ async function resolveClientIdForTaxGeneration(nameRaw: string | undefined): Pro
     s.replace(/\\/g, "\\\\").replace(/%/g, "\\%").replace(/_/g, "\\_");
   const exactPattern = escapeIlike(trimmed);
 
-  const { data: exactRows, error: exErr } = await supabase
-    .from("clients")
-    .select("id,name")
-    .ilike("name", exactPattern);
-  if (exErr) {
-    return { ok: false, message: "Client lookup failed: " + exErr.message };
-  }
-  const rows = (exactRows ?? []) as { id: string; name: string }[];
   const lower = trimmed.toLowerCase();
   const norm = (s: string) => s.trim().toLowerCase();
-  const fullExact = rows.filter((r) => norm(r.name) === lower);
+
+  // Step 1: Contains match with wildcards (e.g. '%Sam Higgins%')
+  const { data: containsRows, error: cErr } = await supabase
+    .from("clients")
+    .select("id,name")
+    .ilike("name", `%${exactPattern}%`)
+    .limit(20);
+  if (cErr) {
+    return { ok: false, message: "Client lookup failed: " + cErr.message };
+  }
+  const containsMatches = (containsRows ?? []) as { id: string; name: string }[];
+  const fullExact = containsMatches.filter((r) => norm(r.name) === lower);
   if (fullExact.length === 1) {
     return { ok: true, id: fullExact[0].id, name: fullExact[0].name };
   }
@@ -52,7 +55,35 @@ async function resolveClientIdForTaxGeneration(nameRaw: string | undefined): Pro
         `Multiple clients named "${trimmed}". Open Control Center and use a unique full name. Matches: ${fullExact.map((r) => r.name).join(", ")}`,
     };
   }
+  // If contains search found exactly one, use it
+  if (containsMatches.length === 1) {
+    return { ok: true, id: containsMatches[0].id, name: containsMatches[0].name };
+  }
 
+  // Step 2: First-name prefix match (e.g. 'Sam%')
+  const firstName = trimmed.split(/\s+/)[0];
+  if (firstName && containsMatches.length === 0) {
+    const { data: prefixRows, error: pfErr } = await supabase
+      .from("clients")
+      .select("id,name")
+      .ilike("name", `${escapeIlike(firstName)}%`)
+      .limit(20);
+    if (!pfErr) {
+      const prefixMatches = (prefixRows ?? []) as { id: string; name: string }[];
+      if (prefixMatches.length === 1) {
+        return { ok: true, id: prefixMatches[0].id, name: prefixMatches[0].name };
+      }
+      if (prefixMatches.length > 1) {
+        return {
+          ok: false,
+          message:
+            `Several clients match first name "${firstName}". Use the full name. Options: ${prefixMatches.map((r) => r.name).join("; ")}`,
+        };
+      }
+    }
+  }
+
+  // Step 3: Broader fuzzy contains (same as before but after prefix)
   const safeContains = trimmed.replace(/[%_\\]/g, "").slice(0, 120);
   if (!safeContains) {
     return {
@@ -60,15 +91,8 @@ async function resolveClientIdForTaxGeneration(nameRaw: string | undefined): Pro
       message: `No client found matching "${trimmed}".`,
     };
   }
-  const { data: fuzzyRows, error: fzErr } = await supabase
-    .from("clients")
-    .select("id,name")
-    .ilike("name", `%${escapeIlike(safeContains)}%`)
-    .limit(20);
-  if (fzErr) {
-    return { ok: false, message: "Client lookup failed: " + fzErr.message };
-  }
-  const fuzzy = (fuzzyRows ?? []) as { id: string; name: string }[];
+  // Use containsMatches if we already got results, otherwise they were empty
+  const fuzzy = containsMatches.length > 0 ? containsMatches : [];
   if (fuzzy.length === 0) {
     // Fallback: check tax_returns.client_name for a match — handles clients created
     // before they were added to the clients table (old name-string client_id records).
