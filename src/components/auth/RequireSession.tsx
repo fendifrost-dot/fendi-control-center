@@ -1,4 +1,5 @@
 import { useEffect, useState, type ReactNode } from "react";
+import { Navigate, useLocation } from "react-router-dom";
 import { supabase } from "@/integrations/supabase/client";
 import type { Session } from "@supabase/supabase-js";
 
@@ -28,17 +29,11 @@ export function RequireSession({ children, showSignedOutFallback = true }: Props
     );
   }
 
+  const location = useLocation();
+
   if (!session) {
     if (!showSignedOutFallback) return null;
-    return (
-      <div className="mx-auto mt-16 max-w-md rounded-lg border border-border bg-card p-8 text-center shadow-sm">
-        <h1 className="text-lg font-semibold tracking-tight">Sign in required</h1>
-        <p className="mt-2 text-sm text-muted-foreground">
-          Use your organization&apos;s Supabase Auth sign-in (magic link, OAuth, or email) to access this
-          area. If you are not a team member, close this page.
-        </p>
-      </div>
-    );
+    return <Navigate to="/login" state={{ from: location.pathname }} replace />;
   }
 
   return <>{children}</>;
