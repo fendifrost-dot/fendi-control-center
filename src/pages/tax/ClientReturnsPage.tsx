@@ -50,8 +50,10 @@ export default function ClientReturnsPage() {
   const load = useCallback(async () => {
     if (!clientId) return;
     const { data: c } = await supabase.from("clients").select("name").eq("id", clientId).maybeSingle();
-    setClientName((c as { name: string } | null)?.name ?? "Client");
+    const resolvedName = (c as { name: string } | null)?.name ?? "Client";
+    setClientName(resolvedName);
 
+    // Primary query: by UUID client_id (records created via Control Center / generate_tax_docs)
     const { data: tr } = await supabase
       .from("tax_returns")
       .select("*")
@@ -60,6 +62,27 @@ export default function ClientReturnsPage() {
     for (const r of tr || []) {
       rm[r.tax_year as number] = r as Record<string, unknown>;
     }
+
+    // Fallback query: by client_name for older records where client_id was stored as a name string.
+    // This surfaces AGI and status that exist on the legacy records.
+    if (resolvedName && resolvedName !== "Client") {
+      const { data: trByName } = await supabase
+        .from("tax_returns")
+        .select("*")
+        .ilike("client_name", resolvedName);
+      for (const r of trByName || []) {
+        const year = r.tax_year as number;
+        const existing = rm[year];
+        if (!existing) {
+          // No UUID-based record for this year — use the name-based record
+          rm[year] = r as Record<string, unknown>;
+        } else if (existing.agi == null && r.agi != null) {
+          // UUID record exists but lacks AGI — patch it in from the legacy record
+          rm[year] = { ...existing, agi: r.agi };
+        }
+      }
+    }
+
     setReturnsMap(rm);
 
     const { data: docs } = await supabase
@@ -155,7 +178,7 @@ export default function ClientReturnsPage() {
           const agi = row?.agi != null ? Number(row.agi) : null;
           return (
             <Link key={year} to={`/clients/${clientId}/${year}`}>
-              <Card className="h-full transition-colors hover:border-primary/40 hover:bg-muted/30">
+              <Card className="h-full cursor-pointer transition-colors hover:border-primary/40 hover:bg-muted/30">
                 <CardHeader className="pb-2">
                   <div className="flex items-center justify-between gap-2">
                     <CardTitle className="text-xl">{year}</CardTitle>

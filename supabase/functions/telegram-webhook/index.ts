@@ -70,6 +70,46 @@ async function resolveClientIdForTaxGeneration(nameRaw: string | undefined): Pro
   }
   const fuzzy = (fuzzyRows ?? []) as { id: string; name: string }[];
   if (fuzzy.length === 0) {
+    // Fallback: check tax_returns.client_name for a match — handles clients created
+    // before they were added to the clients table (old name-string client_id records).
+    const uuidRe = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+    const { data: trRows } = await supabase
+      .from("tax_returns")
+      .select("client_id,client_name")
+      .ilike("client_name", `%${escapeIlike(safeContains)}%`)
+      .limit(10);
+    const trMatches = (trRows ?? []) as { client_id: string; client_name: string | null }[];
+    if (trMatches.length > 0) {
+      // Prefer exact name match, fall back to first fuzzy
+      const normExact = trMatches.filter((r) => norm(r.client_name ?? "") === lower);
+      const best = normExact[0] ?? trMatches[0];
+      const bestName = (best.client_name ?? trimmed).trim();
+      // If client_id looks like a UUID, verify it exists in clients table
+      if (uuidRe.test(best.client_id)) {
+        const { data: cRow } = await supabase
+          .from("clients")
+          .select("id,name")
+          .eq("id", best.client_id)
+          .maybeSingle();
+        if (cRow) {
+          return { ok: true, id: (cRow as { id: string; name: string }).id, name: (cRow as { id: string; name: string }).name };
+        }
+      }
+      // client_id is a name-string (old format) — create a proper clients record
+      const { data: newClient, error: insertErr } = await supabase
+        .from("clients")
+        .insert({ name: bestName, drive_folder_id: `dashboard-${crypto.randomUUID()}` })
+        .select("id,name")
+        .single();
+      if (insertErr || !newClient) {
+        return {
+          ok: false,
+          message: `No client found for "${trimmed}" in Control Center. Add them via the Clients page.`,
+        };
+      }
+      const nc = newClient as { id: string; name: string };
+      return { ok: true, id: nc.id, name: nc.name };
+    }
     return {
       ok: false,
       message:
