@@ -8,6 +8,7 @@ import { TaxShell } from "@/components/tax/TaxShell";
 import Index from "./pages/Index";
 import Ops from "./pages/Ops";
 import Test from "./pages/Test";
+import Login from "./pages/Login";
 import NotFound from "./pages/NotFound";
 import ClientsPage from "./pages/tax/ClientsPage";
 import ClientReturnsPage from "./pages/tax/ClientReturnsPage";
@@ -23,6 +24,7 @@ const App = () => (
         <Sonner />
         <BrowserRouter>
           <Routes>
+            <Route path="/login" element={<Login />} />
             <Route path="/" element={<Index />} />
             <Route path="/ops" element={<Ops />} />
             <Route path="/test" element={<Test />} />

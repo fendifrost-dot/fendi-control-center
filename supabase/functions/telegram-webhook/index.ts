@@ -19,7 +19,10 @@ const TELEGRAM_API = `https://api.telegram.org/bot${BOT_TOKEN}`;
 async function resolveClientIdForTaxGeneration(nameRaw: string | undefined): Promise<
   { ok: true; id: string; name: string } | { ok: false; message: string }
 > {
-  const trimmed = (nameRaw ?? "").trim();
+  const trimmed = (nameRaw ?? "")
+    .trim()
+    .replace(/^[\s"'`“”‘’,.;:!?]+|[\s"'`“”‘’,.;:!?]+$/g, "")
+    .replace(/\s+/g, " ");
   if (!trimmed) {
     return {
       ok: false,
