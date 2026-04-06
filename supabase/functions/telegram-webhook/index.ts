@@ -86,6 +86,16 @@ async function resolveClientIdForTaxGeneration(nameRaw: string | undefined): Pro
   };
 }
 const SYSTEM_IDENTITY = "Fendi Control Center AI";
+
+/** Strategic north star — wired into all agent/assistant system prompts so decisions aren’t only task-shaped. */
+const ARTIST_GROWTH_MISSION = `
+STRATEGIC NORTH STAR (weigh this in prioritization, advice, and follow-ups — not as permission to invent facts):
+• Artist: Fendi Frost. Primary surfaces to grow: Spotify and SoundCloud streams and durable audience (saves, follows, replays).
+• Long-term aim: push from current reach toward maximum *sustainable* growth, with a bias toward turning casual listeners into engaged supporters (merch, tickets, paid releases, mailing list, tips — whatever fits the conversation).
+• How to work: take the user’s direction as ground truth, but think like a growth partner — offer the strongest options, creative angles, sequencing (“what moves the needle next”), and honest tradeoffs. Prefer compounding moves over one-off box-checking.
+• Evidence: stream counts, playlist names, DMs, and other facts still come only from tools or what the user explicitly gave you. Exploration is *how* you reason, prioritize, and recommend — not fabricating data.
+`.trim();
+
 // ─── Implemented workflow keys → handler names (deterministic routing) ───
 // Cardinality is IMPLEMENTED_WORKFLOW_KEYS.size (also exposed in /status health); do not hardcode counts in docs.
 const IMPLEMENTED_WORKFLOW_KEYS = new Set([
@@ -1723,7 +1733,7 @@ const AGENT_TOOLS: ToolDef[] = [
   {
     name: "find_playlist_opportunities",
     description:
-      "Research playlist opportunities for a track (FanFuel Hub). If the user has not confirmed a vibe yet, the tool will ask them to confirm in Telegram â do not invent results. When the user already confirmed or provided a vibe, pass user_vibe.",
+      "Research playlist opportunities for a track (FanFuel Hub). Optimize for Fendi Frost's Spotify/SoundCloud discovery and the path from casual listener to supporter — use the user's full vibe and reference artists when provided. If the user has not confirmed a vibe yet, the tool will ask them to confirm in Telegram â do not invent results. When the user already confirmed or provided a vibe, pass user_vibe (entire description).",
     parameters: {
       type: "object",
       properties: {
@@ -2440,7 +2450,8 @@ function inferVibeFromTrack(trackName: string): string {
   if (/meditat|zen|calm|peace|sleep|ambient|lofi/.test(t)) return "calm / chill / ambient-adjacent";
   if (/grind|hustle|motivat|money|boss/.test(t)) return "motivational hip-hop / street energy";
   if (/love|heart|soul|slow/.test(t)) return "R&B / soulful / late-night";
-  return "West Coast hip-hop / smooth soulful lane (Larry June–adjacent)";
+  // Avoid a single “signature” default — unrelated titles (e.g. fashion brands) were skewing Larry June–style.
+  return "Hip-hop / R&B (confirm or replace — name your lane: producers, subgenre, or target playlists).";
 }
 
 /**
@@ -2606,7 +2617,10 @@ function playlistWorkflowSystemAddendum(): string {
 PLAYLIST WORKFLOW (ACTIVE — this run is restricted to find_playlist_opportunities):
 - You MUST call the tool find_playlist_opportunities with track_name set to a real song title.
 - If the user only sent a workflow key (e.g. "find_playlist_opportunities"), infer track_name from the Conversation Context below (e.g. messages like "Meditate by Fendi Frost" → track_name "Meditate").
+- When the user gave a detailed vibe (subgenre, reference artists, playlist types, search phrases), pass that entire description in user_vibe — do not replace it with a generic default.
+- After tool results, briefly suggest exploratory next steps when helpful (e.g. alternate vibe angles, curator tiers, follow-on pitches) aligned with maximizing streams and listener→supporter conversion — without inventing playlist data.
 - Do NOT refuse. Do NOT say you have no tool — find_playlist_opportunities IS available in this workflow.
+- Do NOT tell the user to type /do again if they already asked to "execute" or "run" the search; call find_playlist_opportunities with track_name and user_vibe from the conversation context.
 - If track_name is truly impossible to infer, call find_playlist_opportunities with track_name "unknown" and the tool will prompt the user.
 `;
 }
@@ -2622,6 +2636,9 @@ async function agenticGeminiCall(
 ): Promise<{ text: string; toolCalls: Array<{ name: string; args: any }> }> {
   const playlistBlock = workflowKey === "find_playlist_opportunities" ? playlistWorkflowSystemAddendum() : "";
   const systemPrompt = `You are the ${SYSTEM_IDENTITY}. You serve Fendi Frost as a personal command center assistant.
+
+${ARTIST_GROWTH_MISSION}
+
 ${playlistBlock}
 CRITICAL RULES — MANDATORY:
 1. NO TOOL, NO CLAIM: You MUST use your available tools to fulfill requests. NEVER describe what you would do — actually call the function. If the user asks to see comments, call the tool. Do NOT respond with text saying "I'll do X" without calling the corresponding function.
@@ -2716,6 +2733,8 @@ HARD RULE: For analyze_client_credit, execute it DIRECTLY without propose_plan. 
     : "";
   const playlistBlock = workflowKey === "find_playlist_opportunities" ? playlistWorkflowSystemAddendum() : "";
   const systemPrompt = `${autonomousPrefix}${playlistBlock}You are the ${SYSTEM_IDENTITY}. You serve Fendi Frost as a personal command center assistant.
+
+${ARTIST_GROWTH_MISSION}
 
 CRITICAL RULES â MANDATORY:
 1. NO TOOL, NO CLAIM: You MUST use your available tools to fulfill requests. NEVER describe what you would do â actually call the function. If the user asks to see comments, call the tool. Do NOT respond with text saying "I'll do X" without calling the corresponding function.
@@ -3095,7 +3114,10 @@ Now provide a clear, concise summary for the user based on the results. Use mark
         body: JSON.stringify({
           model: "grok-3-mini-fast",
           messages: [
-            { role: "system", content: `You are the ${SYSTEM_IDENTITY}. Summarize tool results concisely. Be witty and direct.` },
+            {
+              role: "system",
+              content: `You are the ${SYSTEM_IDENTITY}. Summarize tool results concisely. Be witty and direct.\n\n${ARTIST_GROWTH_MISSION}\nWhen summarizing, highlight practical next moves that best serve the north star when the results relate to growth, fans, or releases.`,
+            },
             { role: "user", content: summaryPrompt },
           ],
           max_tokens: 1024,
@@ -3111,7 +3133,12 @@ Now provide a clear, concise summary for the user based on the results. Use mark
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
             contents: [{ role: "user", parts: [{ text: summaryPrompt }] }],
-            systemInstruction: { parts: [{ text: `You are the ${SYSTEM_IDENTITY}. Summarize tool results concisely and clearly.` }] },
+            systemInstruction: {
+              parts: [{
+                text:
+                  `You are the ${SYSTEM_IDENTITY}. Summarize tool results concisely and clearly.\n\n${ARTIST_GROWTH_MISSION}\nWhen summarizing, highlight practical next moves that best serve the north star when the results relate to growth, fans, or releases.`,
+              }],
+            },
             generationConfig: { maxOutputTokens: 1024 },
           }),
         }
@@ -4170,14 +4197,27 @@ serve(async (req) => {
 
       if (trackNl) {
         const inferredNl = inferVibeFromTrack(trackNl);
-        console.log("[PLAYLIST_NL] execute-first (deterministic)", { taskId, track: trackNl, vibe: inferredNl });
-        const immediate = await runPlaylistHubResearch(trackNl, inferredNl, chatId);
-        await sendMessage(chatId, formatAssistantMessage(modelNl, immediate), {}, `task:${taskId}:playlist-immediate`);
+        console.log("[PLAYLIST_NL] confirm-first (deterministic)", { taskId, track: trackNl, vibe: inferredNl });
+        await setPlaylistConfirm(chatId, {
+          track_name: trackNl,
+          inferred_vibe: inferredNl,
+          created_at: new Date().toISOString(),
+        });
+        const confirmNl = [
+          `🎧 *Playlist opportunities*`,
+          ``,
+          `Track: *${trackNl}*`,
+          `Suggested vibe: *${inferredNl}*`,
+          ``,
+          `Reply *yes*, *y*, or *ok* to use this vibe, or type your own vibe in one message.`,
+          `Send *cancel* to abort.`,
+        ].join("\n");
+        await sendMessage(chatId, formatAssistantMessage(modelNl, confirmNl), {}, `task:${taskId}:playlist-nl-confirm`);
         await supabase.from("tasks").update({
           status: "succeeded",
           result_json: {
             execution_lane: "playlist_nl",
-            shortcut: "playlist_execute_first_natural",
+            shortcut: "playlist_confirm_natural",
             track: trackNl,
             inferred_vibe: inferredNl,
           },
@@ -4235,6 +4275,8 @@ serve(async (req) => {
     const hasExecutionIntent = hasPlainEnglishExecutionIntent(lowerText);
 
     let autoPromotedWorkflow: WorkflowEntry | undefined;
+    /** Bypass Lane 1 LLM for "run it again" — reuse saved vibe from last_hub research. */
+    let playlistDirectRedo: { track_name: string; user_vibe: string } | null = null;
     const newClientIntent = isNewClientCreditIntent(lowerText);
     const existingClientIntent = isExistingClientProgressIntent(lowerText);
     // /tax status and /tax forms are shortcut commands — skip intent routing for them
@@ -4299,12 +4341,63 @@ serve(async (req) => {
       } else if (!intentChosen && IMPLEMENTED_WORKFLOW_KEYS.has("find_playlist_opportunities")) {
         const lastPl = await getLastPlaylistResearch(chatId);
         const playlistRedoCue =
-          /\b(search|opportunities|playlist|playlists|results?|again|rerun|redo|same|spotify|vibe|hip\s*hop)\b/.test(lowerText);
+          /\b(search|opportunities|playlist|playlists|results?|again|rerun|redo|same|spotify|vibe|hip\s*hop|run|execute)\b/.test(
+            lowerText,
+          );
         const bareExec = /^(please\s+)?(go\s+ahead(?:\s+and)?\s+)?(just\s+)?(execute|run)\s*[!?.]*$/i.test(text.trim());
         if (lastPl?.track_name && (playlistRedoCue || bareExec)) {
-          autoPromotedWorkflow = SYNTHETIC_FIND_PLAYLIST_OPPORTUNITIES;
+          const uv =
+            typeof lastPl.user_vibe === "string" && lastPl.user_vibe.trim().length > 0
+              ? lastPl.user_vibe.trim()
+              : inferVibeFromTrack(lastPl.track_name);
+          playlistDirectRedo = { track_name: lastPl.track_name, user_vibe: uv };
         }
       }
+    }
+
+    if (playlistDirectRedo) {
+      console.log("[PLAYLIST_REDO_DIRECT] hub research with saved vibe", {
+        taskId,
+        track: playlistDirectRedo.track_name,
+      });
+      await supabase.from("tasks").update({
+        status: "running",
+        selected_workflow: "find_playlist_opportunities",
+        result_json: { execution_lane: "playlist_redo_direct", progress_step: "hub_research" },
+      }).eq("id", taskId);
+      try {
+        const out = await runPlaylistHubResearch(
+          playlistDirectRedo.track_name,
+          playlistDirectRedo.user_vibe,
+          chatId,
+        );
+        await sendMessage(chatId, formatAssistantMessage(modelPitch, out), {}, `task:${taskId}:playlist-redo-direct`);
+        await supabase.from("tasks").update({
+          status: "succeeded",
+          result_json: {
+            execution_lane: "playlist_redo_direct",
+            shortcut: "playlist_redo_direct",
+            track: playlistDirectRedo.track_name,
+            user_vibe: playlistDirectRedo.user_vibe,
+          },
+        }).eq("id", taskId);
+      } catch (err) {
+        const errMsg = (err as Error).message || "unknown";
+        await supabase.from("tasks").update({
+          status: "failed",
+          error: errMsg.slice(0, 300),
+          result_json: { execution_lane: "playlist_redo_direct", error: errMsg.slice(0, 200) },
+        }).eq("id", taskId);
+        await sendMessage(
+          chatId,
+          `❌ Failed: \`${taskId}\` — ${errMsg.slice(0, 200)}`,
+          {},
+          `task:${taskId}:failed`,
+        );
+      }
+      await sendMessage(chatId, `✅ Done: \`${taskId}\``, {}, `task:${taskId}:done`);
+      _currentTaskId = null;
+      return new Response("ok");
     }
 
     if (autoPromotedWorkflow) {
@@ -5069,6 +5162,8 @@ serve(async (req) => {
         : "";
 
       const assistantSystemPrompt = `You are the ${SYSTEM_IDENTITY}. You serve Fendi Frost as a personal command center assistant.
+
+${ARTIST_GROWTH_MISSION}
 
 TWO-LANE RULE â You are in ASSISTANT MODE (Lane 2).
 - Answer questions, explain, draft, brainstorm, plan.
