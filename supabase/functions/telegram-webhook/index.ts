@@ -29,60 +29,84 @@ async function resolveClientIdForTaxGeneration(nameRaw: string | undefined): Pro
   }
   const escapeIlike = (s: string) =>
     s.replace(/\\/g, "\\\\").replace(/%/g, "\\%").replace(/_/g, "\\_");
-  const exactPattern = escapeIlike(trimmed);
 
-  const { data: exactRows, error: exErr } = await supabase
+  // 1. Contains match on clients.name
+  const { data: containsRows, error: exErr } = await supabase
     .from("clients")
     .select("id,name")
-    .ilike("name", exactPattern);
+    .ilike("name", `%${escapeIlike(trimmed)}%`)
+    .limit(20);
   if (exErr) {
     return { ok: false, message: "Client lookup failed: " + exErr.message };
   }
-  const rows = (exactRows ?? []) as { id: string; name: string }[];
-  const lower = trimmed.toLowerCase();
-  const norm = (s: string) => s.trim().toLowerCase();
-  const fullExact = rows.filter((r) => norm(r.name) === lower);
-  if (fullExact.length === 1) {
-    return { ok: true, id: fullExact[0].id, name: fullExact[0].name };
+  const rows = (containsRows ?? []) as { id: string; name: string }[];
+  if (rows.length === 1) {
+    return { ok: true, id: rows[0].id, name: rows[0].name };
   }
-  if (fullExact.length > 1) {
+  if (rows.length > 1) {
+    // Prefer exact match
+    const lower = trimmed.toLowerCase();
+    const exact = rows.filter((r) => r.name.trim().toLowerCase() === lower);
+    if (exact.length === 1) return { ok: true, id: exact[0].id, name: exact[0].name };
     return {
       ok: false,
       message:
-        `Multiple clients named "${trimmed}". Open Control Center and use a unique full name. Matches: ${fullExact.map((r) => r.name).join(", ")}`,
+        `Several clients match "${trimmed}". Use the full name. Options: ${rows.map((r) => r.name).join("; ")}`,
     };
   }
 
-  const safeContains = trimmed.replace(/[%_\\]/g, "").slice(0, 120);
-  if (!safeContains) {
-    return {
-      ok: false,
-      message: `No client found matching "${trimmed}".`,
-    };
+  // 2. First-name-only match on clients.name
+  const firstName = trimmed.split(/\s+/)[0];
+  if (firstName && firstName.length >= 2) {
+    const { data: firstNameRows } = await supabase
+      .from("clients")
+      .select("id,name")
+      .ilike("name", `${escapeIlike(firstName)}%`)
+      .limit(20);
+    const fnRows = (firstNameRows ?? []) as { id: string; name: string }[];
+    if (fnRows.length === 1) {
+      return { ok: true, id: fnRows[0].id, name: fnRows[0].name };
+    }
+    if (fnRows.length > 1) {
+      return {
+        ok: false,
+        message:
+          `Several clients match first name "${firstName}". Use the full name. Options: ${fnRows.map((r) => r.name).join("; ")}`,
+      };
+    }
   }
-  const { data: fuzzyRows, error: fzErr } = await supabase
-    .from("clients")
-    .select("id,name")
-    .ilike("name", `%${escapeIlike(safeContains)}%`)
+
+  // 3. Fallback: match against tax_returns.client_name and return the associated client
+  const { data: trRows } = await supabase
+    .from("tax_returns")
+    .select("client_id, client_name")
+    .ilike("client_name", `%${escapeIlike(trimmed)}%`)
+    .not("client_id", "is", null)
     .limit(20);
-  if (fzErr) {
-    return { ok: false, message: "Client lookup failed: " + fzErr.message };
-  }
-  const fuzzy = (fuzzyRows ?? []) as { id: string; name: string }[];
-  if (fuzzy.length === 0) {
+  const trMatches = (trRows ?? []) as { client_id: string; client_name: string }[];
+  if (trMatches.length >= 1) {
+    const unique = Array.from(new Map(trMatches.map((r) => [r.client_id, r])).values());
+    if (unique.length === 1) {
+      // Fetch canonical name from clients table
+      const { data: c } = await supabase
+        .from("clients")
+        .select("id,name")
+        .eq("id", unique[0].client_id)
+        .maybeSingle();
+      if (c) return { ok: true, id: c.id, name: c.name };
+      return { ok: true, id: unique[0].client_id, name: unique[0].client_name };
+    }
     return {
       ok: false,
       message:
-        `No client found for "${trimmed}". Create the client in Control Center or match the name exactly.`,
+        `Several tax records match "${trimmed}". Use the full name. Options: ${unique.map((r) => r.client_name).join("; ")}`,
     };
   }
-  if (fuzzy.length === 1) {
-    return { ok: true, id: fuzzy[0].id, name: fuzzy[0].name };
-  }
+
   return {
     ok: false,
     message:
-      `Several clients match "${trimmed}". Use the full name. Options: ${fuzzy.map((r) => r.name).join("; ")}`,
+      `No client found for "${trimmed}". Create the client in Control Center or match the name exactly.`,
   };
 }
 const SYSTEM_IDENTITY = "Fendi Control Center AI";
