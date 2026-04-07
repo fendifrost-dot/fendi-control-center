@@ -97,6 +97,7 @@ export type Database = {
       clients: {
         Row: {
           business_type: string | null
+          client_pipeline: string
           created_at: string | null
           drive_folder_id: string | null
           email: string | null
@@ -106,6 +107,7 @@ export type Database = {
         }
         Insert: {
           business_type?: string | null
+          client_pipeline?: string
           created_at?: string | null
           drive_folder_id?: string | null
           email?: string | null
@@ -115,6 +117,7 @@ export type Database = {
         }
         Update: {
           business_type?: string | null
+          client_pipeline?: string
           created_at?: string | null
           drive_folder_id?: string | null
           email?: string | null
