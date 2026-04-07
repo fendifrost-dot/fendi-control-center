@@ -12,6 +12,8 @@ const corsHeaders = {
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
 const SUPABASE_SERVICE_ROLE_KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
 
+const FREE_FILE_AGI_HINT = 85000;
+
 const TAX_SYSTEM_PROMPT = `You are a senior tax accountant AI assistant. You produce THREE outputs from raw tax data.
 
 IMPORTANT: We are NOT filing taxes — only preparing documents so the client is READY to file.
@@ -23,6 +25,10 @@ IMPORTANT: We are NOT filing taxes — only preparing documents so the client is
 CRITICAL: The "ingestion_income" field contains VERIFIED income extracted directly from analyzed tax documents (1099-K, W-2, etc.). If the CC Tax data (transactions, pl_report) is empty, shows errors, or shows $0, you MUST use ingestion_income as the adjusted_gross_income. NEVER return AGI=$0 when ingestion_income > 0.
 
 IMPORTANT: The ingestion_income field contains verified income from analyzed documents. If other income data is $0 or empty, use ingestion_income as the adjusted_gross_income.
+
+PRODUCT RULES (non-negotiable):
+- Do NOT tell the user their only option is to "hire a CPA", "see a tax professional", or "use a professional preparer" as the primary path. This product always generates mail-in IRS PDF drafts and a TurboTax (TXF) export regardless of AGI.
+- For filing_recommendation.steps: prefer concrete product actions (review worksheet, open TXF in TurboTax, print IRS PDFs from Drive, use IRS Free File if AGI under ~$85k) — not generic "consult a professional" unless you also list the generated deliverables first.
 
 Respond with valid JSON only. The json_summary MUST include form_1040.adjusted_gross_income as a real number based on the data provided. Always include a "filing_recommendation" key with at minimum { "method": "...", "agi": <number>, "steps": ["..."] }.`;
 
@@ -89,6 +95,43 @@ function normalizeTaxGenerationOutput(
     ...form1040,
     adjusted_gross_income: ingestionIncome,
   };
+}
+
+const PRO_PREP_REGEX =
+  /tax\s+professional|hire\s+a\s+cpa|\bcpa\b|enrolled\s+agent|tax\s+preparer|professional\s+preparer|see\s+a\s+professional|consult\s+a\s+pro/i;
+
+function sanitizeFilingRecommendation(
+  rec: Record<string, unknown> | undefined,
+  agi: number,
+): Record<string, unknown> {
+  const softwareHint =
+    agi <= FREE_FILE_AGI_HINT
+      ? "Use IRS Free File or import the TXF into TurboTax (your AGI is within typical Free File limits)."
+      : "Import the TXF into TurboTax or similar paid software; IRS Free File guided partners often cap around $85k AGI.";
+
+  const base: Record<string, unknown> = {
+    method: typeof rec?.method === "string" && rec.method.trim() && !PRO_PREP_REGEX.test(rec.method)
+      ? rec.method
+      : (agi <= FREE_FILE_AGI_HINT
+        ? "IRS Free File or TurboTax (TXF import)"
+        : "TurboTax/paid software or mail-in IRS PDF drafts"),
+    agi,
+    steps: [] as string[],
+  };
+
+  const rawSteps = Array.isArray(rec?.steps) ? rec.steps as unknown[] : [];
+  const kept = rawSteps
+    .filter((s): s is string => typeof s === "string" && s.trim().length > 0 && !PRO_PREP_REGEX.test(s))
+    .slice(0, 12);
+
+  const defaults = [
+    "Review the generated worksheet and JSON summary for accuracy.",
+    softwareHint,
+    "Open the client tax folder on Google Drive: draft IRS PDFs (mail-in) and the .txf file should both be present.",
+  ];
+
+  base.steps = kept.length > 0 ? kept : defaults;
+  return { ...rec, ...base };
 }
 
 /** Never throws — returns { error: string } on failure so ingestion + Claude still run. */
@@ -339,17 +382,22 @@ ${taxDataPayload}`;
         form1040.total_income = ingestionIncome;
       }
 
-      const recommendation = (generated.filing_recommendation || {
-        method: agi <= 84000 ? "IRS Free File / TurboTax import (TXF)" : "Paper filing with IRS PDF forms",
-        agi: agi,
-        steps: [
-          "Review the generated worksheet for accuracy",
-          "Verify all income sources are accounted for",
-          agi <= 84000
-            ? "Import the TXF file into TurboTax or use IRS Free File"
-            : "Print and mail the completed 1040 forms to the IRS",
-        ],
-      }) as Record<string, any>;
+      const recommendation = sanitizeFilingRecommendation(
+        (generated.filing_recommendation || {
+          method: agi <= FREE_FILE_AGI_HINT
+            ? "IRS Free File / TurboTax import (TXF)"
+            : "TurboTax (TXF) and mail-in IRS PDF drafts",
+          agi: agi,
+          steps: [
+            "Review the generated worksheet for accuracy",
+            "Verify all income sources are accounted for",
+            agi <= FREE_FILE_AGI_HINT
+              ? "Import the TXF file into TurboTax or use IRS Free File"
+              : "Use TurboTax or similar with TXF import, and/or print IRS PDF drafts to mail",
+          ],
+        }) as Record<string, unknown>,
+        agi,
+      ) as Record<string, any>;
 
       // Persist to Supabase
       const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
@@ -380,7 +428,7 @@ ${taxDataPayload}`;
         new_values: { status: "draft", year },
       });
 
-      // AGI-based output strategy
+      // Always produce both IRS PDF drafts (Drive + storage) and TXF — AGI only affects filing *recommendation* text.
       let pdfResults: any = null;
       let txfResults: any = null;
 
@@ -412,27 +460,17 @@ ${taxDataPayload}`;
         }
       }
 
-      if (agi <= 84000) {
-        console.log(
-          `[generate] AGI $${agi} <= $84,000 — generating TXF for Free File/TurboTax import`
-        );
-        txfResults = await runTxfExport(
+      console.log(
+        `[generate] AGI $${agi} — generating IRS PDFs + TXF in parallel (Free File hint threshold $${FREE_FILE_AGI_HINT})`,
+      );
+      [pdfResults, txfResults] = await Promise.all([
+        runPdfFill(),
+        runTxfExport(
           taxReturnId,
           body.client_name || body.client_id || "unknown",
           year
-        );
-        pdfResults = await runPdfFill();
-      } else {
-        console.log(
-          `[generate] AGI $${agi} > $84,000 — generating IRS PDF forms`
-        );
-        pdfResults = await runPdfFill();
-        txfResults = await runTxfExport(
-          taxReturnId,
-          body.client_name || body.client_id || "unknown",
-          year
-        );
-      }
+        ),
+      ]);
 
       return {
         year: String(year),
@@ -445,10 +483,7 @@ ${taxDataPayload}`;
           txf_results: txfResults,
           ingestion_results: ingestionResults[String(year)] || null,
           agi,
-          output_strategy:
-            agi <= 84000
-              ? "txf_primary_pdf_backup"
-              : "pdf_primary_txf_supplementary",
+          output_strategy: "pdf_and_txf_always",
         },
       };
     }

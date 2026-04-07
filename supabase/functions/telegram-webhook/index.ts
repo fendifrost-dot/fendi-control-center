@@ -32,33 +32,52 @@ async function resolveClientIdForTaxGeneration(nameRaw: string | undefined): Pro
   }
   const escapeIlike = (s: string) =>
     s.replace(/\\/g, "\\\\").replace(/%/g, "\\%").replace(/_/g, "\\_");
+  const rankTaxName = (name: string): number => {
+    const upper = name.toUpperCase();
+    if (upper.includes("TAXES")) return 0;
+    if (upper.includes("CREDIT")) return 2;
+    return 1;
+  };
+  const deterministicPick = (rows: Array<{ id: string; name: string }>) =>
+    [...rows].sort((a, b) => a.name.localeCompare(b.name) || a.id.localeCompare(b.id))[0];
+  const firstNameFallbackPick = (rows: Array<{ id: string; name: string }>) =>
+    [...rows].sort((a, b) => {
+      const d = rankTaxName(a.name) - rankTaxName(b.name);
+      if (d !== 0) return d;
+      return a.name.localeCompare(b.name) || a.id.localeCompare(b.id);
+    })[0];
 
-  // 1. Contains match on clients.name
-  const { data: containsRows, error: exErr } = await supabase
+  // 1) Exact full-name match FIRST (case-insensitive equality semantics, no wildcards).
+  const { data: exactRows, error: exErr } = await supabase
     .from("clients")
     .select("id,name")
-    .ilike("name", `%${escapeIlike(trimmed)}%`)
+    .ilike("name", escapeIlike(trimmed))
     .limit(20);
   if (exErr) {
     return { ok: false, message: "Client lookup failed: " + exErr.message };
   }
-  const rows = (containsRows ?? []) as { id: string; name: string }[];
-  if (rows.length === 1) {
-    return { ok: true, id: rows[0].id, name: rows[0].name };
-  }
-  if (rows.length > 1) {
-    // Prefer exact match
-    const lower = trimmed.toLowerCase();
-    const exact = rows.filter((r) => r.name.trim().toLowerCase() === lower);
-    if (exact.length === 1) return { ok: true, id: exact[0].id, name: exact[0].name };
-    return {
-      ok: false,
-      message:
-        `Several clients match "${trimmed}". Use the full name. Options: ${rows.map((r) => r.name).join("; ")}`,
-    };
+  const exact = (exactRows ?? []) as { id: string; name: string }[];
+  if (exact.length >= 1) {
+    const pick = deterministicPick(exact);
+    return { ok: true, id: pick.id, name: pick.name };
   }
 
-  // 2. First-name-only match on clients.name
+  // 2) Full search-string contains match (still full phrase, not first-name only).
+  const { data: containsRows, error: containsErr } = await supabase
+    .from("clients")
+    .select("id,name")
+    .ilike("name", `%${escapeIlike(trimmed)}%`)
+    .limit(20);
+  if (containsErr) {
+    return { ok: false, message: "Client lookup failed: " + containsErr.message };
+  }
+  const contains = (containsRows ?? []) as { id: string; name: string }[];
+  if (contains.length >= 1) {
+    const pick = deterministicPick(contains);
+    return { ok: true, id: pick.id, name: pick.name };
+  }
+
+  // 3) Last resort: first-name prefix. Prefer TAXES over CREDIT for tax generation.
   const firstName = trimmed.split(/\s+/)[0];
   if (firstName && firstName.length >= 2) {
     const { data: firstNameRows } = await supabase
@@ -67,15 +86,9 @@ async function resolveClientIdForTaxGeneration(nameRaw: string | undefined): Pro
       .ilike("name", `${escapeIlike(firstName)}%`)
       .limit(20);
     const fnRows = (firstNameRows ?? []) as { id: string; name: string }[];
-    if (fnRows.length === 1) {
-      return { ok: true, id: fnRows[0].id, name: fnRows[0].name };
-    }
-    if (fnRows.length > 1) {
-      return {
-        ok: false,
-        message:
-          `Several clients match first name "${firstName}". Use the full name. Options: ${fnRows.map((r) => r.name).join("; ")}`,
-      };
+    if (fnRows.length >= 1) {
+      const pick = firstNameFallbackPick(fnRows);
+      return { ok: true, id: pick.id, name: pick.name };
     }
   }
 
@@ -112,6 +125,100 @@ async function resolveClientIdForTaxGeneration(nameRaw: string | undefined): Pro
       `No client found for "${trimmed}". Create the client in Control Center or match the name exactly.`,
   };
 }
+
+/** Years like 2022 from chat text so we do not default to the current calendar year when the model omits tax_years. */
+function extractTaxYearsFromText(text: string): number[] {
+  const years = new Set<number>();
+  const re = /\b(20[0-3][0-9])\b/g;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(text)) !== null) {
+    const y = parseInt(m[1], 10);
+    if (y >= 2000 && y <= 2036) years.add(y);
+  }
+  return [...years].sort((a, b) => a - b);
+}
+
+/** Best-effort client name from common Telegram phrasings (deterministic path for /do tax). */
+function extractClientNameForTaxCommand(userMessage: string): string | null {
+  const msg = userMessage.trim().replace(/\s+/g, " ");
+  const normalized = msg
+    .replace(/[’]/g, "'")
+    .replace(/\b(?:'s)\b/gi, "")
+    .replace(/\s+return\b/gi, "")
+    .trim();
+  const cleanup = (name: string): string => {
+    return name
+      .replace(/[’]/g, "'")
+      .replace(/\b(?:'s)\b/gi, "")
+      .replace(/\bfor\s+20\d{2}\b/gi, "")
+      .replace(/\b20\d{2}\b/g, "")
+      .replace(/\b(?:tax|return|forms?)\b/gi, "")
+      .replace(/^[\s"'`“”‘’,.;:!?]+|[\s"'`“”‘’,.;:!?]+$/g, "")
+      .replace(/\s+/g, " ")
+      .trim();
+  };
+  const gen = msg.match(/generate\s+(.+?)\s+tax\s+return/i);
+  if (gen?.[1]) {
+    const name = cleanup(gen[1].replace(/^the\s+/i, ""));
+    if (name.length >= 2 && name.length < 120) return name;
+  }
+  const doTax = normalized.match(/(?:^|\b)(?:do|prepare|file|complete|run|generate)\s+(.+?)\s+tax(?:\s+docs?|(?:\s+return)?)?(?:\s+for\s+20\d{2})?$/i);
+  if (doTax?.[1]) {
+    const name = cleanup(doTax[1].replace(/^the\s+/i, ""));
+    if (name.length >= 2 && name.length < 120) return name;
+  }
+  const possessive = normalized.match(/(?:^|\b)(.+?)\s+(?:20\d{2}\s+)?tax\s+return\b/i);
+  if (possessive?.[1]) {
+    const name = cleanup(possessive[1].replace(/^the\s+/i, ""));
+    if (name.length >= 2 && name.length < 120) return name;
+  }
+  const forYear = msg.match(/\bfor\s+([A-Za-z][A-Za-z\s.'-]+?)\s+for\s+(20\d{2})\b/i);
+  if (forYear?.[1]) {
+    const name = cleanup(forYear[1]);
+    if (name.length >= 2 && name.length < 120) return name;
+  }
+  const tr = msg.match(/tax\s+return\s+for\s+([A-Za-z][A-Za-z\s.'-]+?)(?:\s+for\s+20\d{2}|\s*$)/i);
+  if (tr?.[1]) {
+    const name = cleanup(tr[1]);
+    if (name.length >= 2 && name.length < 120) return name;
+  }
+  return null;
+}
+
+function formatPdfAndTxfSummary(r: Record<string, unknown>): string {
+  const lines: string[] = [];
+  const pdf = r.pdf_results as Record<string, unknown> | undefined;
+  if (pdf?.success === true) {
+    const ok = Number(pdf.successful ?? 0);
+    const total = Number(pdf.forms_processed ?? 0);
+    const folder = pdf.drive_folder_id != null ? String(pdf.drive_folder_id) : "—";
+    lines.push(`🧾 IRS PDF drafts: ${ok}/${total || "?"} OK (Supabase + Drive). Drive folder id: ${folder}`);
+    const results = pdf.results as Array<Record<string, unknown>> | undefined;
+    if (Array.isArray(results)) {
+      const errs = results.filter((x) => x.status === "error");
+      if (errs.length) {
+        lines.push(
+          `   PDF errors: ${
+            errs.map((e) => `${e.form}: ${String(e.error ?? "").slice(0, 80)}`).join("; ")
+          }`,
+        );
+      }
+    }
+  } else if (pdf && typeof pdf === "object" && pdf.error != null) {
+    lines.push(`🧾 IRS PDF drafts: failed — ${String(pdf.error).slice(0, 200)}`);
+  }
+  const txf = r.txf_results as Record<string, unknown> | undefined;
+  if (txf?.success === true) {
+    const fn = txf.file_name != null ? String(txf.file_name) : "export.txf";
+    const du = txf.drive_url != null ? String(txf.drive_url) : "";
+    const sp = txf.storage_path != null ? String(txf.storage_path) : "";
+    lines.push(`📄 TXF: ${fn}${du ? ` | Drive: ${du}` : ""}${sp ? ` | storage: tax-documents/${sp}` : ""}`);
+  } else if (txf && typeof txf === "object" && txf.error != null) {
+    lines.push(`📄 TXF: failed — ${String(txf.error).slice(0, 200)}`);
+  }
+  return lines.length ? lines.join("\n") : "";
+}
+
 const SYSTEM_IDENTITY = "Fendi Control Center AI";
 
 /** Strategic north star — wired into all agent/assistant system prompts so decisions aren’t only task-shaped. */
@@ -1536,14 +1643,15 @@ const AGENT_TOOLS: ToolDef[] = [
   {
     name: "generate_tax_docs" as const,
     description:
-      "Generate 6 tax preparation documents from CC Tax data: (1) Form 1040 JSON summary with Schedule SE, (2) human-readable worksheet, (3) TXF export for TurboTax, (4) line-by-line Form 1040 mapping (Lines 1-37), (5) CSV export for Free File import, (6) filing recommendation based on AGI. These are PREP documents only — not filing. Supports multi-year via tax_years array.",
+      "Generate tax preparation outputs from CC Tax + Drive: Form 1040 JSON summary, worksheet, TXF for TurboTax, line mapping, CSV, filing recommendation, filled IRS PDF drafts (storage + Drive), and TXF upload. ALWAYS pass tax_years when the user states a year (e.g. 2022). If you omit tax_years, the server still tries to infer the year from the user's message. These are prep drafts — not e-file.",
     parameters: {
       type: "object" as const,
       properties: {
         tax_years: {
           type: "array",
           items: { type: "number" },
-          description: "Array of tax years to generate documents for (e.g. [2024] or [2023, 2024]). Defaults to current year.",
+          description:
+            "Tax years to run (e.g. [2022]). REQUIRED when the user names a year — never assume the current calendar year.",
         },
         client_name: {
           type: "string",
@@ -1554,13 +1662,20 @@ const AGENT_TOOLS: ToolDef[] = [
       required: ["client_name"],
     },
     destructive: false,
-    execute: async (args: { tax_years?: number[]; client_name?: string }) => {
+    execute: async (args: { tax_years?: number[]; client_name?: string }, ctx?: ToolExecuteContext) => {
       const ANON_KEY = Deno.env.get("SUPABASE_PUBLISHABLE_KEY") || SUPABASE_SERVICE_ROLE_KEY;
-      const resolved = await resolveClientIdForTaxGeneration(args.client_name);
+      const fromMsgClient = ctx?.userMessage ? extractClientNameForTaxCommand(ctx.userMessage) : null;
+      const clientNameForResolve = (fromMsgClient && fromMsgClient.trim()) ||
+        (args.client_name ?? "").trim();
+      const resolved = await resolveClientIdForTaxGeneration(clientNameForResolve);
       if (!resolved.ok) {
         return JSON.stringify({ error: resolved.message });
       }
-      const allYears = args.tax_years ?? [new Date().getFullYear()];
+      const fromMsgYears = ctx?.userMessage ? extractTaxYearsFromText(ctx.userMessage) : [];
+      const mergedYears = (Array.isArray(args.tax_years) && args.tax_years.length > 0)
+        ? args.tax_years
+        : (fromMsgYears.length > 0 ? fromMsgYears : null);
+      const allYears = mergedYears ?? [new Date().getFullYear()];
       const batchSize = 2;
       const mergedResults: Record<string, any> = {};
       const batches: number[][] = [];
@@ -1627,10 +1742,12 @@ const AGENT_TOOLS: ToolDef[] = [
           summary += `\n⚠️ No Drive document analysis available`;
         }
         summary += `\n• AGI: $${(r.agi ?? rec?.agi ?? 0).toLocaleString()}`;
-        summary += `\n• Recommended filing method: ${(rec?.method && rec.method !== "Undecided") ? rec.method : ((r.agi ?? 0) <= 84000 ? "IRS Free File / TurboTax" : "Paper filing with IRS PDF forms")}`;
+        summary += `\n• Recommended filing method: ${(rec?.method && rec.method !== "Undecided") ? rec.method : ((r.agi ?? 0) <= 85000 ? "IRS Free File / TurboTax (TXF)" : "TurboTax/paid software + mail-in IRS PDF drafts")}`;
         summary += `\n• Filing readiness: ${readiness?.score ?? readiness?.percentage ?? "N/A"}/100 ${readiness?.ready_to_file ? "✅" : "⚠️"}`;
         summary += `\n• Missing items: ${readiness?.missing_items?.length ? readiness.missing_items.join(", ") : "None"}`;
         summary += `\n• Documents generated: ${docList.join(", ")}`;
+        const pdfTxf = formatPdfAndTxfSummary(r);
+        if (pdfTxf) summary += `\n${pdfTxf}`;
         if (rec?.steps?.length) {
           summary += `\n\n📌 Next steps:\n${rec.steps.map((s: string, i: number) => `  ${i + 1}. ${s}`).join("\n")}`;
         }
@@ -3019,6 +3136,31 @@ async function executeAgenticLoop(chatId: string, userMessage: string, opts: { t
         ? await agenticGrokCall(userMessage, docContext, conversationContext, workflowToolNames, opts.workflowKey)
         : await agenticGeminiCall(userMessage, docContext, conversationContext, workflowToolNames, opts.workflowKey);
     }
+  } else if (opts.workflowKey === "generate_tax_docs") {
+    const inferredClient = extractClientNameForTaxCommand(userMessage);
+    const inferredYears = extractTaxYearsFromText(userMessage);
+    if (inferredClient) {
+      logEvent({
+        event: "tax_docs_args_inferred",
+        taskId: opts.taskId,
+        inferredClient,
+        inferredYears,
+      });
+      result = {
+        text: "",
+        toolCalls: [{
+          name: "generate_tax_docs",
+          args: {
+            client_name: inferredClient,
+            ...(inferredYears.length ? { tax_years: inferredYears } : {}),
+          },
+        }],
+      };
+    } else {
+      result = model === "grok"
+        ? await agenticGrokCall(userMessage, docContext, conversationContext, workflowToolNames, opts.workflowKey)
+        : await agenticGeminiCall(userMessage, docContext, conversationContext, workflowToolNames, opts.workflowKey);
+    }
   } else {
     result = model === "grok"
       ? await agenticGrokCall(userMessage, docContext, conversationContext, workflowToolNames, opts.workflowKey)
@@ -3133,6 +3275,19 @@ ${result.toolCalls.map((tc, i) => `- ${tc.name}: ${toolResults[i]}`).join("\n")}
 
 Now provide a clear, concise summary for the user based on the results. Use markdown formatting.`;
 
+    const taxDocSummarySystem =
+      `You are the ${SYSTEM_IDENTITY}. Summarize tax tool results with strict factual accuracy.
+
+RULES:
+- Copy tax years, AGI, and deliverables EXACTLY as stated in the tool output. Never claim a different tax year than the tool ran for.
+- If the tool lists PDF or TXF results, describe success/failure only from that text (counts, errors, Drive links).
+- Do NOT tell the user to hire a CPA or "see a tax professional" as the main next step. The pipeline already produced drafts; at most one short optional note that independent review is the taxpayer's responsibility.
+- No jokey "time warp" or "wrong year glitch" language. Do not contradict the tool output.
+- Stay neutral and tax-focused for this message (no pivot to music marketing).`;
+
+    const defaultSummarySystem =
+      `You are the ${SYSTEM_IDENTITY}. Summarize tool results concisely. Be witty and direct.\n\n${ARTIST_GROWTH_MISSION}\nWhen summarizing, highlight practical next moves that best serve the north star when the results relate to growth, fans, or releases.`;
+
     let summary: string;
     if (model === "grok") {
       const resp = await fetch("https://api.x.ai/v1/chat/completions", {
@@ -3143,7 +3298,7 @@ Now provide a clear, concise summary for the user based on the results. Use mark
           messages: [
             {
               role: "system",
-              content: `You are the ${SYSTEM_IDENTITY}. Summarize tool results concisely. Be witty and direct.\n\n${ARTIST_GROWTH_MISSION}\nWhen summarizing, highlight practical next moves that best serve the north star when the results relate to growth, fans, or releases.`,
+              content: opts.workflowKey === "generate_tax_docs" ? taxDocSummarySystem : defaultSummarySystem,
             },
             { role: "user", content: summaryPrompt },
           ],
@@ -3162,8 +3317,9 @@ Now provide a clear, concise summary for the user based on the results. Use mark
             contents: [{ role: "user", parts: [{ text: summaryPrompt }] }],
             systemInstruction: {
               parts: [{
-                text:
-                  `You are the ${SYSTEM_IDENTITY}. Summarize tool results concisely and clearly.\n\n${ARTIST_GROWTH_MISSION}\nWhen summarizing, highlight practical next moves that best serve the north star when the results relate to growth, fans, or releases.`,
+                text: opts.workflowKey === "generate_tax_docs"
+                  ? taxDocSummarySystem
+                  : `You are the ${SYSTEM_IDENTITY}. Summarize tool results concisely and clearly.\n\n${ARTIST_GROWTH_MISSION}\nWhen summarizing, highlight practical next moves that best serve the north star when the results relate to growth, fans, or releases.`,
               }],
             },
             generationConfig: { maxOutputTokens: 1024 },

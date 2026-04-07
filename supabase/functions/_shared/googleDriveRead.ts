@@ -235,6 +235,10 @@ export async function findClientTaxFolder(
   const nameUpper = clientName.toUpperCase().trim();
   const firstName = nameUpper.split(/\s+/)[0];
   const yearStr = String(taxYear);
+  const isAllowedTaxFolderName = (folderName: string): boolean => {
+    const u = folderName.toUpperCase();
+    return u.includes("TAXES") && !u.includes("CREDIT");
+  };
 
   // Determine if we have a root folder ID (optional — works without it)
   const rawRootId = Deno.env.get("DRIVE_FOLDER_ID");
@@ -275,7 +279,11 @@ export async function findClientTaxFolder(
       // Pass 1: folders matching firstName AND year (best match)
       for (const folder of subfolders) {
         const folderUpper = folder.name.toUpperCase();
-        if (folderUpper.includes(firstName) && folderUpper.includes(yearStr)) {
+        if (
+          folderUpper.includes(firstName) &&
+          folderUpper.includes(yearStr) &&
+          isAllowedTaxFolderName(folderUpper)
+        ) {
           console.log("Fuzzy matched year-specific Drive folder: " + folder.name);
           return { folderId: folder.id, folderName: folder.name };
         }
@@ -284,7 +292,11 @@ export async function findClientTaxFolder(
       // Pass 2: folders matching firstName+TAX but NOT year — always check for year subfolders
       for (const folder of subfolders) {
         const folderUpper = folder.name.toUpperCase();
-        if (folderUpper.includes(firstName) && folderUpper.includes("TAX") && !folderUpper.includes(yearStr)) {
+        if (
+          folderUpper.includes(firstName) &&
+          isAllowedTaxFolderName(folderUpper) &&
+          !folderUpper.includes(yearStr)
+        ) {
           // Look for year subfolder inside this general tax folder
           const yearFolder = await findFolderInParent(folder.id, yearStr);
           if (yearFolder) {
@@ -305,7 +317,7 @@ export async function findClientTaxFolder(
             console.warn("Could not list inner subfolders: " + innerErr);
           }
           // No year subfolder found — fall back to general folder as last resort
-          console.log("No year subfolder found, using general tax folder: " + folder.name);
+          console.log("No year subfolder found, using general TAXES folder: " + folder.name);
           return { folderId: folder.id, folderName: folder.name };
         }
       }
@@ -331,7 +343,10 @@ export async function findClientTaxFolder(
           } catch (innerErr) {
             console.warn("Could not list subfolders of " + candidate + ": " + innerErr);
           }
-          console.log("No year subfolder, using general folder: " + candidate);
+          if (!isAllowedTaxFolderName(candidate)) {
+            continue;
+          }
+          console.log("No year subfolder, using general TAXES folder: " + candidate);
           return { folderId: found, folderName: candidate };
         }
       }
@@ -354,7 +369,11 @@ export async function findClientTaxFolder(
     // Prefer year-specific matches first
     for (const result of searchResults) {
       const nameUp = result.name.toUpperCase();
-      if (nameUp.includes(firstName) && nameUp.includes(yearStr)) {
+      if (
+        nameUp.includes(firstName) &&
+        nameUp.includes(yearStr) &&
+        isAllowedTaxFolderName(nameUp)
+      ) {
         console.log("Found year-specific folder via global search: " + result.name);
         return { folderId: result.id, folderName: result.name };
       }
@@ -362,7 +381,11 @@ export async function findClientTaxFolder(
     // Then check general tax folders for year subfolders
     for (const result of searchResults) {
       const nameUp = result.name.toUpperCase();
-      if (nameUp.includes(firstName) && nameUp.includes("TAX") && !nameUp.includes(yearStr)) {
+      if (
+        nameUp.includes(firstName) &&
+        isAllowedTaxFolderName(nameUp) &&
+        !nameUp.includes(yearStr)
+      ) {
         const yearFolder = await findFolderInParent(result.id, yearStr);
         if (yearFolder) {
           console.log("Found year subfolder " + yearStr + " inside global match " + result.name);
@@ -377,7 +400,7 @@ export async function findClientTaxFolder(
             }
           }
         } catch (_) { /* ignore */ }
-        console.log("No year subfolder, using global match: " + result.name);
+        console.log("No year subfolder, using global TAXES match: " + result.name);
         return { folderId: result.id, folderName: result.name };
       }
     }

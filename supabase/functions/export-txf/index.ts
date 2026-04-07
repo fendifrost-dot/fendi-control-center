@@ -1,4 +1,4 @@
-import { serve } from 'https://deno.land/std@0.168.0/http/server.ts';
+import { createClient } from 'https://esm.sh/@supabase/supabase-js@2.49.1';
 import { getAccessToken } from '../_shared/googleDriveUpload.ts';
 
 const corsHeaders = {
@@ -66,6 +66,89 @@ interface TaxReturnData {
     total_expenses: number;
     net_profit: number;
   };
+}
+
+function num(v: unknown): number {
+  const n = Number(v);
+  return Number.isFinite(n) ? n : 0;
+}
+
+/** Map Control Center tax_returns.json_summary (Claude / generate-tax-documents) into TXF builder input. */
+function buildTaxReturnDataFromCcRow(row: Record<string, unknown>): TaxReturnData {
+  const summary = (row.json_summary as Record<string, unknown>) || {};
+  const f1040 = (summary.form_1040 as Record<string, unknown>) || {};
+  const schedC = (summary.schedule_c as Record<string, unknown>) ||
+    (f1040.schedule_c as Record<string, unknown>) || {};
+  const schedSe = (summary.schedule_se as Record<string, unknown>) || {};
+
+  const agi = num(f1040.adjusted_gross_income ?? row.agi);
+  const totalIncome = num(f1040.total_income ?? row.total_income);
+  const wages = num(f1040.wages ?? f1040.line_1);
+  const business = num(
+    schedC.net_profit ?? schedC.net_profit_or_loss ?? f1040.business_income ?? f1040.line_8,
+  );
+
+  const income: Record<string, number> = {};
+  if (wages !== 0) income.wages = wages;
+  if (business !== 0) income.business_income = business;
+  if (agi !== 0) income.agi = agi;
+  else if (totalIncome !== 0) income.agi = totalIncome;
+
+  const other = num(f1040.other_income ?? f1040.line_8);
+  if (other !== 0 && !income.business_income) income.other_income = other;
+  if (totalIncome !== 0 && Object.keys(income).length === 0) income.other_income = totalIncome;
+
+  const schedCGross = num(schedC.gross_receipts ?? schedC.gross_income);
+  const schedCExp = num(schedC.total_expenses);
+  const schedCNet = num(schedC.net_profit ?? schedC.net_profit_or_loss);
+
+  return {
+    client_name: String(row.client_name ?? 'Unknown'),
+    tax_year: Number(row.tax_year ?? new Date().getFullYear()),
+    filing_status: String(f1040.filing_status ?? row.filing_status ?? 'single'),
+    income,
+    deductions: {
+      type: String((summary.deductions as Record<string, unknown>)?.type ?? 'standard'),
+      standard_amount: num(
+        (summary.deductions as Record<string, unknown>)?.standard_amount ?? f1040.standard_deduction,
+      ),
+      itemized: ((summary.deductions as Record<string, unknown>)?.itemized as Record<string, number>) || {},
+      qbi_deduction: num(f1040.qbi_deduction),
+    },
+    credits: (summary.credits as Record<string, number>) || {},
+    tax_payments: (summary.tax_payments as Record<string, number>) || {},
+    tax_computed: {
+      taxable_income: num(f1040.taxable_income),
+      tax: num(f1040.tax ?? f1040.income_tax),
+      total_tax: num(f1040.total_tax),
+      se_tax: num(schedSe.self_employment_tax ?? schedSe.se_tax ?? f1040.self_employment_tax),
+      refund_or_owed: num(f1040.amount_owed_or_refund ?? f1040.refund ?? f1040.amount_owed),
+    },
+    schedule_c:
+      schedCGross || schedCExp || schedCNet
+        ? {
+          gross_income: schedCGross,
+          total_expenses: schedCExp,
+          net_profit: schedCNet,
+        }
+        : undefined,
+  };
+}
+
+async function uploadTxfToCcBucket(
+  supabase: ReturnType<typeof createClient>,
+  taxReturnId: string,
+  fileName: string,
+  content: string,
+): Promise<{ storagePath: string | null; error: string | null }> {
+  const path = `${taxReturnId}/${fileName}`;
+  const bytes = new TextEncoder().encode(content);
+  const { error } = await supabase.storage.from('tax-documents').upload(path, bytes, {
+    contentType: 'text/plain',
+    upsert: true,
+  });
+  if (error) return { storagePath: null, error: error.message };
+  return { storagePath: path, error: null };
 }
 
 function formatDate(date: Date): string {
@@ -282,62 +365,106 @@ Deno.serve(async (req: Request) => {
 
     console.log(`[export-txf] Starting export for ${client_name || tax_return_id} ${tax_year || ''}`);
 
-    // Step 1: Read tax return data from Supabase
-    let query: string;
-    if (tax_return_id) {
-      query = `id=eq.${tax_return_id}&select=*`;
+    const supabaseUrl = Deno.env.get('SUPABASE_URL');
+    const supabaseKey = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY');
+
+    let txfData: TaxReturnData;
+
+    if (tax_return_id && supabaseUrl && supabaseKey) {
+      // Control Center: generate-tax-documents writes tax_returns here; IDs do not exist on CC_TAX (taxgenerator).
+      const cc = createClient(supabaseUrl, supabaseKey);
+      const { data: row, error: rowErr } = await cc
+        .from('tax_returns')
+        .select('*')
+        .eq('id', tax_return_id)
+        .maybeSingle();
+
+      if (rowErr) {
+        return new Response(
+          JSON.stringify({ error: 'Control Center tax_returns read failed: ' + rowErr.message }),
+          { status: 500, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+        );
+      }
+      if (!row) {
+        return new Response(
+          JSON.stringify({ error: 'No tax return found in Control Center for id ' + tax_return_id }),
+          { status: 404, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+        );
+      }
+
+      console.log(`[export-txf] Found Control Center tax return: ${row.id}`);
+      txfData = buildTaxReturnDataFromCcRow(row as Record<string, unknown>);
     } else {
-      query = `client_name=eq.${encodeURIComponent(client_name)}&tax_year=eq.${tax_year}&select=*&order=created_at.desc&limit=1`;
+      // Legacy: taxgenerator (CC_TAX_URL) project
+      let query: string;
+      if (tax_return_id) {
+        query = `id=eq.${tax_return_id}&select=*`;
+      } else {
+        query =
+          `client_name=eq.${encodeURIComponent(client_name)}&tax_year=eq.${tax_year}&select=*&order=created_at.desc&limit=1`;
+      }
+
+      const returns = await readFromTaxSupabase('tax_returns', query) as Array<Record<string, unknown>>;
+      if (!returns || returns.length === 0) {
+        return new Response(
+          JSON.stringify({ error: 'No tax return found matching the criteria' }),
+          { status: 404, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+        );
+      }
+
+      const taxReturn = returns[0];
+      console.log(`[export-txf] Found CC Tax (legacy) tax return: ${taxReturn.id}`);
+
+      const returnData = taxReturn.return_data as Record<string, unknown> || {};
+      const incomeData = (returnData.income || taxReturn.income_data || {}) as Record<string, number>;
+      const deductionData = (returnData.deductions || taxReturn.deduction_data || {}) as Record<string, unknown>;
+      const creditData = (returnData.credits || taxReturn.credit_data || {}) as Record<string, number>;
+      const paymentData = (returnData.tax_payments || taxReturn.payment_data || {}) as Record<string, number>;
+      const taxComputedLegacy = (returnData.tax_computed || taxReturn.tax_computed || {}) as Record<string, number>;
+
+      txfData = {
+        client_name: (taxReturn.client_name as string) || client_name,
+        tax_year: (taxReturn.tax_year as number) || tax_year,
+        filing_status: (taxReturn.filing_status as string) || 'single',
+        income: incomeData,
+        deductions: {
+          type: (deductionData.type as string) || 'standard',
+          standard_amount: (deductionData.standard_amount as number) || 0,
+          itemized: (deductionData.itemized as Record<string, number>) || {},
+          qbi_deduction: (deductionData.qbi_deduction as number) || 0,
+        },
+        credits: creditData,
+        tax_payments: paymentData,
+        tax_computed: taxComputedLegacy,
+        schedule_c: returnData.schedule_c as TaxReturnData['schedule_c'] || undefined,
+      };
     }
-
-    const returns = await readFromTaxSupabase('tax_returns', query) as Array<Record<string, unknown>>;
-    if (!returns || returns.length === 0) {
-      return new Response(
-        JSON.stringify({ error: 'No tax return found matching the criteria' }),
-        { status: 404, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
-      );
-    }
-
-    const taxReturn = returns[0];
-    console.log(`[export-txf] Found tax return: ${taxReturn.id}`);
-
-    // Step 2: Build TaxReturnData from the Supabase record
-    const returnData = taxReturn.return_data as Record<string, unknown> || {};
-    const incomeData = (returnData.income || taxReturn.income_data || {}) as Record<string, number>;
-    const deductionData = (returnData.deductions || taxReturn.deduction_data || {}) as Record<string, unknown>;
-    const creditData = (returnData.credits || taxReturn.credit_data || {}) as Record<string, number>;
-    const paymentData = (returnData.tax_payments || taxReturn.payment_data || {}) as Record<string, number>;
-    const taxComputed = (returnData.tax_computed || taxReturn.tax_computed || {}) as Record<string, number>;
-
-    const txfData: TaxReturnData = {
-      client_name: (taxReturn.client_name as string) || client_name,
-      tax_year: (taxReturn.tax_year as number) || tax_year,
-      filing_status: (taxReturn.filing_status as string) || 'single',
-      income: incomeData,
-      deductions: {
-        type: (deductionData.type as string) || 'standard',
-        standard_amount: (deductionData.standard_amount as number) || 0,
-        itemized: (deductionData.itemized as Record<string, number>) || {},
-        qbi_deduction: (deductionData.qbi_deduction as number) || 0,
-      },
-      credits: creditData,
-      tax_payments: paymentData,
-      tax_computed: taxComputed,
-      schedule_c: returnData.schedule_c as TaxReturnData['schedule_c'] || undefined,
-    };
 
     // Step 3: Generate TXF content
     const txfContent = generateTxfContent(txfData);
     const fileName = `${txfData.client_name.replace(/\s+/g, '_')}_${txfData.tax_year}_1040.txf`;
     console.log(`[export-txf] Generated TXF: ${fileName} (${txfContent.length} chars)`);
 
-    // Step 4: Upload to Supabase storage
+    // Step 4: Upload to Supabase storage (Control Center tax-documents when we have a CC return id)
     let storageUrl = '';
-    try {
-      storageUrl = await uploadToStorage(fileName, txfContent);
-      console.log(`[export-txf] Uploaded to storage: ${storageUrl}`);
-    } catch (err) {
-      console.error(`[export-txf] Storage upload failed: ${err instanceof Error ? err.message : err}`);
+    let storagePathCc: string | null = null;
+    if (tax_return_id && supabaseUrl && supabaseKey) {
+      const cc = createClient(supabaseUrl, supabaseKey);
+      const up = await uploadTxfToCcBucket(cc, tax_return_id, fileName, txfContent);
+      if (up.error) {
+        console.error(`[export-txf] CC storage upload failed: ${up.error}`);
+      } else {
+        storagePathCc = up.storagePath;
+        storageUrl = storagePathCc ? `tax-documents/${storagePathCc}` : '';
+        console.log(`[export-txf] Uploaded TXF to Control Center storage: ${storageUrl}`);
+      }
+    } else {
+      try {
+        storageUrl = await uploadToStorage(fileName, txfContent);
+        console.log(`[export-txf] Uploaded to CC Tax storage: ${storageUrl}`);
+      } catch (err) {
+        console.error(`[export-txf] Storage upload failed: ${err instanceof Error ? err.message : err}`);
+      }
     }
 
     // Step 5: Upload to Google Drive
@@ -363,6 +490,7 @@ Deno.serve(async (req: Request) => {
         tax_year: txfData.tax_year,
         file_name: fileName,
         storage_url: storageUrl || null,
+        storage_path: storagePathCc,
         drive_url: driveUrl || null,
         txf_preview: txfContent.substring(0, 500),
         fields_exported: txfContent.split('TD\n').length - 1,
