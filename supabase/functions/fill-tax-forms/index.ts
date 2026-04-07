@@ -192,7 +192,7 @@ async function processForm(
 
   // 7. Upload to Google Drive (skipped if Drive auth is unavailable)
   let driveResult = null;
-  if (driveAccessToken) {
+  if (driveAccessToken && driveFolderId) {
     try {
       driveResult = await uploadFileToDrive(
         driveAccessToken,
@@ -203,10 +203,10 @@ async function processForm(
       );
       console.log(`Uploaded to Drive: ${driveResult.name} (${driveResult.id})`);
     } catch (err) {
-      console.error(`Drive upload error: ${err}`);
+      console.warn(`Drive upload failed for ${formType}: ${err}`);
     }
   } else {
-    console.log(`Skipping Drive upload (no access token)`);
+    console.warn(`Drive unavailable; skipping upload for ${formType}`);
   }
 
   // 8. Insert tax_form_instances row
@@ -299,7 +299,7 @@ serve(async (req: Request) => {
     const requiredForms = determineRequiredForms(computed_data!);
     console.log(`Required forms: ${requiredForms.join(", ")}`);
 
-    // Get Google Drive access (non-fatal — PDFs still generate if Drive is unavailable)
+    // Get Google Drive access
     let driveAccessToken: string | null = null;
     let driveFolderId: string | null = null;
     try {
@@ -307,7 +307,7 @@ serve(async (req: Request) => {
       driveFolderId = await getOrCreateClientTaxFolder(driveAccessToken, client_name, tax_year);
       console.log(`Drive folder ID: ${driveFolderId}`);
     } catch (err) {
-      console.error(`Google Drive auth failed (continuing without Drive): ${err}`);
+      console.warn(`Google Drive auth failed, continuing without Drive upload: ${err}`);
     }
 
     // Process forms in batches of 3
@@ -354,7 +354,8 @@ serve(async (req: Request) => {
         successful: successCount,
         errors: errorCount,
         results,
-        drive_folder_id: driveFolderId || null,
+        drive_folder_id: driveFolderId,
+        drive_available: !!driveAccessToken,
       }),
       { headers: { ...corsHeaders, "Content-Type": "application/json" } }
     );
