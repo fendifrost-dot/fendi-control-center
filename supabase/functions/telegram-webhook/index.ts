@@ -3364,7 +3364,12 @@ RULES:
     }).eq("id", opts.taskId);
     logEvent({ event: "task_succeeded", taskId: opts.taskId, workflow: opts.workflowKey, execution_duration_ms: executionDuration });
       await flushTelegramOutbox(chatId, 10);
-    await sendMessage(chatId, `â Done: \`${opts.taskId}\``, {}, `task:${opts.taskId}:done`);
+    const hasErrors = toolResults.some(r => r.startsWith("â") || r.includes("Error executing"));
+    if (hasErrors) {
+      await sendMessage(chatId, `â ï¸ Completed with errors: \`${opts.taskId}\``, {}, `task:${opts.taskId}:done`);
+    } else {
+      await sendMessage(chatId, `â Done: \`${opts.taskId}\``, {}, `task:${opts.taskId}:done`);
+    }
 
   } else if (confirmationButtons.length > 0) {
     // Has destructive actions needing confirmation
