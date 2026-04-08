@@ -1716,7 +1716,7 @@ const AGENT_TOOLS: ToolDef[] = [
             if (parsed.ok && parsed.results) {
               return parsed.results as Record<string, any>;
             }
-            return {};
+            throw new Error(`generate-tax-documents returned ok=${parsed.ok}: ${parsed.error || raw.slice(0, 400)}`);
           } catch (_) {
             throw new Error(`Failed to parse tax response for years ${batch.join(",")}: ${raw.slice(0, 400)}`);
           }
