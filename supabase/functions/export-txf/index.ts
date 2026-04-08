@@ -450,6 +450,8 @@ Deno.serve(async (req: Request) => {
     let storagePathCc: string | null = null;
     if (tax_return_id && supabaseUrl && supabaseKey) {
       const cc = createClient(supabaseUrl, supabaseKey);
+      // Ensure bucket exists before upload
+      await cc.storage.createBucket('tax-documents', { public: false }).catch(() => {});
       const up = await uploadTxfToCcBucket(cc, tax_return_id, fileName, txfContent);
       if (up.error) {
         console.error(`[export-txf] CC storage upload failed: ${up.error}`);

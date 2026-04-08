@@ -188,6 +188,7 @@ async function runTxfExport(
     });
     return await r.json();
   } catch (e) {
+    console.error('[generate-tax-documents] runTxfExport failed:', String(e));
     return { ok: false, error: String(e) };
   }
 }
@@ -429,9 +430,6 @@ ${taxDataPayload}`;
       });
 
       // Always produce both IRS PDF drafts (Drive + storage) and TXF — AGI only affects filing *recommendation* text.
-      let pdfResults: any = null;
-      let txfResults: any = null;
-
       const pdfBody = {
         tax_return_id: taxReturnId,
         client_id: body.client_id || "unknown",
@@ -456,14 +454,17 @@ ${taxDataPayload}`;
           );
           return await r.json();
         } catch (e) {
+          console.error('[generate-tax-documents] runPdfFill failed:', String(e));
           return { ok: false, error: String(e) };
         }
       }
 
       console.log(
-        `[generate] AGI $${agi} — generating IRS PDFs + TXF in parallel (Free File hint threshold $${FREE_FILE_AGI_HINT})`,
+        `[generate] AGI $${agi} — kicking off IRS PDFs + TXF as background work (Free File hint threshold $${FREE_FILE_AGI_HINT})`,
       );
-      [pdfResults, txfResults] = await Promise.all([
+
+      // Kick off PDF/TXF generation as background work so the response returns before timeout
+      const bgWork = Promise.all([
         runPdfFill(),
         runTxfExport(
           taxReturnId,
@@ -471,6 +472,8 @@ ${taxDataPayload}`;
           year
         ),
       ]);
+      // @ts-ignore — Deno edge runtime API
+      (globalThis as any).EdgeRuntime?.waitUntil?.(bgWork);
 
       return {
         year: String(year),
@@ -479,8 +482,9 @@ ${taxDataPayload}`;
           worksheet: generated.worksheet,
           filing_recommendation: recommendation,
           tax_return_id: taxReturnId,
-          pdf_results: pdfResults,
-          txf_results: txfResults,
+          pdf_results: null,
+          txf_results: null,
+          pdf_txf_status: "generating_in_background",
           ingestion_results: ingestionResults[String(year)] || null,
           agi,
           output_strategy: "pdf_and_txf_always",
