@@ -54,12 +54,16 @@ export async function upsertTaxReturn(
   supabase: SupabaseClient,
   data: TaxReturnUpsert
 ): Promise<{ id: string; created: boolean }> {
-  const { data: existing } = await supabase
+  const { data: existing, error: selectError } = await supabase
     .from("tax_returns")
     .select("id")
     .eq("client_id", data.client_id)
     .eq("tax_year", data.tax_year)
     .maybeSingle();
+  if (selectError) {
+    console.error("[upsertTaxReturn] SELECT error:", selectError.message);
+    throw new Error(`Failed to check existing tax return: ${selectError.message}`);
+  }
 
   if (existing) {
     const { error } = await supabase
