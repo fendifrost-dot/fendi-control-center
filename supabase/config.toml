@@ -29,9 +29,11 @@ verify_jwt = false
 
 [functions.generate-tax-documents]
 verify_jwt = false
+timeout_seconds = 150
 
 [functions.ingest-tax-documents]
 verify_jwt = false
+timeout_seconds = 150
 
 [functions.tax-returns]
 verify_jwt = false
@@ -39,12 +41,14 @@ verify_jwt = false
 # Browser-only tax helpers — require a valid Supabase JWT (user session or anon per project policy).
 [functions.fill-tax-forms]
 verify_jwt = true
+timeout_seconds = 150
 
 [functions.regenerate-tax-pdfs]
 verify_jwt = true
 
 [functions.export-txf]
 verify_jwt = true
+timeout_seconds = 150
 
 [functions.import-prior-return]
 verify_jwt = true

@@ -33,7 +33,7 @@ function detectAuthMode(): AuthMode {
   if (apiKey) {
     resolvedApiKey = apiKey;
     resolvedAuthMode = "api_key";
-    console.log("[googleDriveRead] Using API key auth (service account not configured)");
+    console.warn('[googleDriveRead] GOOGLE_SERVICE_ACCOUNT_JSON not found, falling back to API key (read-only)');
     return resolvedAuthMode;
   }
   throw new Error("No Google Drive auth configured: set GOOGLE_SERVICE_ACCOUNT_JSON or Google_Cloud_Key");
