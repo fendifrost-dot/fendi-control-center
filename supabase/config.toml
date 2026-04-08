@@ -54,5 +54,5 @@ timeout_seconds = 150
 verify_jwt = true
 
 [functions.upload-irs-forms]
-verify_jwt = true
+verify_jwt = false
 timeout_seconds = 150
