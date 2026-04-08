@@ -24,6 +24,84 @@ export function getIrsFormUrl(formType: string, year: number | string): string {
 }
 
 /**
+ * Fetch a blank IRS form PDF.
+ * Tier order:
+ *   1. Supabase storage bucket "irs-forms" → `f{formSlug}--{year}.pdf`
+ *   2. IRS.gov year-specific URL (prior-year pattern or current, 15s timeout)
+ *   3. IRS.gov current-year URL (15s timeout)
+ * Throws if all sources fail.
+ */
+export async function fetchIrsFormPdf(
+  supabase: any,
+  formType: string,
+  year: number | string
+): Promise<Uint8Array> {
+  const yr = Number(year);
+  const currentYear = new Date().getFullYear();
+  const formSlug = formType.toLowerCase().replace(/[^a-z0-9]/g, "");
+  // Always store with year suffix so multiple tax years coexist in the bucket
+  const storageKey = `f${formSlug}--${yr}.pdf`;
+
+  // 1. Try Supabase storage "irs-forms" bucket
+  try {
+    const { data, error } = await supabase.storage.from("irs-forms").download(storageKey);
+    if (!error && data) {
+      console.log(`[fetchIrsFormPdf] Cache hit in storage: ${storageKey}`);
+      return new Uint8Array(await (data as Blob).arrayBuffer());
+    }
+    console.log(`[fetchIrsFormPdf] Storage miss for ${storageKey}: ${error?.message ?? "no data"}`);
+  } catch (e) {
+    console.warn(`[fetchIrsFormPdf] Storage lookup error: ${e}`);
+  }
+
+  // Helper: fetch with 15s timeout
+  async function fetchWithTimeout(url: string): Promise<Response> {
+    const controller = new AbortController();
+    const tid = setTimeout(() => controller.abort(), 15000);
+    try {
+      return await fetch(url, { signal: controller.signal });
+    } finally {
+      clearTimeout(tid);
+    }
+  }
+
+  // 2. Try IRS.gov year-specific URL
+  const primaryUrl = getIrsFormUrl(formType, yr);
+  try {
+    const resp = await fetchWithTimeout(primaryUrl);
+    if (resp.ok) {
+      console.log(`[fetchIrsFormPdf] Fetched from IRS: ${primaryUrl}`);
+      return new Uint8Array(await resp.arrayBuffer());
+    }
+    console.warn(`[fetchIrsFormPdf] IRS primary URL failed (${resp.status}): ${primaryUrl}`);
+  } catch (e) {
+    console.warn(`[fetchIrsFormPdf] IRS primary URL error: ${e}`);
+  }
+
+  // 3. Try IRS.gov current-year URL (only if different from primary)
+  const fallbackUrl = `https://www.irs.gov/pub/irs-pdf/f${formSlug}.pdf`;
+  if (fallbackUrl !== primaryUrl) {
+    try {
+      const resp = await fetchWithTimeout(fallbackUrl);
+      if (resp.ok) {
+        console.log(`[fetchIrsFormPdf] Fetched from IRS (current-year fallback): ${fallbackUrl}`);
+        return new Uint8Array(await resp.arrayBuffer());
+      }
+      console.error(`[fetchIrsFormPdf] IRS fallback URL also failed (${resp.status}): ${fallbackUrl}`);
+    } catch (e) {
+      console.error(`[fetchIrsFormPdf] IRS fallback URL error: ${e}`);
+    }
+  }
+
+  throw new Error(
+    `[fetchIrsFormPdf] All sources exhausted for form ${formSlug} year ${yr}. ` +
+    `Tried: storage key "${storageKey}", ${primaryUrl}` +
+    (fallbackUrl !== primaryUrl ? `, ${fallbackUrl}` : "") +
+    `. Upload blank PDFs to the "irs-forms" storage bucket to avoid irs.gov rate limits.`
+  );
+}
+
+/**
  * Determine which IRS forms are required based on computed tax data.
  * Checks both flat and nested key patterns.
  */

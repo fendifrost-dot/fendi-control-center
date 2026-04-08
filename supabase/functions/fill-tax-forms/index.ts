@@ -4,7 +4,7 @@
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 import {
-  getIrsFormUrl,
+  fetchIrsFormPdf,
   determineRequiredForms,
   fillPdfForm,
   addDraftWatermark,
@@ -128,39 +128,14 @@ async function processForm(
   const formLabel = formType.toUpperCase();
   console.log(`Processing form: ${formLabel} for ${taxYear}`);
 
-  // 1. Fetch blank IRS PDF
-  const pdfUrl = getIrsFormUrl(formType, taxYear);
-  console.log(`Fetching PDF from: ${pdfUrl}`);
-
-  let pdfResponse: Response;
+  // 1. Fetch blank IRS PDF — tries Supabase storage first, then irs.gov
+  let pdfBytes: Uint8Array;
   try {
-    const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 15000);
-    try {
-      pdfResponse = await fetch(pdfUrl, { signal: controller.signal });
-    } finally {
-      clearTimeout(timeoutId);
-    }
-    if (!pdfResponse.ok) {
-      // Fallback to current year form if prior year not available
-      const fallbackUrl = getIrsFormUrl(formType, new Date().getFullYear());
-      console.log(`Prior year PDF not found, trying current: ${fallbackUrl}`);
-      const fallbackController = new AbortController();
-      const fallbackTimeoutId = setTimeout(() => fallbackController.abort(), 15000);
-      try {
-        pdfResponse = await fetch(fallbackUrl, { signal: fallbackController.signal });
-      } finally {
-        clearTimeout(fallbackTimeoutId);
-      }
-      if (!pdfResponse.ok) {
-        throw new Error(`Failed to fetch form ${formType}: ${pdfResponse.status}`);
-      }
-    }
+    pdfBytes = await fetchIrsFormPdf(supabase, formType, taxYear);
   } catch (err) {
+    console.error(`[fill-tax-forms] ${err}`);
     return { form: formType, status: "error", error: `Failed to fetch PDF: ${err}` };
   }
-
-  const pdfBytes = new Uint8Array(await pdfResponse.arrayBuffer());
 
   // 2. Inspect fields for debugging
   try {
