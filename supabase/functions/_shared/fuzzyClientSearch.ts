@@ -75,6 +75,8 @@ export async function fuzzyClientSearch(
     searchAliases?: boolean;
     minConfidence?: number;
     maxResults?: number;
+    /** When true, excludes clients ingested from credit-only Drive folders (tax / Control Center flows). */
+    excludeCreditPipelineClients?: boolean;
   } = {}
 ): Promise<FuzzySearchResult> {
   const {
@@ -83,6 +85,7 @@ export async function fuzzyClientSearch(
     searchAliases = true,
     minConfidence = 0.4,
     maxResults = 5,
+    excludeCreditPipelineClients = false,
   } = options;
 
   const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY);
@@ -90,12 +93,19 @@ export async function fuzzyClientSearch(
   const query = searchQuery.trim();
   if (!query) return { exactMatch: null, fuzzyMatches: [], needsVerification: false };
 
+  const clientsTableSelect = () => {
+    let q = supabase.from("clients").select("id, name, email, phone");
+    if (excludeCreditPipelineClients) {
+      q = q.neq("client_pipeline", "credit");
+    }
+    return q;
+  };
+
   // Source 1: Clients table
   if (searchClientsTable) {
     try {
       // Contains match with wildcards (e.g. '%Sam Higgins%')
-      const { data: exactData } = await supabase
-        .from("clients").select("id, name, email, phone")
+      const { data: exactData } = await clientsTableSelect()
         .ilike("name", `%${query}%`).limit(5);
       if (exactData?.length) {
         // Check for true exact match first
@@ -121,8 +131,7 @@ export async function fuzzyClientSearch(
       if (!exactData?.length) {
         const firstName = query.split(/[\s\-_]+/)[0];
         if (firstName && firstName.length >= 2) {
-          const { data: prefixData } = await supabase
-            .from("clients").select("id, name, email, phone")
+          const { data: prefixData } = await clientsTableSelect()
             .ilike("name", `${firstName}%`).limit(5);
           if (prefixData) {
             for (const row of prefixData) {
@@ -158,8 +167,7 @@ export async function fuzzyClientSearch(
       const tokens = query.split(/[\s\-_]+/).filter(Boolean);
       for (const token of tokens) {
         if (token.length < 2) continue;
-        const { data: fuzzyData } = await supabase
-          .from("clients").select("id, name, email, phone")
+        const { data: fuzzyData } = await clientsTableSelect()
           .ilike("name", `%${token}%`).limit(10);
         if (fuzzyData) {
           for (const row of fuzzyData) {

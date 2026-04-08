@@ -1,6 +1,10 @@
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.49.1";
 import { fetchCreditGuardian } from "../_shared/creditGuardian.ts";
+import {
+  isAmbiguousCreditTaxFolderName,
+  isCreditWorkspaceFolderName,
+} from "../_shared/driveFolderPolicy.ts";
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
@@ -307,7 +311,7 @@ async function trackDocument(file: any, folder: any): Promise<void> {
     } else {
       const { data: newClient, error: clientErr } = await supabase
         .from("clients")
-        .insert({ name: folder.name, drive_folder_id: folder.id })
+        .insert({ name: folder.name, drive_folder_id: folder.id, client_pipeline: "credit" })
         .select("id")
         .single();
       if (clientErr) throw clientErr;
@@ -382,6 +386,14 @@ serve(async (req) => {
     }> = [];
 
     for (const folder of (subfolders || [])) {
+      if (isAmbiguousCreditTaxFolderName(folder.name)) {
+        console.log(`Skipping ambiguous folder (rename to separate credit vs tax): ${folder.name}`);
+        continue;
+      }
+      if (!isCreditWorkspaceFolderName(folder.name)) {
+        console.log(`Skipping non–credit-workspace folder (Credit Guardian only): ${folder.name}`);
+        continue;
+      }
       if (filterClientName && !folder.name.toLowerCase().includes(filterClientName)) {
         continue;
       }

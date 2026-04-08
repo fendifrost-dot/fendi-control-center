@@ -48,10 +48,12 @@ async function resolveClientIdForTaxGeneration(nameRaw: string | undefined): Pro
     })[0];
 
   // 1) Exact full-name match FIRST (case-insensitive equality semantics, no wildcards).
+  // Exclude Credit Guardian–only Drive clients (client_pipeline = credit).
   const { data: exactRows, error: exErr } = await supabase
     .from("clients")
     .select("id,name")
     .ilike("name", escapeIlike(trimmed))
+    .neq("client_pipeline", "credit")
     .limit(20);
   if (exErr) {
     return { ok: false, message: "Client lookup failed: " + exErr.message };
@@ -67,6 +69,7 @@ async function resolveClientIdForTaxGeneration(nameRaw: string | undefined): Pro
     .from("clients")
     .select("id,name")
     .ilike("name", `%${escapeIlike(trimmed)}%`)
+    .neq("client_pipeline", "credit")
     .limit(20);
   if (containsErr) {
     return { ok: false, message: "Client lookup failed: " + containsErr.message };
@@ -84,6 +87,7 @@ async function resolveClientIdForTaxGeneration(nameRaw: string | undefined): Pro
       .from("clients")
       .select("id,name")
       .ilike("name", `${escapeIlike(firstName)}%`)
+      .neq("client_pipeline", "credit")
       .limit(20);
     const fnRows = (firstNameRows ?? []) as { id: string; name: string }[];
     if (fnRows.length >= 1) {
@@ -106,9 +110,16 @@ async function resolveClientIdForTaxGeneration(nameRaw: string | undefined): Pro
       // Fetch canonical name from clients table
       const { data: c } = await supabase
         .from("clients")
-        .select("id,name")
+        .select("id,name,client_pipeline")
         .eq("id", unique[0].client_id)
         .maybeSingle();
+      if (c && (c as { client_pipeline?: string }).client_pipeline === "credit") {
+        return {
+          ok: false,
+          message:
+            "That record is tied to a credit-workspace client. Use the client linked to a TAXES folder for tax generation.",
+        };
+      }
       if (c) return { ok: true, id: c.id, name: c.name };
       return { ok: true, id: unique[0].client_id, name: unique[0].client_name };
     }
@@ -1150,7 +1161,10 @@ const AGENT_TOOLS: ToolDef[] = [
     parameters: { type: "object", properties: {}, required: [] },
     destructive: false,
     execute: async () => {
-      const { data: clients } = await supabase.from("clients").select("id, name, drive_folder_id");
+      const { data: clients } = await supabase
+        .from("clients")
+        .select("id, name, drive_folder_id")
+        .neq("client_pipeline", "credit");
       if (!clients || clients.length === 0) return "No clients found.";
       const summaries = [];
       for (const client of clients) {

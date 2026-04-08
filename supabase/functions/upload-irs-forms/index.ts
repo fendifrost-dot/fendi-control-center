@@ -10,6 +10,7 @@
 
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.49.1";
+import { determineRequiredForms } from "../_shared/pdfFormFill.ts";
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
@@ -70,7 +71,17 @@ serve(async (req) => {
   try {
     const body = req.method === "POST" ? await req.json().catch(() => ({})) : {};
     const taxYear: number = Number(body.tax_year ?? new Date().getFullYear() - 1);
-    const forms: string[] = Array.isArray(body.forms) ? body.forms : DEFAULT_FORMS;
+
+    // Accept explicit form list, computed_data for dynamic detection, or fall back to defaults
+    let forms: string[];
+    if (Array.isArray(body.forms) && body.forms.length > 0) {
+      forms = body.forms;
+    } else if (body.computed_data && typeof body.computed_data === "object") {
+      forms = determineRequiredForms(body.computed_data as Record<string, unknown>);
+      console.log(`[upload-irs-forms] Determined forms from computed_data: ${forms.join(", ")}`);
+    } else {
+      forms = DEFAULT_FORMS;
+    }
 
     console.log(`[upload-irs-forms] Uploading ${forms.length} forms for tax year ${taxYear}`);
 

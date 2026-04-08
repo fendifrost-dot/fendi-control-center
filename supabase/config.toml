@@ -52,3 +52,7 @@ timeout_seconds = 150
 
 [functions.import-prior-return]
 verify_jwt = true
+
+[functions.upload-irs-forms]
+verify_jwt = true
+timeout_seconds = 150

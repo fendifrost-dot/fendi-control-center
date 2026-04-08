@@ -1,5 +1,12 @@
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.49.1";
+import {
+  isAmbiguousCreditTaxFolderName,
+  isTaxWorkspaceFolderName,
+} from "../_shared/driveFolderPolicy.ts";
+
+/** When true, also sync files sitting directly under DRIVE_FOLDER_ID (not recommended if root mixes credit + tax). */
+const INCLUDE_ROOT = Deno.env.get("DRIVE_SYNC_INCLUDE_ROOT") === "true";
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
@@ -36,7 +43,7 @@ async function getOrCreateClient(folderId: string, folderName: string): Promise<
 
   const { data: created, error } = await supabase
     .from("clients")
-    .insert({ name: folderName, drive_folder_id: folderId })
+    .insert({ name: folderName, drive_folder_id: folderId, client_pipeline: "tax" })
     .select("id")
     .single();
 
@@ -91,14 +98,24 @@ serve(async (req) => {
     let totalProcessed = 0;
     let totalErrors = 0;
 
-    // Step 1: List client subfolders under root DRIVE_FOLDER_ID
-    const { files: subfolders } = await listSubfolders(DRIVE_FOLDER_ID);
-    console.log(`📁 Found ${subfolders?.length || 0} client folders`);
+    // Step 1: List client subfolders under root DRIVE_FOLDER_ID (tax workspace folders only)
+    const { files: subfoldersRaw } = await listSubfolders(DRIVE_FOLDER_ID);
+    const subfolders = (subfoldersRaw || []).filter((f: { name: string }) => {
+      if (isAmbiguousCreditTaxFolderName(f.name)) {
+        console.log(`⏭️ Skipping ambiguous folder: ${f.name}`);
+        return false;
+      }
+      if (!isTaxWorkspaceFolderName(f.name)) {
+        console.log(`⏭️ Skipping non–tax-workspace folder: ${f.name}`);
+        return false;
+      }
+      return true;
+    });
+    console.log(`📁 Found ${subfolders?.length || 0} tax workspace folders (credit folders excluded)`);
 
-    // Also process files directly in root folder
     const foldersToProcess = [
-      { id: DRIVE_FOLDER_ID, name: "Default Client", isRoot: true },
-      ...(subfolders || []).map((f: any) => ({ id: f.id, name: f.name, isRoot: false })),
+      ...(INCLUDE_ROOT ? [{ id: DRIVE_FOLDER_ID, name: "Default Client", isRoot: true }] : []),
+      ...(subfolders || []).map((f: { id: string; name: string }) => ({ id: f.id, name: f.name, isRoot: false })),
     ];
 
     for (const folder of foldersToProcess) {
