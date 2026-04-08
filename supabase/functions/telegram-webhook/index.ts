@@ -1760,7 +1760,7 @@ const AGENT_TOOLS: ToolDef[] = [
         summary += `\n• Filing readiness: ${readiness?.score ?? readiness?.percentage ?? "N/A"}/100 ${readiness?.ready_to_file ? "✅" : "⚠️"}`;
         summary += `\n• Missing items: ${readiness?.missing_items?.length ? readiness.missing_items.join(", ") : "None"}`;
         summary += `\n• Documents generated: ${docList.join(", ")}`;
-        if (r.tax_return_id) summary += `\n- Tax Return ID: ${r.tax_return_id}`;
+        if (r.tax_return_id) summary += `\n• Tax Return ID: ${r.tax_return_id}`;
         const pdfTxf = formatPdfAndTxfSummary(r);
         if (pdfTxf) summary += `\n${pdfTxf}`;
         if (rec?.steps?.length) {
@@ -3364,9 +3364,11 @@ RULES:
     }).eq("id", opts.taskId);
     logEvent({ event: "task_succeeded", taskId: opts.taskId, workflow: opts.workflowKey, execution_duration_ms: executionDuration });
       await flushTelegramOutbox(chatId, 10);
-    const hasErrors = toolResults.some(r => r.startsWith("â") || r.includes("Error executing"));
-    if (hasErrors) {
-      await sendMessage(chatId, `â ï¸ Completed with errors: \`${opts.taskId}\``, {}, `task:${opts.taskId}:done`);
+    const hasToolErrors = toolResults.some((r: string) =>
+      r.startsWith("\xe2\x9d\x8c") || r.includes("Error executing") || r.includes("failed (")
+    );
+    if (hasToolErrors) {
+      await sendMessage(chatId, `\xe2\x9a\xa0\xef\xb8\x8f Completed with errors: \`${opts.taskId}\``, {}, `task:${opts.taskId}:done`);
     } else {
       await sendMessage(chatId, `â Done: \`${opts.taskId}\``, {}, `task:${opts.taskId}:done`);
     }
