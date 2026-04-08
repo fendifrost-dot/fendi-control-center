@@ -1760,6 +1760,7 @@ const AGENT_TOOLS: ToolDef[] = [
         summary += `\n• Filing readiness: ${readiness?.score ?? readiness?.percentage ?? "N/A"}/100 ${readiness?.ready_to_file ? "✅" : "⚠️"}`;
         summary += `\n• Missing items: ${readiness?.missing_items?.length ? readiness.missing_items.join(", ") : "None"}`;
         summary += `\n• Documents generated: ${docList.join(", ")}`;
+        if (r.tax_return_id) summary += `\n- Tax Return ID: ${r.tax_return_id}`;
         const pdfTxf = formatPdfAndTxfSummary(r);
         if (pdfTxf) summary += `\n${pdfTxf}`;
         if (rec?.steps?.length) {
