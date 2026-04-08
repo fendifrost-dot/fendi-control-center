@@ -246,10 +246,28 @@ serve(async (req) => {
       );
     }
 
-    // Run ingestion for all years in parallel first
+    // Run ingestion for all years in parallel first (skip if recent data exists)
+    const t_start = Date.now();
     const ingestionResults: Record<string, any> = {};
     if (body.client_name || body.client_id) {
+      const ingestionSupa = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
       const ingestionPromises = taxYears.map(async (y) => {
+        // Check for recent ingestion data (< 1 hour old) to skip expensive re-ingestion
+        const { data: recentReturn } = await ingestionSupa
+          .from("tax_returns")
+          .select("id, json_summary, updated_at")
+          .eq("client_name", body.client_name || body.client_id)
+          .eq("tax_year", y)
+          .order("updated_at", { ascending: false })
+          .limit(1)
+          .maybeSingle();
+        const ONE_HOUR = 60 * 60 * 1000;
+        const recentlyIngested = recentReturn?.updated_at &&
+          (Date.now() - new Date(recentReturn.updated_at).getTime()) < ONE_HOUR;
+        if (recentlyIngested && recentReturn?.json_summary) {
+          console.log(`[generate] Skipping ingestion for ${y} — recent data exists (${recentReturn.id}, ${Math.round((Date.now() - new Date(recentReturn.updated_at).getTime()) / 1000)}s old)`);
+          return { year: String(y), result: { success: true, cached: true, ...recentReturn.json_summary } };
+        }
         const result = await runIngestion(
           body.client_name || body.client_id,
           body.client_id || "unknown",
@@ -261,7 +279,7 @@ serve(async (req) => {
       for (const { year, result } of ingestionDone) {
         ingestionResults[year] = result;
       }
-      console.log(`[generate] Ingestion complete for ${taxYears.join(", ")}. Results:`, JSON.stringify(Object.keys(ingestionResults)));
+      console.log(`[generate] Ingestion took ${Date.now() - t_start}ms for ${taxYears.join(", ")}. Results:`, JSON.stringify(Object.keys(ingestionResults)));
     } else {
       console.warn("[generate] No client_name or client_id — skipping ingestion step");
     }
@@ -356,6 +374,7 @@ Here is the tax data:
 ${taxDataPayload}`;
 
       // Only require json_summary and worksheet — filing_recommendation is optional
+      const t_claude = Date.now();
       const generated = await callClaudeJSON<{
         json_summary: Record<string, unknown>;
         worksheet: string;
@@ -363,7 +382,8 @@ ${taxDataPayload}`;
       }>(
         TAX_SYSTEM_PROMPT,
         userPrompt,
-        { required: ["json_summary", "worksheet"] }, 8192);
+        { required: ["json_summary", "worksheet"] }, 4096);
+      console.log(`[generate] Claude analysis took ${Date.now() - t_claude}ms for year ${year}`);
 
       normalizeTaxGenerationOutput(generated, taxDataPayloadObj);
 
@@ -401,6 +421,7 @@ ${taxDataPayload}`;
       ) as Record<string, any>;
 
       // Persist to Supabase
+      const t_upsert = Date.now();
       const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
 
       const { id: taxReturnId } = await upsertTaxReturn(supabase, {
@@ -422,6 +443,8 @@ ${taxDataPayload}`;
         created_by: "generate-tax-documents",
       });
 
+      console.log(`[generate] Upsert took ${Date.now() - t_upsert}ms — taxReturnId: ${taxReturnId}`);
+
       await logAudit(supabase, {
         tax_return_id: taxReturnId,
         action: "generated",
@@ -430,6 +453,7 @@ ${taxDataPayload}`;
       });
 
       // Always produce both IRS PDF drafts (Drive + storage) and TXF — AGI only affects filing *recommendation* text.
+      const t_pdftxf = Date.now();
       const pdfBody = {
         tax_return_id: taxReturnId,
         client_id: body.client_id || "unknown",
@@ -473,6 +497,8 @@ ${taxDataPayload}`;
           year
         ),
       ]);
+      console.log(`[generate] PDF+TXF took ${Date.now() - t_pdftxf}ms`);
+      console.log(`[generate] Total pipeline: ${Date.now() - t_start}ms`);
       console.log('[generate-tax-documents] PDF results:', JSON.stringify(pdfResults));
       console.log('[generate-tax-documents] TXF results:', JSON.stringify(txfResults));
 

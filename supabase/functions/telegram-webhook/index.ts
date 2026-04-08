@@ -5,6 +5,12 @@ import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.49.1";
 import { fetchCreditGuardian } from "../_shared/creditGuardian.ts";
 import { getTaxReturn, listTaxReturns, getFormInstances } from "../_shared/taxReturns.ts";
+import {
+  anthropicApiKeyConfigured,
+  callClaudeWithTools,
+  toAnthropicTools,
+} from "../_shared/orchestrator.ts";
+import { callClaude } from "../_shared/claude.ts";
 
 const BOT_TOKEN = Deno.env.get("FendiAIbot")!;
 const CHAT_ID = Deno.env.get("TELEGRAM_CHAT_ID") ?? "";
@@ -2860,13 +2866,12 @@ ${conversationContext}`;
   return { text: textResponse, toolCalls };
 }
 
-async function agenticGrokCall(
-  userMessage: string,
+/** Shared system prompt for Grok and Claude orchestrator (tool-selection phase). */
+function buildAgenticOrchestratorSystemPrompt(
   docContext: string,
   conversationContext: string,
-  allowedToolNames?: string[],
   workflowKey?: string,
-): Promise<{ text: string; toolCalls: Array<{ name: string; args: any }> }> {
+): string {
   const isAutonomousLane = workflowKey === "free_agent";
   const autonomousPrefix = isAutonomousLane
     ? `ð¤ AUTONOMOUS AGENT MODE ACTIVE
@@ -2891,7 +2896,7 @@ HARD RULE: For analyze_client_credit, execute it DIRECTLY without propose_plan. 
 `
     : "";
   const playlistBlock = workflowKey === "find_playlist_opportunities" ? playlistWorkflowSystemAddendum() : "";
-  const systemPrompt = `${autonomousPrefix}${playlistBlock}You are the ${SYSTEM_IDENTITY}. You serve Fendi Frost as a personal command center assistant.
+  return `${autonomousPrefix}${playlistBlock}You are the ${SYSTEM_IDENTITY}. You serve Fendi Frost as a personal command center assistant.
 
 ${ARTIST_GROWTH_MISSION}
 
@@ -2917,6 +2922,16 @@ ${docContext}
 
 Conversation Context (shared across all models):
 ${conversationContext}`;
+}
+
+async function agenticGrokCall(
+  userMessage: string,
+  docContext: string,
+  conversationContext: string,
+  allowedToolNames?: string[],
+  workflowKey?: string,
+): Promise<{ text: string; toolCalls: Array<{ name: string; args: any }> }> {
+  const systemPrompt = buildAgenticOrchestratorSystemPrompt(docContext, conversationContext, workflowKey);
 
   const resp = await fetch("https://api.x.ai/v1/chat/completions", {
     method: "POST",
@@ -2951,6 +2966,40 @@ ${conversationContext}`;
   }
 
   return { text: choice?.message?.content || "", toolCalls };
+}
+
+/** Claude picks tools (Anthropic tool_use). Requires ANTHROPIC_API_KEY on the Edge Function. */
+async function agenticClaudeCall(
+  userMessage: string,
+  docContext: string,
+  conversationContext: string,
+  allowedToolNames?: string[],
+  workflowKey?: string,
+): Promise<{ text: string; toolCalls: Array<{ name: string; args: any }> }> {
+  const systemPrompt = buildAgenticOrchestratorSystemPrompt(docContext, conversationContext, workflowKey);
+  const tools = allowedToolNames?.length
+    ? AGENT_TOOLS.filter((t) => allowedToolNames.includes(t.name))
+    : AGENT_TOOLS;
+  try {
+    logEvent({
+      event: "claude_orchestrator_call",
+      workflow: workflowKey,
+      tool_count: tools.length,
+    });
+    return await callClaudeWithTools({
+      system: systemPrompt,
+      user: userMessage,
+      tools: toAnthropicTools(tools),
+      maxTokens: 4096,
+    });
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    console.error(JSON.stringify({ ts: Date.now(), event: "claude_orchestrator_error", error: msg }));
+    return {
+      text: "â ï¸ Claude orchestrator failed. Check ANTHROPIC_API_KEY and logs. Error: " + msg.slice(0, 200),
+      toolCalls: [],
+    };
+  }
 }
 
 // âââ Execution logging helpers âââââââââââââââââââââââââââââââââ
@@ -3135,7 +3184,9 @@ async function executeAgenticLoop(chatId: string, userMessage: string, opts: { t
       };
     } else {
       result = model === "grok"
-        ? await agenticGrokCall(userMessage, docContext, conversationContext, workflowToolNames, opts.workflowKey)
+        ? await (anthropicApiKeyConfigured()
+          ? agenticClaudeCall(userMessage, docContext, conversationContext, workflowToolNames, opts.workflowKey)
+          : agenticGrokCall(userMessage, docContext, conversationContext, workflowToolNames, opts.workflowKey))
         : await agenticGeminiCall(userMessage, docContext, conversationContext, workflowToolNames, opts.workflowKey);
     }
   } else if (opts.workflowKey === "analyze_credit_strategy") {
@@ -3148,7 +3199,9 @@ async function executeAgenticLoop(chatId: string, userMessage: string, opts: { t
       };
     } else {
       result = model === "grok"
-        ? await agenticGrokCall(userMessage, docContext, conversationContext, workflowToolNames, opts.workflowKey)
+        ? await (anthropicApiKeyConfigured()
+          ? agenticClaudeCall(userMessage, docContext, conversationContext, workflowToolNames, opts.workflowKey)
+          : agenticGrokCall(userMessage, docContext, conversationContext, workflowToolNames, opts.workflowKey))
         : await agenticGeminiCall(userMessage, docContext, conversationContext, workflowToolNames, opts.workflowKey);
     }
   } else if (opts.workflowKey === "generate_tax_docs") {
@@ -3173,12 +3226,16 @@ async function executeAgenticLoop(chatId: string, userMessage: string, opts: { t
       };
     } else {
       result = model === "grok"
-        ? await agenticGrokCall(userMessage, docContext, conversationContext, workflowToolNames, opts.workflowKey)
+        ? await (anthropicApiKeyConfigured()
+          ? agenticClaudeCall(userMessage, docContext, conversationContext, workflowToolNames, opts.workflowKey)
+          : agenticGrokCall(userMessage, docContext, conversationContext, workflowToolNames, opts.workflowKey))
         : await agenticGeminiCall(userMessage, docContext, conversationContext, workflowToolNames, opts.workflowKey);
     }
   } else {
     result = model === "grok"
-      ? await agenticGrokCall(userMessage, docContext, conversationContext, workflowToolNames, opts.workflowKey)
+      ? await (anthropicApiKeyConfigured()
+        ? agenticClaudeCall(userMessage, docContext, conversationContext, workflowToolNames, opts.workflowKey)
+        : agenticGrokCall(userMessage, docContext, conversationContext, workflowToolNames, opts.workflowKey))
       : await agenticGeminiCall(userMessage, docContext, conversationContext, workflowToolNames, opts.workflowKey);
   }
   logEvent({ event: "ai_response", taskId: opts.taskId, workflow: opts.workflowKey, model, toolCalls: result.toolCalls.length, hasText: !!result.text });
@@ -3304,7 +3361,18 @@ RULES:
       `You are the ${SYSTEM_IDENTITY}. Summarize tool results concisely. Be witty and direct.\n\n${ARTIST_GROWTH_MISSION}\nWhen summarizing, highlight practical next moves that best serve the north star when the results relate to growth, fans, or releases.`;
 
     let summary: string;
-    if (model === "grok") {
+    const useClaudeForTaxSummary =
+      opts.workflowKey === "generate_tax_docs" && anthropicApiKeyConfigured();
+    if (useClaudeForTaxSummary) {
+      try {
+        summary = await callClaude(taxDocSummarySystem, summaryPrompt, 2048);
+      } catch (e) {
+        const msg = e instanceof Error ? e.message : String(e);
+        console.error(JSON.stringify({ ts: Date.now(), event: "tax_summary_claude_failed", error: msg }));
+        summary =
+          `Could not generate AI summary (${msg.slice(0, 180)}). Here is the raw tool output:\n\n${toolResults.join("\n\n")}`;
+      }
+    } else if (model === "grok") {
       const resp = await fetch("https://api.x.ai/v1/chat/completions", {
         method: "POST",
         headers: { Authorization: `Bearer ${GROK_KEY}`, "Content-Type": "application/json" },
