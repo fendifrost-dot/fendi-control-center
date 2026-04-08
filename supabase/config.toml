@@ -11,6 +11,7 @@ verify_jwt = false
 
 [functions.telegram-webhook]
 verify_jwt = false
+timeout_seconds = 180
 
 [functions.setup-telegram-webhook]
 verify_jwt = false
