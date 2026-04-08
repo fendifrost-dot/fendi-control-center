@@ -463,8 +463,9 @@ ${taxDataPayload}`;
         `[generate] AGI $${agi} — kicking off IRS PDFs + TXF as background work (Free File hint threshold $${FREE_FILE_AGI_HINT})`,
       );
 
-      // Kick off PDF/TXF generation as background work so the response returns before timeout
-      const bgWork = Promise.all([
+      // Run PDF/TXF generation synchronously — IRS PDFs are cached in Supabase storage
+      // so fetches are sub-second. Synchronous avoids EdgeRuntime.waitUntil compatibility issues.
+      const [pdfResults, txfResults] = await Promise.all([
         runPdfFill(),
         runTxfExport(
           taxReturnId,
@@ -472,8 +473,8 @@ ${taxDataPayload}`;
           year
         ),
       ]);
-      // @ts-ignore — Deno edge runtime API
-      (globalThis as any).EdgeRuntime?.waitUntil?.(bgWork);
+      console.log('[generate-tax-documents] PDF results:', JSON.stringify(pdfResults));
+      console.log('[generate-tax-documents] TXF results:', JSON.stringify(txfResults));
 
       return {
         year: String(year),
@@ -482,9 +483,9 @@ ${taxDataPayload}`;
           worksheet: generated.worksheet,
           filing_recommendation: recommendation,
           tax_return_id: taxReturnId,
-          pdf_results: null,
-          txf_results: null,
-          pdf_txf_status: "generating_in_background",
+          pdf_results: pdfResults,
+          txf_results: txfResults,
+          pdf_txf_status: "completed",
           ingestion_results: ingestionResults[String(year)] || null,
           agi,
           output_strategy: "pdf_and_txf_always",
