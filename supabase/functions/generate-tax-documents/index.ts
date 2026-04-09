@@ -2,6 +2,35 @@ import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
 import { callClaudeJSON } from "../_shared/claude.ts";
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.49.1";
 import { upsertTaxReturn, logAudit } from "../_shared/taxReturns.ts";
+import { crossCheckReturn } from "../_shared/crossCheckReturn.ts";
+
+function escapeIlike(s: string): string {
+  return s.replace(/\\/g, "\\\\").replace(/%/g, "\\%").replace(/_/g, "\\_");
+}
+
+/** Resolve real client UUID when Telegram/API sent client_id \"unknown\" but client_name is present. */
+async function resolveClientIdForGenerate(
+  supabase: ReturnType<typeof createClient>,
+  body: { client_id?: string; client_name?: string },
+): Promise<{ client_id: string; client_name: string }> {
+  const rawId = (body.client_id ?? "").trim();
+  const rawName = (body.client_name ?? "").trim();
+  if (rawId && rawId !== "unknown") {
+    return { client_id: rawId, client_name: rawName || rawId };
+  }
+  if (rawName) {
+    const { data: client } = await supabase
+      .from("clients")
+      .select("id, name")
+      .ilike("name", `%${escapeIlike(rawName)}%`)
+      .limit(1)
+      .maybeSingle();
+    if (client) {
+      return { client_id: client.id, client_name: client.name };
+    }
+  }
+  return { client_id: rawId || "unknown", client_name: rawName || rawId || "unknown" };
+}
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
@@ -331,8 +360,11 @@ serve(async (req) => {
     const t_start = Date.now();
     const ingestionResults: Record<string, any> = {};
     const supabaseAdmin = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
+    const { client_id: effectiveClientId, client_name: effectiveClientName } =
+      await resolveClientIdForGenerate(supabaseAdmin, body);
+
     if (body.client_name || body.client_id) {
-      const clientKey = body.client_id || body.client_name;
+      const clientKey = effectiveClientId !== "unknown" ? effectiveClientId : (body.client_id || body.client_name);
       const ONE_HOUR = 60 * 60 * 1000;
       const ingestionPromises = taxYears.map(async (y) => {
         // Check for recent ingestion data (< 1 hour old) to skip expensive re-ingestion
@@ -354,8 +386,8 @@ serve(async (req) => {
           result = { success: true, cached: true, ...recentReturn.json_summary };
         } else {
           result = await runIngestion(
-            body.client_name || body.client_id,
-            body.client_id || "unknown",
+            effectiveClientName || body.client_name || body.client_id || "unknown",
+            effectiveClientId,
             y
           );
         }
@@ -450,6 +482,52 @@ serve(async (req) => {
 
       const taxDataPayload = JSON.stringify(taxDataPayloadObj);
 
+      const priorYear = year - 1;
+      let priorYearBlock = "";
+      let manualBlock = "";
+      if (effectiveClientId !== "unknown") {
+        const { data: priorReturn } = await supabaseAdmin
+          .from("tax_returns")
+          .select("json_summary, filing_status, agi, total_income, client_name")
+          .eq("client_id", effectiveClientId)
+          .eq("tax_year", priorYear)
+          .maybeSingle();
+
+        if (priorReturn?.json_summary) {
+          priorYearBlock = `
+
+PRIOR YEAR (${priorYear}) DATA for comparison:
+- Filing status: ${priorReturn.filing_status ?? "unknown"}
+- AGI: $${priorReturn.agi ?? "N/A"}
+- Total Income: $${priorReturn.total_income ?? "N/A"}
+- Full summary: ${JSON.stringify(priorReturn.json_summary)}
+
+Use this to:
+1. Pre-populate recurring income sources
+2. Flag deductions taken last year but missing this year
+3. Carry forward any applicable items (depreciation, NOL, etc.)
+4. Note significant changes in income for estimated tax planning`;
+        }
+
+        const { data: existingYearReturn } = await supabaseAdmin
+          .from("tax_returns")
+          .select("json_summary")
+          .eq("client_id", effectiveClientId)
+          .eq("tax_year", year)
+          .maybeSingle();
+
+        const existingJs = (existingYearReturn?.json_summary || {}) as Record<string, unknown>;
+        const mi = existingJs.manual_income;
+        const md = existingJs.manual_deductions;
+        if (Array.isArray(mi) && mi.length > 0) {
+          manualBlock += `\n\nMANUAL INCOME (already entered — include in totals):\n${JSON.stringify(mi)}`;
+        }
+        if (Array.isArray(md) && md.length > 0) {
+          manualBlock +=
+            `\n\nMANUAL DEDUCTIONS (already entered — include in Schedule C / Schedule A as appropriate):\n${JSON.stringify(md)}`;
+        }
+      }
+
       const userPrompt = `Generate all three tax document outputs for tax year ${year}. Be concise.
 
 CRITICAL: ingestion_income and ingestion_totals contain the REAL aggregated income from analyzed documents. Use them as the PRIMARY source for total_income and AGI. Do NOT return AGI=$0 if ingestion_income > 0 or ingestion_totals.total_income > 0.
@@ -462,7 +540,7 @@ REQUIRED OUTPUT SHAPE:
 
 Here is the tax data:
 
-${taxDataPayload}`;
+${taxDataPayload}${priorYearBlock}${manualBlock}`;
 
       // Only require json_summary and worksheet — filing_recommendation is optional
       console.log(`[generate] CC Tax fetches took ${Date.now() - t0}ms`);
@@ -552,13 +630,31 @@ ${taxDataPayload}`;
         agi,
       ) as Record<string, any>;
 
+      if (effectiveClientId !== "unknown") {
+        const { data: existingTr } = await supabaseAdmin
+          .from("tax_returns")
+          .select("json_summary")
+          .eq("client_id", effectiveClientId)
+          .eq("tax_year", year)
+          .maybeSingle();
+        const prev = (existingTr?.json_summary || {}) as Record<string, unknown>;
+        if (Array.isArray(prev.manual_income) && prev.manual_income.length > 0) {
+          (summary as Record<string, unknown>).manual_income = prev.manual_income;
+        }
+        if (Array.isArray(prev.manual_deductions) && prev.manual_deductions.length > 0) {
+          (summary as Record<string, unknown>).manual_deductions = prev.manual_deductions;
+        }
+      }
+
+      const accuracyWarnings = crossCheckReturn(summary as Record<string, unknown>);
+
       // Persist to Supabase
       const t_upsert = Date.now();
       const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
 
       const { id: taxReturnId } = await upsertTaxReturn(supabase, {
-        client_id: body.client_id || "unknown",
-        client_name: body.client_name || body.client_id || "unknown",
+        client_id: effectiveClientId,
+        client_name: effectiveClientName || body.client_name || body.client_id || "unknown",
         tax_year: year,
         status: "draft",
         filing_status: form1040.filing_status || "unknown",
@@ -594,8 +690,8 @@ ${taxDataPayload}`;
       // Always produce both IRS PDF drafts (Drive + storage) and TXF — AGI only affects filing *recommendation* text.
       const pdfBody = {
         tax_return_id: taxReturnId,
-        client_id: body.client_id || "unknown",
-        client_name: body.client_name || body.client_id || "unknown",
+        client_id: effectiveClientId,
+        client_name: effectiveClientName || body.client_name || body.client_id || "unknown",
         tax_year: year,
         computed_data: summary,
         draft_mode: true,
@@ -635,7 +731,7 @@ ${taxDataPayload}`;
           runPdfFill(),
           runTxfExport(
             taxReturnId,
-            body.client_name || body.client_id || "unknown",
+            effectiveClientName || body.client_name || body.client_id || "unknown",
             year
           ),
         ]);
@@ -662,6 +758,7 @@ ${taxDataPayload}`;
           ingestion_results: ingestionResults[String(year)] || null,
           agi,
           output_strategy: "pdf_and_txf_always",
+          accuracy_warnings: accuracyWarnings,
         },
       };
     }

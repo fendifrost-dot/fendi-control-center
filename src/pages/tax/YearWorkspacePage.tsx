@@ -19,6 +19,7 @@ import { ArrowLeft, FileText, Loader2, Trash2, Upload } from "lucide-react";
 import { useToast } from "@/hooks/use-toast";
 import type { Database, Json } from "@/integrations/supabase/types";
 import { ReturnReviewPanel } from "@/components/tax/ReturnReviewPanel";
+import { ManualTaxEntriesCard } from "@/components/tax/ManualTaxEntriesCard";
 
 type DocRow = Database["public"]["Tables"]["documents"]["Row"];
 type DocInsert = Database["public"]["Tables"]["documents"]["Insert"];
@@ -445,6 +446,7 @@ export default function YearWorkspacePage() {
         </TabsContent>
 
         <TabsContent value="return" className="space-y-4">
+          <ManualTaxEntriesCard taxReturnId={taxReturnId} taxRow={taxRow} onSaved={refreshAll} />
           <ReturnReviewPanel
             taxReturnId={taxReturnId}
             clientId={clientId}

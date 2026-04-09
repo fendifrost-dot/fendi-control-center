@@ -57,6 +57,7 @@ export function ReturnReviewPanel({
   const [summary, setSummary] = useState<TaxJsonSummary>({});
   const [filingRec, setFilingRec] = useState<Record<string, unknown>>({});
   const [warnings, setWarnings] = useState<string[]>([]);
+  const [pipelineWarnings, setPipelineWarnings] = useState<string[]>([]);
   const [saving, setSaving] = useState(false);
   const [exporting, setExporting] = useState(false);
   const [signedUrls, setSignedUrls] = useState<Record<string, string>>({});
@@ -67,7 +68,15 @@ export function ReturnReviewPanel({
     setSummary(JSON.parse(JSON.stringify(s)) as TaxJsonSummary);
     setFilingRec({ ...fr });
     setWarnings([]);
+    setPipelineWarnings([]);
   }, [taxRow?.json_summary, taxRow?.filing_recommendation, taxRow?.updated_at]);
+
+  useEffect(() => {
+    const results = lastGenerate?.results as Record<string, { accuracy_warnings?: string[] }> | undefined;
+    if (!results || !Number.isFinite(year)) return;
+    const aw = results[String(year)]?.accuracy_warnings;
+    setPipelineWarnings(Array.isArray(aw) ? aw : []);
+  }, [lastGenerate, year]);
 
   const f = summary.form_1040 || {};
   const c = summary.schedule_c || {};
@@ -260,11 +269,16 @@ export function ReturnReviewPanel({
             </AlertDescription>
           </Alert>
 
-          {(warnings.length > 0 || (summary._review_meta?.warnings?.length ?? 0) > 0) && (
+          {(warnings.length > 0 ||
+            pipelineWarnings.length > 0 ||
+            (summary._review_meta?.warnings?.length ?? 0) > 0) && (
             <Alert variant="destructive">
               <AlertTitle>Flags</AlertTitle>
               <AlertDescription>
                 <ul className="list-inside list-disc text-sm">
+                  {pipelineWarnings.map((x, i) => (
+                    <li key={`p-${i}`}>{x}</li>
+                  ))}
                   {(warnings.length ? warnings : summary._review_meta?.warnings || []).map((x, i) => (
                     <li key={i}>{x}</li>
                   ))}

@@ -4,7 +4,7 @@ import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
 
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.49.1";
 import { fetchCreditGuardian } from "../_shared/creditGuardian.ts";
-import { getTaxReturn, listTaxReturns, getFormInstances } from "../_shared/taxReturns.ts";
+import { getTaxReturn, listTaxReturns, getFormInstances, upsertTaxReturn } from "../_shared/taxReturns.ts";
 import {
   anthropicApiKeyConfigured,
   callClaudeWithTools,
@@ -236,6 +236,66 @@ function formatPdfAndTxfSummary(r: Record<string, unknown>): string {
   return lines.length ? lines.join("\n") : "";
 }
 
+const MANUAL_DEDUCTION_CATEGORIES = [
+  "advertising_marketing",
+  "car_truck_expenses",
+  "contract_labor",
+  "depreciation",
+  "insurance_business",
+  "interest_mortgage_business",
+  "interest_other_business",
+  "legal_professional",
+  "office_expense",
+  "rent_lease_business",
+  "repairs_maintenance",
+  "supplies",
+  "taxes_licenses",
+  "travel",
+  "meals",
+  "utilities",
+  "wages",
+  "other_business_expense",
+  "medical_dental",
+  "state_local_taxes",
+  "mortgage_interest",
+  "charitable_cash",
+  "charitable_noncash",
+  "student_loan_interest",
+  "health_insurance_self_employed",
+  "home_office",
+  "education_expenses",
+] as const;
+
+/** Post-generation deduction prompts (Telegram) — pair with add_manual_deduction for answers. */
+function formatDeductionFishingBlock(clientName: string, years: number[]): string {
+  const y = years[0] ?? new Date().getFullYear();
+  return [
+    `📋 Deduction follow-up — ${clientName} (${y})`,
+    ``,
+    `Schedule C / self-employed:`,
+    `• Vehicle for business? Total miles / business miles?`,
+    `• Home office? Sq ft used only for business?`,
+    `• Self-employed health insurance premiums?`,
+    `• Equipment (computer, phone, tools)?`,
+    `• Contractors / freelancers paid?`,
+    `• Business travel (flights, hotels, conferences)?`,
+    `• Business meals?`,
+    `• Software subscriptions (QuickBooks, Adobe, …)?`,
+    `• Business insurance?`,
+    `• State/local business taxes or licenses?`,
+    `• Phone/internet — business %?`,
+    `• Estimated tax payments during ${y}?`,
+    ``,
+    `All filers:`,
+    `• Charitable donations?`,
+    `• Student loan interest?`,
+    `• Unreimbursed medical?`,
+    `• IRA or HSA contributions?`,
+    ``,
+    `Reply with amounts. Use add_manual_deduction to record each expense (car_truck_expenses + miles uses $0.585/mi for 2022).`,
+  ].join("\n");
+}
+
 const SYSTEM_IDENTITY = "Fendi Control Center AI";
 
 /** Strategic north star — wired into all agent/assistant system prompts so decisions aren’t only task-shaped. */
@@ -329,7 +389,7 @@ const SYNTHETIC_GENERATE_TAX_DOCS: WorkflowEntry = {
   name: "Generate Tax Documents",
   description: "Pull all CC Tax data and generate 6 prep documents: Form 1040 JSON summary (with Schedule SE), human-readable worksheet, TXF export for TurboTax, line-by-line Form 1040 mapping, CSV export for Free File, and filing recommendation based on AGI.",
   trigger_phrases: ["prepare taxes", "complete taxes", "file taxes", "generate tax documents", "tax preparation", "turbotax export"],
-  tools: ["generate_tax_docs"],
+  tools: ["generate_tax_docs", "add_manual_income", "add_manual_deduction", "import_prior_return"],
 };
 
 const SYNTHETIC_CREDIT_ANALYSIS_AND_DISPUTES: WorkflowEntry = {
@@ -1769,12 +1829,172 @@ const AGENT_TOOLS: ToolDef[] = [
         if (r.tax_return_id) summary += `\n• Tax Return ID: ${r.tax_return_id}`;
         const pdfTxf = formatPdfAndTxfSummary(r);
         if (pdfTxf) summary += `\n${pdfTxf}`;
+        const aw = r.accuracy_warnings as string[] | undefined;
+        if (Array.isArray(aw) && aw.length > 0) {
+          summary += `\n• Accuracy checks: ${aw.join(" | ")}`;
+        }
         if (rec?.steps?.length) {
           summary += `\n\n📌 Next steps:\n${rec.steps.map((s: string, i: number) => `  ${i + 1}. ${s}`).join("\n")}`;
         }
         return summary;
       });
-      return `Tax prep documents generated for ${years.join(", ")}:\n\n${summaries.join("\n\n")}\n\n⚠️ Disclaimer: These are preparation documents only — not a tax filing. Review all figures before submitting.`
+      const fishing = formatDeductionFishingBlock(resolved.name, allYears);
+      return `Tax prep documents generated for ${years.join(", ")}:\n\n${summaries.join("\n\n")}\n\n${fishing}\n\n⚠️ Disclaimer: These are preparation documents only — not a tax filing. Review all figures before submitting.`
+    },
+  },
+  {
+    name: "add_manual_income" as const,
+    description:
+      "Add manual income (cash, unreported, side jobs, etc.) to a client's tax return json_summary.manual_income. Use when the client reports income without documents.",
+    parameters: {
+      type: "object" as const,
+      properties: {
+        client_name: { type: "string", description: "Client name as in Control Center" },
+        tax_year: { type: "number" },
+        amount: { type: "number" },
+        category: {
+          type: "string",
+          description: "cash, side_job, freelance, tips, rental_cash, other",
+        },
+        description: { type: "string", description: "Short note" },
+      },
+      required: ["client_name", "tax_year", "amount"],
+    },
+    destructive: false,
+    execute: async (args: {
+      client_name: string;
+      tax_year: number;
+      amount: number;
+      category?: string;
+      description?: string;
+    }) => {
+      const resolved = await resolveClientIdForTaxGeneration(args.client_name?.trim());
+      if (!resolved.ok) return JSON.stringify({ error: resolved.message });
+      const tr = await getTaxReturn(supabase, resolved.id, args.tax_year);
+      const js = ((tr?.json_summary ?? {}) as Record<string, unknown>);
+      const manual_income = Array.isArray(js.manual_income) ? [...(js.manual_income as unknown[])] : [];
+      manual_income.push({
+        id: crypto.randomUUID(),
+        amount: args.amount,
+        category: args.category || "other",
+        description: args.description || "",
+        added_at: new Date().toISOString(),
+      });
+      const newSummary = { ...js, manual_income };
+      await upsertTaxReturn(supabase, {
+        client_id: resolved.id,
+        client_name: resolved.name,
+        tax_year: args.tax_year,
+        json_summary: newSummary,
+        status: (tr?.status as string) || "draft",
+      });
+      return JSON.stringify({
+        ok: true,
+        entries: manual_income.length,
+        message: `Recorded $${args.amount} manual income for ${resolved.name} ${args.tax_year}.`,
+      });
+    },
+  },
+  {
+    name: "add_manual_deduction" as const,
+    description:
+      "Add a business or personal deduction to json_summary.manual_deductions when the client reports expenses without receipts. For car_truck_expenses, pass miles to auto-compute at $0.585/mile (2022).",
+    parameters: {
+      type: "object" as const,
+      properties: {
+        client_name: { type: "string" },
+        tax_year: { type: "number" },
+        category: { type: "string", enum: [...MANUAL_DEDUCTION_CATEGORIES] },
+        amount: { type: "number" },
+        description: { type: "string" },
+        miles: { type: "number", description: "Business miles (car_truck_expenses) — amount overridden by miles × $0.585 when set" },
+      },
+      required: ["client_name", "tax_year", "category", "amount"],
+    },
+    destructive: false,
+    execute: async (args: {
+      client_name: string;
+      tax_year: number;
+      category: string;
+      amount: number;
+      description?: string;
+      miles?: number;
+    }) => {
+      const resolved = await resolveClientIdForTaxGeneration(args.client_name?.trim());
+      if (!resolved.ok) return JSON.stringify({ error: resolved.message });
+      let amount = args.amount;
+      if (args.category === "car_truck_expenses" && args.miles != null && args.miles > 0) {
+        amount = Math.round(args.miles * 0.585 * 100) / 100;
+      }
+      const tr = await getTaxReturn(supabase, resolved.id, args.tax_year);
+      const js = ((tr?.json_summary ?? {}) as Record<string, unknown>);
+      const manual_deductions = Array.isArray(js.manual_deductions)
+        ? [...(js.manual_deductions as unknown[])]
+        : [];
+      manual_deductions.push({
+        id: crypto.randomUUID(),
+        category: args.category,
+        amount,
+        miles: args.miles,
+        description: args.description || "",
+        added_at: new Date().toISOString(),
+      });
+      const newSummary = { ...js, manual_deductions };
+      await upsertTaxReturn(supabase, {
+        client_id: resolved.id,
+        client_name: resolved.name,
+        tax_year: args.tax_year,
+        json_summary: newSummary,
+        status: (tr?.status as string) || "draft",
+      });
+      return JSON.stringify({
+        ok: true,
+        entries: manual_deductions.length,
+        amount_applied: amount,
+        message: `Recorded deduction (${args.category}) $${amount} for ${resolved.name} ${args.tax_year}.`,
+      });
+    },
+  },
+  {
+    name: "import_prior_return" as const,
+    description:
+      "Load prior-year tax return data from the Control Center database to help build the current year. For filed PDF extraction use the import-prior-return Edge Function from the app.",
+    parameters: {
+      type: "object" as const,
+      properties: {
+        client_name: { type: "string" },
+        current_year: { type: "number", description: "Current tax year being prepared" },
+        prior_year: { type: "number", description: "Defaults to current_year − 1" },
+      },
+      required: ["client_name", "current_year"],
+    },
+    destructive: false,
+    execute: async (args: { client_name: string; current_year: number; prior_year?: number }) => {
+      const resolved = await resolveClientIdForTaxGeneration(args.client_name?.trim());
+      if (!resolved.ok) return JSON.stringify({ error: resolved.message });
+      const py = args.prior_year ?? (args.current_year - 1);
+      const { data, error } = await supabase
+        .from("tax_returns")
+        .select("id, tax_year, filing_status, agi, total_income, json_summary")
+        .eq("client_id", resolved.id)
+        .eq("tax_year", py)
+        .maybeSingle();
+      if (error) return JSON.stringify({ error: error.message });
+      if (!data) {
+        return JSON.stringify({
+          found: false,
+          prior_year: py,
+          hint: "No prior return in this database for that year. Use Control Center to import a PDF if available.",
+        });
+      }
+      return JSON.stringify({
+        found: true,
+        prior_year: py,
+        filing_status: data.filing_status,
+        agi: data.agi,
+        total_income: data.total_income,
+        json_summary: data.json_summary,
+      });
     },
   },
   {

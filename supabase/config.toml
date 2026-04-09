@@ -54,6 +54,10 @@ timeout_seconds = 150
 [functions.import-prior-return]
 verify_jwt = true
 
+[functions.parse-financial-statement]
+verify_jwt = false
+timeout_seconds = 60
+
 [functions.upload-irs-forms]
 verify_jwt = false
 timeout_seconds = 150

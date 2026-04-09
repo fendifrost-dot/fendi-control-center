@@ -1,0 +1,196 @@
+{
+  "tax_year": 2022,
+  "url_pattern_prior": "https://www.irs.gov/pub/irs-prior/f{slug}--{year}.pdf",
+  "url_pattern_current": "https://www.irs.gov/pub/irs-pdf/f{slug}.pdf",
+  "forms": [
+    {
+      "slug": "1040",
+      "irs_file": "f1040",
+      "name": "Form 1040",
+      "desc": "U.S. Individual Income Tax Return",
+      "freq": "high"
+    },
+    {
+      "slug": "1040s",
+      "irs_file": "f1040s",
+      "name": "Form 1040-SR",
+      "desc": "U.S. Tax Return for Seniors",
+      "freq": "high"
+    },
+    {
+      "slug": "1040v",
+      "irs_file": "f1040v",
+      "name": "Form 1040-V",
+      "desc": "Payment Voucher",
+      "freq": "medium"
+    },
+    {
+      "slug": "1040s1",
+      "irs_file": "f1040s1",
+      "name": "Schedule 1",
+      "desc": "Additional Income and Adjustments",
+      "freq": "high"
+    },
+    {
+      "slug": "1040s2",
+      "irs_file": "f1040s2",
+      "name": "Schedule 2",
+      "desc": "Additional Taxes",
+      "freq": "medium"
+    },
+    {
+      "slug": "1040s3",
+      "irs_file": "f1040s3",
+      "name": "Schedule 3",
+      "desc": "Additional Credits and Payments",
+      "freq": "medium"
+    },
+    {
+      "slug": "1040sa",
+      "irs_file": "f1040sa",
+      "name": "Schedule A",
+      "desc": "Itemized Deductions",
+      "freq": "high"
+    },
+    {
+      "slug": "1040sb",
+      "irs_file": "f1040sb",
+      "name": "Schedule B",
+      "desc": "Interest and Ordinary Dividends",
+      "freq": "high"
+    },
+    {
+      "slug": "1040sc",
+      "irs_file": "f1040sc",
+      "name": "Schedule C",
+      "desc": "Profit or Loss from Business",
+      "freq": "medium"
+    },
+    {
+      "slug": "1040sd",
+      "irs_file": "f1040sd",
+      "name": "Schedule D",
+      "desc": "Capital Gains and Losses",
+      "freq": "high"
+    },
+    {
+      "slug": "1040se",
+      "irs_file": "f1040se",
+      "name": "Schedule E",
+      "desc": "Supplemental Income and Loss",
+      "freq": "medium"
+    },
+    {
+      "slug": "1040sh",
+      "irs_file": "f1040sh",
+      "name": "Schedule H",
+      "desc": "Household Employment Taxes",
+      "freq": "low"
+    },
+    {
+      "slug": "1040sr",
+      "irs_file": "f1040sr",
+      "name": "Schedule R",
+      "desc": "Credit for Elderly or Disabled",
+      "freq": "low"
+    },
+    {
+      "slug": "1040sse",
+      "irs_file": "f1040sse",
+      "name": "Schedule SE",
+      "desc": "Self-Employment Tax",
+      "freq": "high"
+    },
+    {
+      "slug": "1040es",
+      "irs_file": "f1040es",
+      "name": "Form 1040-ES",
+      "desc": "Estimated Tax for Individuals",
+      "freq": "medium"
+    },
+    {
+      "slug": "2441",
+      "irs_file": "f2441",
+      "name": "Form 2441",
+      "desc": "Child and Dependent Care Expenses",
+      "freq": "medium"
+    },
+    {
+      "slug": "4562",
+      "irs_file": "f4562",
+      "name": "Form 4562",
+      "desc": "Depreciation and Amortization",
+      "freq": "medium"
+    },
+    {
+      "slug": "4797",
+      "irs_file": "f4797",
+      "name": "Form 4797",
+      "desc": "Sales of Business Property",
+      "freq": "medium"
+    },
+    {
+      "slug": "5695",
+      "irs_file": "f5695",
+      "name": "Form 5695",
+      "desc": "Residential Clean Energy Credit",
+      "freq": "medium"
+    },
+    {
+      "slug": "6251",
+      "irs_file": "f6251",
+      "name": "Form 6251",
+      "desc": "Alternative Minimum Tax",
+      "freq": "low"
+    },
+    {
+      "slug": "8829",
+      "irs_file": "f8829",
+      "name": "Form 8829",
+      "desc": "Business Use of Home",
+      "freq": "medium"
+    },
+    {
+      "slug": "8889",
+      "irs_file": "f8889",
+      "name": "Form 8889",
+      "desc": "Health Savings Accounts",
+      "freq": "medium"
+    },
+    {
+      "slug": "8949",
+      "irs_file": "f8949",
+      "name": "Form 8949",
+      "desc": "Sales of Capital Assets",
+      "freq": "high"
+    },
+    {
+      "slug": "8959",
+      "irs_file": "f8959",
+      "name": "Form 8959",
+      "desc": "Additional Medicare Tax",
+      "freq": "medium"
+    },
+    {
+      "slug": "8960",
+      "irs_file": "f8960",
+      "name": "Form 8960",
+      "desc": "Net Investment Income Tax",
+      "freq": "medium"
+    },
+    {
+      "slug": "8962",
+      "irs_file": "f8962",
+      "name": "Form 8962",
+      "desc": "Premium Tax Credit",
+      "freq": "medium"
+    },
+    {
+      "slug": "8995",
+      "irs_file": "f8995",
+      "name": "Form 8995",
+      "desc": "Qualified Business Income Deduction",
+      "freq": "medium"
+    }
+  ]
+}
