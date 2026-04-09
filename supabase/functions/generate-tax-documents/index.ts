@@ -246,15 +246,15 @@ serve(async (req) => {
       );
     }
 
-    // Run ingestion for all years in parallel first
+    // Run ingestion for all years in parallel first (skip if recent data exists)
+    const t_start = Date.now();
     const ingestionResults: Record<string, any> = {};
     const supabaseAdmin = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
-    const tIngestion0 = Date.now();
     if (body.client_name || body.client_id) {
       const clientKey = body.client_id || body.client_name;
       const ONE_HOUR = 60 * 60 * 1000;
       const ingestionPromises = taxYears.map(async (y) => {
-        // Check if we have recent ingestion data (within last hour) — skip re-ingestion if so
+        // Check for recent ingestion data (< 1 hour old) to skip expensive re-ingestion
         const { data: recentReturn } = await supabaseAdmin
           .from("tax_returns")
           .select("id, json_summary, updated_at")
@@ -269,7 +269,7 @@ serve(async (req) => {
 
         let result: Record<string, any>;
         if (recentlyIngested && recentReturn?.json_summary) {
-          console.log(`[generate] Skipping ingestion for ${y} — recent data exists (${recentReturn.id})`);
+          console.log(`[generate] Skipping ingestion for ${y} — recent data exists (${recentReturn.id}, ${Math.round((Date.now() - new Date(recentReturn.updated_at).getTime()) / 1000)}s old)`);
           result = { success: true, cached: true, ...recentReturn.json_summary };
         } else {
           result = await runIngestion(
@@ -284,7 +284,7 @@ serve(async (req) => {
       for (const { year, result } of ingestionDone) {
         ingestionResults[year] = result;
       }
-      console.log(`[generate] Ingestion took ${Date.now() - tIngestion0}ms. Complete for ${taxYears.join(", ")}.`);
+      console.log(`[generate] Ingestion took ${Date.now() - t_start}ms for ${taxYears.join(", ")}.`);
     } else {
       console.warn("[generate] No client_name or client_id — skipping ingestion step");
     }
@@ -381,7 +381,7 @@ ${taxDataPayload}`;
 
       // Only require json_summary and worksheet — filing_recommendation is optional
       console.log(`[generate] CC Tax fetches took ${Date.now() - t0}ms`);
-      const t1 = Date.now();
+      const t_claude = Date.now();
       const generated = await callClaudeJSON<{
         json_summary: Record<string, unknown>;
         worksheet: string;
@@ -390,7 +390,7 @@ ${taxDataPayload}`;
         TAX_SYSTEM_PROMPT,
         userPrompt,
         { required: ["json_summary", "worksheet"] }, 4096);
-      console.log(`[generate] Claude analysis took ${Date.now() - t1}ms`);
+      console.log(`[generate] Claude analysis took ${Date.now() - t_claude}ms for year ${year}`);
 
       normalizeTaxGenerationOutput(generated, taxDataPayloadObj);
 
@@ -428,7 +428,7 @@ ${taxDataPayload}`;
       ) as Record<string, any>;
 
       // Persist to Supabase
-      const t2 = Date.now();
+      const t_upsert = Date.now();
       const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
 
       const { id: taxReturnId } = await upsertTaxReturn(supabase, {
@@ -456,7 +456,7 @@ ${taxDataPayload}`;
         actor: "generate-tax-documents",
         new_values: { status: "draft", year },
       });
-      console.log(`[generate] Upsert took ${Date.now() - t2}ms`);
+      console.log(`[generate] Upsert took ${Date.now() - t_upsert}ms — taxReturnId: ${taxReturnId}`);
 
       // Always produce both IRS PDF drafts (Drive + storage) and TXF — AGI only affects filing *recommendation* text.
       const pdfBody = {
@@ -494,7 +494,7 @@ ${taxDataPayload}`;
 
       // Run PDF/TXF generation synchronously — IRS PDFs are cached in Supabase storage
       // so fetches are sub-second. Synchronous avoids EdgeRuntime.waitUntil compatibility issues.
-      const t3 = Date.now();
+      const t_pdftxf = Date.now();
       const [pdfResults, txfResults] = await Promise.all([
         runPdfFill(),
         runTxfExport(
@@ -503,8 +503,8 @@ ${taxDataPayload}`;
           year
         ),
       ]);
-      console.log(`[generate] PDF+TXF took ${Date.now() - t3}ms`);
-      console.log(`[generate] Total pipeline (year ${year}): ${Date.now() - t0}ms`);
+      console.log(`[generate] PDF+TXF took ${Date.now() - t_pdftxf}ms`);
+      console.log(`[generate] Total pipeline (year ${year}): ${Date.now() - t0}ms (full inc. ingestion: ${Date.now() - t_start}ms)`);
       console.log('[generate-tax-documents] PDF results:', JSON.stringify(pdfResults));
       console.log('[generate-tax-documents] TXF results:', JSON.stringify(txfResults));
 
