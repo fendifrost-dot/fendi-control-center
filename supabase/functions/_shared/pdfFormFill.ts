@@ -254,9 +254,7 @@ export async function fillPdfForm(
 
     try {
       // Try AcroForm field first
-      const field = fields.find(
-        (f) => f.getName() === fieldName || f.getName().includes(fieldName)
-      );
+      const field = fields.find((f) => f.getName() === fieldName);
 
       if (field) {
         try {

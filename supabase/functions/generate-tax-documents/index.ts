@@ -14,6 +14,15 @@ const SUPABASE_SERVICE_ROLE_KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
 
 const FREE_FILE_AGI_HINT = 85000;
 
+const VALID_FILING_STATUSES = [
+  "single",
+  "married_filing_jointly",
+  "married_filing_separately",
+  "head_of_household",
+  "qualifying_widow",
+] as const;
+type FilingStatus = typeof VALID_FILING_STATUSES[number];
+
 const TAX_SYSTEM_PROMPT = `You are a senior tax accountant AI assistant. You produce THREE outputs from raw tax data.
 
 IMPORTANT: We are NOT filing taxes — only preparing documents so the client is READY to file.
@@ -30,7 +39,79 @@ PRODUCT RULES (non-negotiable):
 - Do NOT tell the user their only option is to "hire a CPA", "see a tax professional", or "use a professional preparer" as the primary path. This product always generates mail-in IRS PDF drafts and a TurboTax (TXF) export regardless of AGI.
 - For filing_recommendation.steps: prefer concrete product actions (review worksheet, open TXF in TurboTax, print IRS PDFs from Drive, use IRS Free File if AGI under ~$85k) — not generic "consult a professional" unless you also list the generated deliverables first.
 
+REQUIRED in json_summary.form_1040:
+- filing_status: must be one of "single", "married_filing_jointly", "married_filing_separately", "head_of_household", "qualifying_widow"
+- If not determinable from documents, default to "single" for individual filers
+
 Respond with valid JSON only. The json_summary MUST include form_1040.adjusted_gross_income as a real number based on the data provided. Always include a "filing_recommendation" key with at minimum { "method": "...", "agi": <number>, "steps": ["..."] }.`;
+
+function normalizeFilingStatus(raw: unknown): FilingStatus {
+  const normalized = String(raw ?? "").trim().toLowerCase();
+  if (VALID_FILING_STATUSES.includes(normalized as FilingStatus)) {
+    return normalized as FilingStatus;
+  }
+  if (normalized.includes("joint")) return "married_filing_jointly";
+  if (normalized.includes("separate")) return "married_filing_separately";
+  if (normalized.includes("head")) return "head_of_household";
+  if (normalized.includes("widow")) return "qualifying_widow";
+  return "single";
+}
+
+function calculate2022FederalIncomeTax(taxableIncome: number, filingStatus: FilingStatus): number {
+  const taxable = Math.max(0, taxableIncome);
+
+  const brackets: Record<FilingStatus, Array<{ upto: number; base: number; rate: number; floor: number }>> = {
+    single: [
+      { upto: 10275, base: 0, rate: 0.10, floor: 0 },
+      { upto: 41775, base: 1027.5, rate: 0.12, floor: 10275 },
+      { upto: 89075, base: 4807.5, rate: 0.22, floor: 41775 },
+      { upto: 170050, base: 15213.5, rate: 0.24, floor: 89075 },
+      { upto: 215950, base: 34647.5, rate: 0.32, floor: 170050 },
+      { upto: 539900, base: 49335.5, rate: 0.35, floor: 215950 },
+      { upto: Number.POSITIVE_INFINITY, base: 162718, rate: 0.37, floor: 539900 },
+    ],
+    married_filing_jointly: [
+      { upto: 20550, base: 0, rate: 0.10, floor: 0 },
+      { upto: 83550, base: 2055, rate: 0.12, floor: 20550 },
+      { upto: 178150, base: 9615, rate: 0.22, floor: 83550 },
+      { upto: 340100, base: 30427, rate: 0.24, floor: 178150 },
+      { upto: 431900, base: 69295, rate: 0.32, floor: 340100 },
+      { upto: 647850, base: 98671, rate: 0.35, floor: 431900 },
+      { upto: Number.POSITIVE_INFINITY, base: 174253.5, rate: 0.37, floor: 647850 },
+    ],
+    married_filing_separately: [
+      { upto: 10275, base: 0, rate: 0.10, floor: 0 },
+      { upto: 41775, base: 1027.5, rate: 0.12, floor: 10275 },
+      { upto: 89075, base: 4807.5, rate: 0.22, floor: 41775 },
+      { upto: 170050, base: 15213.5, rate: 0.24, floor: 89075 },
+      { upto: 215950, base: 34647.5, rate: 0.32, floor: 170050 },
+      { upto: 323925, base: 49335.5, rate: 0.35, floor: 215950 },
+      { upto: Number.POSITIVE_INFINITY, base: 87126.75, rate: 0.37, floor: 323925 },
+    ],
+    head_of_household: [
+      { upto: 14650, base: 0, rate: 0.10, floor: 0 },
+      { upto: 55900, base: 1465, rate: 0.12, floor: 14650 },
+      { upto: 89050, base: 6415, rate: 0.22, floor: 55900 },
+      { upto: 170050, base: 13708, rate: 0.24, floor: 89050 },
+      { upto: 215950, base: 33148, rate: 0.32, floor: 170050 },
+      { upto: 539900, base: 47836, rate: 0.35, floor: 215950 },
+      { upto: Number.POSITIVE_INFINITY, base: 161218.5, rate: 0.37, floor: 539900 },
+    ],
+    qualifying_widow: [
+      { upto: 20550, base: 0, rate: 0.10, floor: 0 },
+      { upto: 83550, base: 2055, rate: 0.12, floor: 20550 },
+      { upto: 178150, base: 9615, rate: 0.22, floor: 83550 },
+      { upto: 340100, base: 30427, rate: 0.24, floor: 178150 },
+      { upto: 431900, base: 69295, rate: 0.32, floor: 340100 },
+      { upto: 647850, base: 98671, rate: 0.35, floor: 431900 },
+      { upto: Number.POSITIVE_INFINITY, base: 174253.5, rate: 0.37, floor: 647850 },
+    ],
+  };
+
+  const bracket = brackets[filingStatus].find((b) => taxable <= b.upto);
+  if (!bracket) return 0;
+  return bracket.base + (taxable - bracket.floor) * bracket.rate;
+}
 
 /** Ingest response uses pl_summary (ingest-tax-documents); aggregated_data is legacy/alternate. */
 function extractIngestionIncome(ingestionData: Record<string, unknown> | null): number {
@@ -375,6 +456,10 @@ CRITICAL: ingestion_income and ingestion_totals contain the REAL aggregated inco
 
 IMPORTANT: The "ingested_documents" section contains data extracted directly from the client's actual tax documents (1099-K forms, W-2s, receipts, etc.) found in their Google Drive folder. Use this data as the PRIMARY source of truth for income figures, especially if the CC Tax data (transactions, pl_report) is empty or shows errors.
 
+REQUIRED OUTPUT SHAPE:
+- json_summary.form_1040.filing_status must be one of: single, married_filing_jointly, married_filing_separately, head_of_household, qualifying_widow
+- If uncertain, default filing_status to "single"
+
 Here is the tax data:
 
 ${taxDataPayload}`;
@@ -397,6 +482,8 @@ ${taxDataPayload}`;
       // Provide sensible default for filing_recommendation if Claude didn't return it
       const summary = generated.json_summary as Record<string, any>;
       const form1040 = (summary?.form_1040 || {}) as Record<string, any>;
+      const filingStatus = normalizeFilingStatus(form1040.filing_status);
+      form1040.filing_status = filingStatus;
       const readiness = (summary?.filing_readiness || {}) as Record<
         string,
         any
@@ -409,6 +496,24 @@ ${taxDataPayload}`;
         form1040.adjusted_gross_income = ingestionIncome;
         form1040.total_income = ingestionIncome;
       }
+
+      // Validate and normalize core tax math so persisted totals are deterministic.
+      const standardDeductionDefault = filingStatus === "married_filing_jointly" || filingStatus === "qualifying_widow"
+        ? 25900
+        : 12950;
+      const totalIncome = Number(form1040.total_income) || 0;
+      const standardDeduction = Number(form1040.standard_deduction) || standardDeductionDefault;
+      const taxableIncome = Math.max(0, totalIncome - standardDeduction);
+      const calculatedTax = calculate2022FederalIncomeTax(taxableIncome, filingStatus);
+      const seTax =
+        Number(form1040.self_employment_tax) ||
+        Number((summary?.schedule_se || {})?.se_tax) ||
+        0;
+      const totalTaxCalculated = calculatedTax + Math.max(0, seTax);
+      form1040.standard_deduction = standardDeduction;
+      form1040.taxable_income = Math.round(taxableIncome * 100) / 100;
+      form1040.tax = Math.round(calculatedTax * 100) / 100;
+      form1040.total_tax = Math.round(totalTaxCalculated * 100) / 100;
 
       const recommendation = sanitizeFilingRecommendation(
         (generated.filing_recommendation || {
@@ -450,13 +555,21 @@ ${taxDataPayload}`;
         created_by: "generate-tax-documents",
       });
 
+      console.log(`[generate] Upsert took ${Date.now() - t_upsert}ms — taxReturnId: ${taxReturnId}`);
+
+      const { error: analyzedDataError } = await supabase
+        .from("tax_returns")
+        .update({ analyzed_data: summary, updated_at: new Date().toISOString() })
+        .eq("id", taxReturnId);
+      if (analyzedDataError) {
+        console.warn("[generate] analyzed_data update failed:", analyzedDataError.message);
+      }
       await logAudit(supabase, {
         tax_return_id: taxReturnId,
         action: "generated",
         actor: "generate-tax-documents",
         new_values: { status: "draft", year },
       });
-      console.log(`[generate] Upsert took ${Date.now() - t_upsert}ms — taxReturnId: ${taxReturnId}`);
 
       // Always produce both IRS PDF drafts (Drive + storage) and TXF — AGI only affects filing *recommendation* text.
       const pdfBody = {
@@ -492,21 +605,26 @@ ${taxDataPayload}`;
         `[generate] AGI $${agi} — kicking off IRS PDFs + TXF as background work (Free File hint threshold $${FREE_FILE_AGI_HINT})`,
       );
 
-      // Run PDF/TXF generation synchronously — IRS PDFs are cached in Supabase storage
-      // so fetches are sub-second. Synchronous avoids EdgeRuntime.waitUntil compatibility issues.
       const t_pdftxf = Date.now();
-      const [pdfResults, txfResults] = await Promise.all([
+      const bgPdfWork = Promise.all([
         runPdfFill(),
         runTxfExport(
           taxReturnId,
           body.client_name || body.client_id || "unknown",
           year
         ),
-      ]);
-      console.log(`[generate] PDF+TXF took ${Date.now() - t_pdftxf}ms`);
+      ]).then(([pdfResults, txfResults]) => {
+        console.log(`[generate] PDF+TXF took ${Date.now() - t_pdftxf}ms`);
+        console.log('[generate-tax-documents] PDF results:', JSON.stringify(pdfResults));
+        console.log('[generate-tax-documents] TXF results:', JSON.stringify(txfResults));
+      }).catch((e) => {
+        console.error("[generate] background PDF/TXF error:", String(e));
+      });
+
+      if (typeof (globalThis as any).EdgeRuntime?.waitUntil === "function") {
+        (globalThis as any).EdgeRuntime.waitUntil(bgPdfWork);
+      }
       console.log(`[generate] Total pipeline (year ${year}): ${Date.now() - t0}ms (full inc. ingestion: ${Date.now() - t_start}ms)`);
-      console.log('[generate-tax-documents] PDF results:', JSON.stringify(pdfResults));
-      console.log('[generate-tax-documents] TXF results:', JSON.stringify(txfResults));
 
       return {
         year: String(year),
@@ -515,9 +633,9 @@ ${taxDataPayload}`;
           worksheet: generated.worksheet,
           filing_recommendation: recommendation,
           tax_return_id: taxReturnId,
-          pdf_results: pdfResults,
-          txf_results: txfResults,
-          pdf_txf_status: "completed",
+          pdf_results: null,
+          txf_results: null,
+          pdf_txf_status: "generating_in_background",
           ingestion_results: ingestionResults[String(year)] || null,
           agi,
           output_strategy: "pdf_and_txf_always",

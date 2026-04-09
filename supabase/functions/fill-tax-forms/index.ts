@@ -10,6 +10,7 @@ import {
   addDraftWatermark,
   inspectPdfFields,
 } from "../_shared/pdfFormFill.ts";
+import { getExpandedFieldMappings } from "../_shared/irsFieldMappings.ts";
 import {
   getAccessToken,
   uploadFileToDrive,
@@ -57,48 +58,42 @@ function flattenComputedData(
   return result;
 }
 
-/**
- * Build basic field mappings for common 1040 fields.
- * Maps computed_data keys to PDF form field names.
- */
-function getFieldMappings(formType: string): Record<string, string> {
-  const mappings: Record<string, Record<string, string>> = {
-    "1040": {
-      first_name: "topmostSubform[0].Page1[0].f1_02[0]",
-      last_name: "topmostSubform[0].Page1[0].f1_03[0]",
-      ssn: "topmostSubform[0].Page1[0].f1_04[0]",
-      address: "topmostSubform[0].Page1[0].f1_06[0]",
-      city_state_zip: "topmostSubform[0].Page1[0].f1_07[0]",
-      filing_status: "topmostSubform[0].Page1[0].c1_1[0]",
-      wages: "topmostSubform[0].Page1[0].f1_10[0]",
-      interest_income: "topmostSubform[0].Page1[0].f1_12[0]",
-      total_income: "topmostSubform[0].Page1[0].f1_22[0]",
-      adjusted_gross_income: "topmostSubform[0].Page1[0].f1_26[0]",
-      standard_deduction: "topmostSubform[0].Page2[0].f2_02[0]",
-      taxable_income: "topmostSubform[0].Page2[0].f2_04[0]",
-      tax: "topmostSubform[0].Page2[0].f2_06[0]",
-      total_tax: "topmostSubform[0].Page2[0].f2_14[0]",
-      total_payments: "topmostSubform[0].Page2[0].f2_18[0]",
-      refund: "topmostSubform[0].Page2[0].f2_20[0]",
-      amount_owed: "topmostSubform[0].Page2[0].f2_24[0]",
-    },
-    "1040sc": {
-      business_name: "topmostSubform[0].Page1[0].f1_02[0]",
-      principal_business: "topmostSubform[0].Page1[0].f1_01[0]",
-      business_code: "topmostSubform[0].Page1[0].f1_03[0]",
-      ein: "topmostSubform[0].Page1[0].f1_04[0]",
-      gross_receipts: "topmostSubform[0].Page1[0].f1_07[0]",
-      total_expenses: "topmostSubform[0].Page1[0].f1_30[0]",
-      net_profit: "topmostSubform[0].Page1[0].f1_31[0]",
-    },
-    "1040sse": {
-      net_earnings: "topmostSubform[0].Page1[0].f1_03[0]",
-      se_tax: "topmostSubform[0].Page1[0].f1_11[0]",
-      deduction: "topmostSubform[0].Page1[0].f1_12[0]",
-    },
-  };
+/** Maps computed_data / json_summary keys to IRS AcroForm names (see _shared/irsFieldMappings.ts). */
+function getFieldMappings(formType: string, taxYear: number): Record<string, string> {
+  return getExpandedFieldMappings(formType, taxYear);
+}
 
-  return mappings[formType] || {};
+function deriveFilingStatusCheckboxes(flatData: Record<string, unknown>) {
+  const raw =
+    (flatData.form_1040 && typeof flatData.form_1040 === "object"
+      ? (flatData.form_1040 as Record<string, unknown>).filing_status
+      : undefined) ||
+    flatData["form_1040.filing_status"] ||
+    flatData.filing_status;
+  const status = String(raw ?? "").toLowerCase();
+  if (!status) {
+    flatData.filing_status_single = "1";
+    return;
+  }
+  if (status.includes("joint")) flatData.filing_status_mfj = "1";
+  else if (status.includes("separate")) flatData.filing_status_mfs = "1";
+  else if (status.includes("head")) flatData.filing_status_hoh = "1";
+  else if (status.includes("widow")) flatData.filing_status_qw = "1";
+  else flatData.filing_status_single = "1";
+}
+
+function pickFormFieldData(
+  flatData: Record<string, unknown>,
+  fieldMappings: Record<string, string>,
+): Record<string, unknown> {
+  const out: Record<string, unknown> = {};
+  for (const key of Object.keys(fieldMappings)) {
+    const value = flatData[key];
+    if (value !== undefined && value !== null && value !== "") {
+      out[key] = value;
+    }
+  }
+  return out;
 }
 
 async function ensureStorageBucket(supabase: any, bucketName: string) {
@@ -146,7 +141,8 @@ async function processForm(
   }
 
   // 3. Fill fields
-  const fieldMappings = getFieldMappings(formType);
+  const fieldMappings = getFieldMappings(formType, taxYear);
+  const formFieldData = pickFormFieldData(flatData, fieldMappings);
   let filledDoc;
   try {
     filledDoc = await fillPdfForm(pdfBytes, fieldMappings, flatData);
@@ -190,7 +186,24 @@ async function processForm(
       );
       console.log(`Uploaded to Drive: ${driveResult.name} (${driveResult.id})`);
     } catch (err) {
-      console.warn(`Drive upload failed for ${formType}: ${err}`);
+      const message = String(err);
+      console.warn(`Drive upload failed for ${formType}: ${message}`);
+      // One retry path for expired/invalid token errors.
+      if (message.includes("401") || message.toLowerCase().includes("unauthorized")) {
+        try {
+          const refreshedToken = await getAccessToken();
+          driveResult = await uploadFileToDrive(
+            refreshedToken,
+            fileName,
+            new Uint8Array(filledPdfBytes),
+            "application/pdf",
+            driveFolderId
+          );
+          console.log(`Uploaded to Drive after token refresh: ${driveResult.name} (${driveResult.id})`);
+        } catch (retryErr) {
+          console.warn(`Drive retry failed for ${formType}: ${retryErr}`);
+        }
+      }
     }
   } else {
     console.warn(`Drive unavailable; skipping upload for ${formType}`);
@@ -204,6 +217,7 @@ async function processForm(
     status: "draft",
     pdf_url: storagePath,
     drive_file_id: driveResult?.id || null,
+    field_data: formFieldData,
     notes: `fields: ${Object.keys(fieldMappings).length}, drive_link: ${driveResult?.webViewLink || "N/A"}`,
     created_at: new Date().toISOString(),
   });
@@ -280,6 +294,7 @@ serve(async (req: Request) => {
 
     // Flatten computed data
     const flatData = flattenComputedData(computed_data!);
+    deriveFilingStatusCheckboxes(flatData);
     console.log(`Flattened data keys: ${Object.keys(flatData).slice(0, 20).join(", ")}...`);
 
     // Determine required forms
