@@ -605,24 +605,27 @@ ${taxDataPayload}`;
         `[generate] AGI $${agi} — kicking off IRS PDFs + TXF as background work (Free File hint threshold $${FREE_FILE_AGI_HINT})`,
       );
 
+      // Run PDF/TXF synchronously — ingestion cache makes this feasible within 150s timeout.
+      // waitUntil is unreliable in Lovable's edge runtime.
       const t_pdftxf = Date.now();
-      const bgPdfWork = Promise.all([
-        runPdfFill(),
-        runTxfExport(
-          taxReturnId,
-          body.client_name || body.client_id || "unknown",
-          year
-        ),
-      ]).then(([pdfResults, txfResults]) => {
+      let pdfResults: any = null;
+      let txfResults: any = null;
+      try {
+        [pdfResults, txfResults] = await Promise.all([
+          runPdfFill(),
+          runTxfExport(
+            taxReturnId,
+            body.client_name || body.client_id || "unknown",
+            year
+          ),
+        ]);
         console.log(`[generate] PDF+TXF took ${Date.now() - t_pdftxf}ms`);
         console.log('[generate-tax-documents] PDF results:', JSON.stringify(pdfResults));
         console.log('[generate-tax-documents] TXF results:', JSON.stringify(txfResults));
-      }).catch((e) => {
-        console.error("[generate] background PDF/TXF error:", String(e));
-      });
-
-      if (typeof (globalThis as any).EdgeRuntime?.waitUntil === "function") {
-        (globalThis as any).EdgeRuntime.waitUntil(bgPdfWork);
+      } catch (e) {
+        console.error("[generate] PDF/TXF error:", String(e));
+        pdfResults = { ok: false, error: String(e) };
+        txfResults = { ok: false, error: String(e) };
       }
       console.log(`[generate] Total pipeline (year ${year}): ${Date.now() - t0}ms (full inc. ingestion: ${Date.now() - t_start}ms)`);
 
@@ -633,9 +636,9 @@ ${taxDataPayload}`;
           worksheet: generated.worksheet,
           filing_recommendation: recommendation,
           tax_return_id: taxReturnId,
-          pdf_results: null,
-          txf_results: null,
-          pdf_txf_status: "generating_in_background",
+          pdf_results: pdfResults,
+          txf_results: txfResults,
+          pdf_txf_status: "completed",
           ingestion_results: ingestionResults[String(year)] || null,
           agi,
           output_strategy: "pdf_and_txf_always",
