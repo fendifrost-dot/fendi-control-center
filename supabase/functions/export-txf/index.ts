@@ -210,13 +210,22 @@ function generateTxfContent(data: TaxReturnData): string {
   if (data.deductions.type === 'standard' && data.deductions.standard_amount > 0) {
     addTxfRecord(lines, TXF_CODES.standard_deduction.code, data.deductions.standard_amount, 'Standard deduction');
   } else if (data.deductions.type === 'itemized') {
-    const itemized = data.deductions.itemized;
-    if (itemized.medical > 0) addTxfRecord(lines, TXF_CODES.itemized_medical.code, itemized.medical, 'Medical expenses');
-    if (itemized.state_local_taxes > 0 || itemized.salt_capped > 0) {
-      addTxfRecord(lines, TXF_CODES.itemized_salt.code, itemized.salt_capped || itemized.state_local_taxes, 'State/local taxes');
+    const itemized = data.deductions.itemized ?? {};
+    if ((itemized.medical ?? 0) > 0) {
+      addTxfRecord(lines, TXF_CODES.itemized_medical.code, itemized.medical, 'Medical expenses');
     }
-    if (itemized.mortgage_interest > 0) addTxfRecord(lines, TXF_CODES.itemized_mortgage.code, itemized.mortgage_interest, 'Mortgage interest');
-    const charitable = (itemized.charitable_cash || 0) + (itemized.charitable_noncash || 0);
+    if ((itemized.state_local_taxes ?? 0) > 0 || (itemized.salt_capped ?? 0) > 0) {
+      addTxfRecord(
+        lines,
+        TXF_CODES.itemized_salt.code,
+        itemized.salt_capped ?? itemized.state_local_taxes ?? 0,
+        'State/local taxes',
+      );
+    }
+    if ((itemized.mortgage_interest ?? 0) > 0) {
+      addTxfRecord(lines, TXF_CODES.itemized_mortgage.code, itemized.mortgage_interest, 'Mortgage interest');
+    }
+    const charitable = (itemized.charitable_cash ?? 0) + (itemized.charitable_noncash ?? 0);
     if (charitable > 0) addTxfRecord(lines, TXF_CODES.itemized_charitable.code, charitable, 'Charitable contributions');
   }
 
@@ -232,8 +241,9 @@ function generateTxfContent(data: TaxReturnData): string {
     ['total_tax', 'total_tax'],
   ];
 
+  const tc = data.tax_computed ?? {};
   for (const [dataKey, txfKey] of taxFields) {
-    const amount = data.tax_computed[dataKey] || 0;
+    const amount = tc[dataKey] || 0;
     const txfInfo = TXF_CODES[txfKey];
     if (txfInfo && amount !== 0) {
       addTxfRecord(lines, txfInfo.code, amount, txfInfo.description);
@@ -241,16 +251,26 @@ function generateTxfContent(data: TaxReturnData): string {
   }
 
   // Credits
-  if (data.credits.child_tax_credit > 0) addTxfRecord(lines, TXF_CODES.child_tax_credit.code, data.credits.child_tax_credit, 'Child tax credit');
-  if (data.credits.eic > 0) addTxfRecord(lines, TXF_CODES.eic.code, data.credits.eic, 'EIC');
+  const credits = data.credits ?? {};
+  if ((credits.child_tax_credit ?? 0) > 0) {
+    addTxfRecord(lines, TXF_CODES.child_tax_credit.code, credits.child_tax_credit, 'Child tax credit');
+  }
+  if ((credits.eic ?? 0) > 0) addTxfRecord(lines, TXF_CODES.eic.code, credits.eic, 'EIC');
 
   // Payments
-  if (data.tax_payments.federal_withheld > 0) addTxfRecord(lines, TXF_CODES.federal_withheld.code, data.tax_payments.federal_withheld, 'Federal withheld');
-  if (data.tax_payments.estimated_payments > 0) addTxfRecord(lines, TXF_CODES.estimated_payments.code, data.tax_payments.estimated_payments, 'Estimated payments');
-  if (data.tax_payments.total_payments > 0) addTxfRecord(lines, TXF_CODES.total_payments.code, data.tax_payments.total_payments, 'Total payments');
+  const pay = data.tax_payments ?? {};
+  if ((pay.federal_withheld ?? 0) > 0) {
+    addTxfRecord(lines, TXF_CODES.federal_withheld.code, pay.federal_withheld, 'Federal withheld');
+  }
+  if ((pay.estimated_payments ?? 0) > 0) {
+    addTxfRecord(lines, TXF_CODES.estimated_payments.code, pay.estimated_payments, 'Estimated payments');
+  }
+  if ((pay.total_payments ?? 0) > 0) {
+    addTxfRecord(lines, TXF_CODES.total_payments.code, pay.total_payments, 'Total payments');
+  }
 
   // Refund or amount owed
-  const refundOrOwed = data.tax_computed.refund_or_owed || 0;
+  const refundOrOwed = tc.refund_or_owed || 0;
   if (refundOrOwed < 0) {
     addTxfRecord(lines, TXF_CODES.refund.code, Math.abs(refundOrOwed), 'Refund');
   } else if (refundOrOwed > 0) {

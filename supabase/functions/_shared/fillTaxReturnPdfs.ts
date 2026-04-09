@@ -178,6 +178,7 @@ export async function fillTaxReturnPdfs(
 
       await upsertTaxFormInstance(supabase, {
         taxReturnId,
+        templateId: template.id as string,
         formType,
         formYear: taxYear,
         fieldValues: flatBase,
@@ -190,12 +191,12 @@ export async function fillTaxReturnPdfs(
         const { error: auditErr } = await supabase.from("tax_return_audit_log").insert({
           tax_return_id: taxReturnId,
           action: "pdf_filled",
-          details: {
+          actor: auditActor,
+          metadata: {
             form_type: formType,
             storage_path: storagePath,
             drive_file_id: pdfDriveFileId !== storagePath ? pdfDriveFileId : undefined,
           },
-          created_by: auditActor,
         });
         if (auditErr) console.warn("[fillTaxReturnPdfs] audit:", auditErr.message);
       }

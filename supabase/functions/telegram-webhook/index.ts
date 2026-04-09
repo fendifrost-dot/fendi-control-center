@@ -1904,7 +1904,7 @@ const AGENT_TOOLS: ToolDef[] = [
       properties: {
         client_name: { type: "string" },
         tax_year: { type: "number" },
-        category: { type: "string", enum: [...MANUAL_DEDUCTION_CATEGORIES] },
+        category: { type: "string", enum: [...MANUAL_DEDUCTION_CATEGORIES] as string[] },
         amount: { type: "number" },
         description: { type: "string" },
         miles: { type: "number", description: "Business miles (car_truck_expenses) — amount overridden by miles × $0.585 when set" },

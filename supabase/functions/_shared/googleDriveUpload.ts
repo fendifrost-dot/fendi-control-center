@@ -237,3 +237,84 @@ export async function getOrCreateClientTaxFolder(
   console.log(`Created folder: "${exactFolderName}" (${newFolderId})`);
   return newFolderId;
 }
+
+/** OAuth access token from a raw service-account JSON string (same scopes as getAccessToken). */
+export async function getDriveAccessTokenFromJson(serviceAccountJson: string): Promise<string> {
+  const serviceAccount = JSON.parse(serviceAccountJson);
+  const jwt = await createSignedJwt(serviceAccount, [
+    "https://www.googleapis.com/auth/drive",
+    "https://www.googleapis.com/auth/drive.file",
+  ]);
+  const response = await fetch("https://oauth2.googleapis.com/token", {
+    method: "POST",
+    headers: { "Content-Type": "application/x-www-form-urlencoded" },
+    body: new URLSearchParams({
+      grant_type: "urn:ietf:params:oauth:grant-type:jwt-bearer",
+      assertion: jwt,
+    }),
+  });
+  if (!response.ok) {
+    const errorText = await response.text();
+    throw new Error(`Failed to get access token: ${response.status} ${errorText}`);
+  }
+  const data = await response.json();
+  return data.access_token as string;
+}
+
+/** Ensure a subfolder for the tax year exists under the client’s Drive folder. */
+export async function ensureClientTaxReturnsYearFolder(
+  accessToken: string,
+  clientFolderId: string,
+  taxYear: number,
+): Promise<string> {
+  const yr = String(taxYear);
+  const existing = await searchDriveFolder(accessToken, yr, clientFolderId);
+  if (existing) return existing;
+  return await createDriveFolder(accessToken, yr, clientFolderId);
+}
+
+export function driveFilePreviewUrl(fileId: string): string {
+  return `https://drive.google.com/file/d/${fileId}/view`;
+}
+
+/** Upload a PDF or replace an existing file with the same name in the folder. */
+export async function upsertPdfInDriveFolder(
+  accessToken: string,
+  folderId: string,
+  fileName: string,
+  fileContent: Uint8Array,
+): Promise<string> {
+  const safeName = fileName.replace(/'/g, "\\'");
+  const q =
+    `name='${safeName}' and '${folderId}' in parents and mimeType!='application/vnd.google-apps.folder' and trashed=false`;
+  const listUrl = `https://www.googleapis.com/drive/v3/files?q=${
+    encodeURIComponent(q)
+  }&fields=files(id,name)&supportsAllDrives=true&includeItemsFromAllDrives=true`;
+  const listResp = await fetch(listUrl, {
+    headers: { Authorization: `Bearer ${accessToken}` },
+  });
+  if (listResp.ok) {
+    const listData = await listResp.json();
+    const id = listData.files?.[0]?.id as string | undefined;
+    if (id) {
+      const patchResp = await fetch(
+        `https://www.googleapis.com/upload/drive/v3/files/${id}?uploadType=media&supportsAllDrives=true`,
+        {
+          method: "PATCH",
+          headers: {
+            Authorization: `Bearer ${accessToken}`,
+            "Content-Type": "application/pdf",
+          },
+          body: fileContent,
+        },
+      );
+      if (!patchResp.ok) {
+        const msg = await patchResp.text();
+        throw new Error(`Drive PDF update failed: ${patchResp.status} ${msg}`);
+      }
+      return id;
+    }
+  }
+  const created = await uploadFileToDrive(accessToken, fileName, fileContent, "application/pdf", folderId);
+  return created.id;
+}

@@ -40,6 +40,69 @@ export interface TaxFormInstanceInsert {
   notes?: string;
 }
 
+/** Upsert helper used by fillTaxReturnPdfs — match on tax_return_id + form_type + form_year. */
+export interface UpsertTaxFormInstanceInput {
+  taxReturnId: string;
+  templateId?: string;
+  formType: string;
+  formYear: number;
+  fieldValues: Record<string, unknown>;
+  computedLines: Record<string, unknown>;
+  pdfDriveFileId: string | null;
+  pdfDriveUrl: string | null;
+}
+
+export async function upsertTaxFormInstance(
+  supabase: SupabaseClient,
+  input: UpsertTaxFormInstanceInput,
+): Promise<void> {
+  const field_data: Record<string, unknown> = {
+    ...input.fieldValues,
+    computed_lines: input.computedLines,
+  };
+
+  const pdf_url = input.pdfDriveUrl ?? undefined;
+  const drive_file_id =
+    input.pdfDriveFileId && !input.pdfDriveFileId.includes("/")
+      ? input.pdfDriveFileId
+      : undefined;
+
+  const { data: existing } = await supabase
+    .from("tax_form_instances")
+    .select("id")
+    .eq("tax_return_id", input.taxReturnId)
+    .eq("form_type", input.formType)
+    .eq("form_year", input.formYear)
+    .maybeSingle();
+
+  if (existing?.id) {
+    const { error } = await supabase
+      .from("tax_form_instances")
+      .update({
+        field_data,
+        pdf_url,
+        drive_file_id,
+        template_id: input.templateId,
+        status: "filled",
+        updated_at: new Date().toISOString(),
+      })
+      .eq("id", existing.id);
+    if (error) throw new Error("Failed to update form instance: " + error.message);
+    return;
+  }
+
+  await insertFormInstance(supabase, {
+    tax_return_id: input.taxReturnId,
+    template_id: input.templateId,
+    form_type: input.formType,
+    form_year: input.formYear,
+    field_data,
+    pdf_url,
+    drive_file_id,
+    status: "filled",
+  });
+}
+
 export interface AuditLogEntry {
   tax_return_id: string;
   action: string;
@@ -203,4 +266,4 @@ export async function logAudit(
   if (error) {
     console.error("Audit log insert failed:", error.message);
   }
-  }
+}

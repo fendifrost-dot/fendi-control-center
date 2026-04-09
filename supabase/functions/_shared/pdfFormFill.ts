@@ -365,3 +365,59 @@ export async function inspectPdfFields(pdfBytes: Uint8Array): Promise<Array<{ na
   }));
 }
 
+/** Flatten nested objects to dotted keys (e.g. forms.f1040.line1). */
+function flattenDotted(obj: Record<string, unknown>, prefix = ""): Record<string, unknown> {
+  const result: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(obj)) {
+    const fullKey = prefix ? `${prefix}.${key}` : key;
+    if (value && typeof value === "object" && !Array.isArray(value)) {
+      Object.assign(result, flattenDotted(value as Record<string, unknown>, fullKey));
+    } else {
+      result[fullKey] = value;
+    }
+  }
+  return result;
+}
+
+/** Nested `forms` object from computed_data → flat keys for AcroForm mapping (value paths). */
+export function flattenFormsObject(forms: Record<string, unknown>): Record<string, unknown> {
+  return flattenDotted(forms, "forms");
+}
+
+/** Merge client_info.* and forms.* into one flat lookup map for PDF filling. */
+export function mergeClientInfoFlat(
+  clientInfo: Record<string, unknown> | undefined,
+  formsFlat: Record<string, unknown>,
+): Record<string, unknown> {
+  const out: Record<string, unknown> = { ...formsFlat };
+  if (clientInfo && typeof clientInfo === "object") {
+    Object.assign(out, flattenDotted(clientInfo, "client_info"));
+  }
+  return out;
+}
+
+/** DB templates store PDF field name → data path; fillPdfForm expects data path → PDF field name. */
+function invertPdfFieldMapping(mapping: Record<string, string>): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const [pdfField, dataPath] of Object.entries(mapping)) {
+    out[dataPath] = pdfField;
+  }
+  return out;
+}
+
+/**
+ * Fill PDF using template `field_mapping`, apply optional DRAFT watermark, return saved bytes.
+ */
+export async function fillPdfWithMapping(
+  pdfBytes: Uint8Array,
+  mapping: Record<string, string>,
+  flatBase: Record<string, unknown>,
+  opts?: { watermarkDraft?: boolean },
+): Promise<Uint8Array> {
+  const inverted = invertPdfFieldMapping(mapping);
+  const doc = await fillPdfForm(pdfBytes, inverted, flatBase);
+  if (opts?.watermarkDraft) {
+    await addDraftWatermark(doc);
+  }
+  return await doc.save();
+}
