@@ -248,26 +248,50 @@ serve(async (req) => {
 
     // Run ingestion for all years in parallel first
     const ingestionResults: Record<string, any> = {};
+    const supabaseAdmin = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
+    const tIngestion0 = Date.now();
     if (body.client_name || body.client_id) {
+      const clientKey = body.client_id || body.client_name;
+      const ONE_HOUR = 60 * 60 * 1000;
       const ingestionPromises = taxYears.map(async (y) => {
-        const result = await runIngestion(
-          body.client_name || body.client_id,
-          body.client_id || "unknown",
-          y
-        );
+        // Check if we have recent ingestion data (within last hour) — skip re-ingestion if so
+        const { data: recentReturn } = await supabaseAdmin
+          .from("tax_returns")
+          .select("id, json_summary, updated_at")
+          .eq("client_id", clientKey)
+          .eq("tax_year", y)
+          .order("updated_at", { ascending: false })
+          .limit(1)
+          .maybeSingle();
+
+        const recentlyIngested = recentReturn?.updated_at &&
+          (Date.now() - new Date(recentReturn.updated_at).getTime()) < ONE_HOUR;
+
+        let result: Record<string, any>;
+        if (recentlyIngested && recentReturn?.json_summary) {
+          console.log(`[generate] Skipping ingestion for ${y} — recent data exists (${recentReturn.id})`);
+          result = { success: true, cached: true, ...recentReturn.json_summary };
+        } else {
+          result = await runIngestion(
+            body.client_name || body.client_id,
+            body.client_id || "unknown",
+            y
+          );
+        }
         return { year: String(y), result };
       });
       const ingestionDone = await Promise.all(ingestionPromises);
       for (const { year, result } of ingestionDone) {
         ingestionResults[year] = result;
       }
-      console.log(`[generate] Ingestion complete for ${taxYears.join(", ")}. Results:`, JSON.stringify(Object.keys(ingestionResults)));
+      console.log(`[generate] Ingestion took ${Date.now() - tIngestion0}ms. Complete for ${taxYears.join(", ")}.`);
     } else {
       console.warn("[generate] No client_name or client_id — skipping ingestion step");
     }
 
     async function processYear(year: number) {
       console.log(`Processing tax year ${year}...`);
+      const t0 = Date.now();
 
       const [
         workflowStatus,
@@ -356,6 +380,8 @@ Here is the tax data:
 ${taxDataPayload}`;
 
       // Only require json_summary and worksheet — filing_recommendation is optional
+      console.log(`[generate] CC Tax fetches took ${Date.now() - t0}ms`);
+      const t1 = Date.now();
       const generated = await callClaudeJSON<{
         json_summary: Record<string, unknown>;
         worksheet: string;
@@ -363,7 +389,8 @@ ${taxDataPayload}`;
       }>(
         TAX_SYSTEM_PROMPT,
         userPrompt,
-        { required: ["json_summary", "worksheet"] }, 8192);
+        { required: ["json_summary", "worksheet"] }, 4096);
+      console.log(`[generate] Claude analysis took ${Date.now() - t1}ms`);
 
       normalizeTaxGenerationOutput(generated, taxDataPayloadObj);
 
@@ -401,6 +428,7 @@ ${taxDataPayload}`;
       ) as Record<string, any>;
 
       // Persist to Supabase
+      const t2 = Date.now();
       const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
 
       const { id: taxReturnId } = await upsertTaxReturn(supabase, {
@@ -428,6 +456,7 @@ ${taxDataPayload}`;
         actor: "generate-tax-documents",
         new_values: { status: "draft", year },
       });
+      console.log(`[generate] Upsert took ${Date.now() - t2}ms`);
 
       // Always produce both IRS PDF drafts (Drive + storage) and TXF — AGI only affects filing *recommendation* text.
       const pdfBody = {
@@ -465,6 +494,7 @@ ${taxDataPayload}`;
 
       // Run PDF/TXF generation synchronously — IRS PDFs are cached in Supabase storage
       // so fetches are sub-second. Synchronous avoids EdgeRuntime.waitUntil compatibility issues.
+      const t3 = Date.now();
       const [pdfResults, txfResults] = await Promise.all([
         runPdfFill(),
         runTxfExport(
@@ -473,6 +503,8 @@ ${taxDataPayload}`;
           year
         ),
       ]);
+      console.log(`[generate] PDF+TXF took ${Date.now() - t3}ms`);
+      console.log(`[generate] Total pipeline (year ${year}): ${Date.now() - t0}ms`);
       console.log('[generate-tax-documents] PDF results:', JSON.stringify(pdfResults));
       console.log('[generate-tax-documents] TXF results:', JSON.stringify(txfResults));
 
