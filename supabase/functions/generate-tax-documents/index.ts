@@ -498,22 +498,42 @@ ${taxDataPayload}`;
       }
 
       // Validate and normalize core tax math so persisted totals are deterministic.
+      // SE tax: 92.35% of net SE income × 15.3%, capped at SS wage base ($147,000 for 2022)
+      const netSEIncome = Number((summary?.schedule_se || summary?.schedule_c || {})?.net_profit) ||
+        Number((summary?.schedule_se || {})?.net_earnings) || 0;
+      const seBase = netSEIncome * 0.9235;
+      const ssWageBase2022 = 147000;
+      const ssTax = Math.min(seBase, ssWageBase2022) * 0.124;
+      const medicareTax = seBase * 0.029;
+      const seTax = Math.round((ssTax + medicareTax) * 100) / 100;
+      const deductibleHalfSE = Math.round(seTax / 2 * 100) / 100;
+
+      // AGI = total income - deductible half of SE tax (Schedule 1 line 15)
+      const totalIncome = Number(form1040.total_income) || 0;
+      const adjustedAgi = Math.round((totalIncome - deductibleHalfSE) * 100) / 100;
+      agi = adjustedAgi;
+      form1040.adjusted_gross_income = adjustedAgi;
+      form1040.self_employment_tax_deduction = deductibleHalfSE;
+
       const standardDeductionDefault = filingStatus === "married_filing_jointly" || filingStatus === "qualifying_widow"
         ? 25900
         : 12950;
-      const totalIncome = Number(form1040.total_income) || 0;
       const standardDeduction = Number(form1040.standard_deduction) || standardDeductionDefault;
-      const taxableIncome = Math.max(0, totalIncome - standardDeduction);
+      const taxableIncome = Math.max(0, adjustedAgi - standardDeduction);
       const calculatedTax = calculate2022FederalIncomeTax(taxableIncome, filingStatus);
-      const seTax =
-        Number(form1040.self_employment_tax) ||
-        Number((summary?.schedule_se || {})?.se_tax) ||
-        0;
-      const totalTaxCalculated = calculatedTax + Math.max(0, seTax);
+      const totalTaxCalculated = calculatedTax + seTax;
+
+      // Persist all calculated values
       form1040.standard_deduction = standardDeduction;
       form1040.taxable_income = Math.round(taxableIncome * 100) / 100;
       form1040.tax = Math.round(calculatedTax * 100) / 100;
+      form1040.self_employment_tax = seTax;
       form1040.total_tax = Math.round(totalTaxCalculated * 100) / 100;
+      if (summary.schedule_se) {
+        summary.schedule_se.se_tax = seTax;
+        summary.schedule_se.deductible_half = deductibleHalfSE;
+      }
+      console.log(`[generate] Tax math: income=$${totalIncome} - SE deduction=$${deductibleHalfSE} = AGI=$${adjustedAgi}, taxable=$${taxableIncome}, incomeTax=$${Math.round(calculatedTax*100)/100}, seTax=$${seTax}, total=$${Math.round(totalTaxCalculated*100)/100}`);
 
       const recommendation = sanitizeFilingRecommendation(
         (generated.filing_recommendation || {
