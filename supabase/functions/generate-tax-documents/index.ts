@@ -169,6 +169,31 @@ function currentAgiFromJsonSummary(
   return undefined;
 }
 
+/**
+ * Net profit subject to SE tax — MUST prefer Schedule C over Schedule SE.
+ * Bug we fixed: `(schedule_se || schedule_c).net_profit` used schedule_se first; Claude often
+ * sends a partial schedule_se object without net_profit, so Schedule C net profit was ignored.
+ */
+function netSelfEmploymentIncomeFromSummary(summary: Record<string, unknown>): number {
+  const c = (summary.schedule_c || {}) as Record<string, unknown>;
+  const se = (summary.schedule_se || {}) as Record<string, unknown>;
+  const fromScheduleC =
+    Number(c.net_profit) ||
+    Number(c.net_profit_or_loss) ||
+    Number(c.line_31) ||
+    Number(c.net_income) ||
+    0;
+  if (Number.isFinite(fromScheduleC) && fromScheduleC !== 0) {
+    return fromScheduleC;
+  }
+  return (
+    Number(se.net_earnings_from_self_employment) ||
+    Number(se.net_earnings) ||
+    Number(se.net_profit) ||
+    0
+  );
+}
+
 /** After Claude: if AGI is missing/zero, fall back to document ingestion total. */
 function normalizeTaxGenerationOutput(
   result: { json_summary: Record<string, unknown> },
@@ -577,8 +602,10 @@ ${taxDataPayload}${priorYearBlock}${manualBlock}`;
 
       // Validate and normalize core tax math so persisted totals are deterministic.
       // SE tax: 92.35% of net SE income × 15.3%, capped at SS wage base ($147,000 for 2022)
-      const netSEIncome = Number((summary?.schedule_se || summary?.schedule_c || {})?.net_profit) ||
-        Number((summary?.schedule_se || {})?.net_earnings) || 0;
+      const netSEIncome = netSelfEmploymentIncomeFromSummary(summary as Record<string, unknown>);
+      console.log(
+        `[generate] SE base: netSEIncome=${netSEIncome} (from Schedule C / SE lines; see netSelfEmploymentIncomeFromSummary)`,
+      );
       const seBase = netSEIncome * 0.9235;
       const ssWageBase2022 = 147000;
       const ssTax = Math.min(seBase, ssWageBase2022) * 0.124;
@@ -607,11 +634,18 @@ ${taxDataPayload}${priorYearBlock}${manualBlock}`;
       form1040.tax = Math.round(calculatedTax * 100) / 100;
       form1040.self_employment_tax = seTax;
       form1040.total_tax = Math.round(totalTaxCalculated * 100) / 100;
-      if (summary.schedule_se) {
-        summary.schedule_se.se_tax = seTax;
-        summary.schedule_se.deductible_half = deductibleHalfSE;
+      if (!summary.schedule_se || typeof summary.schedule_se !== "object") {
+        summary.schedule_se = {};
       }
-      console.log(`[generate] Tax math: income=$${totalIncome} - SE deduction=$${deductibleHalfSE} = AGI=$${adjustedAgi}, taxable=$${taxableIncome}, incomeTax=$${Math.round(calculatedTax*100)/100}, seTax=$${seTax}, total=$${Math.round(totalTaxCalculated*100)/100}`);
+      const seOut = summary.schedule_se as Record<string, unknown>;
+      seOut.se_tax = seTax;
+      seOut.deductible_half = deductibleHalfSE;
+      if (netSEIncome > 0) {
+        seOut.net_earnings = seOut.net_earnings ?? seBase;
+      }
+      console.log(
+        `[generate] Tax math: total_income=$${totalIncome} - SE deduction (½ SE tax)=$${deductibleHalfSE} => AGI=$${adjustedAgi} (form1040.agi persisted); seTax=$${seTax}, taxable=$${taxableIncome}, incomeTax=$${Math.round(calculatedTax * 100) / 100}, total=$${Math.round(totalTaxCalculated * 100) / 100}`,
+      );
 
       const recommendation = sanitizeFilingRecommendation(
         (generated.filing_recommendation || {

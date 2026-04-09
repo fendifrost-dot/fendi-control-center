@@ -1,5 +1,24 @@
 /** Consistency checks on generated json_summary before PDFs — returns human-readable warnings. */
 
+/** Same priority as generate-tax-documents: Schedule C net profit before Schedule SE. */
+function netSelfEmploymentIncomeForCheck(summary: Record<string, unknown>): number {
+  const c = (summary.schedule_c || {}) as Record<string, unknown>;
+  const se = (summary.schedule_se || {}) as Record<string, unknown>;
+  const fromC =
+    Number(c.net_profit) ||
+    Number(c.net_profit_or_loss) ||
+    Number(c.line_31) ||
+    Number(c.net_income) ||
+    0;
+  if (Number.isFinite(fromC) && fromC !== 0) return fromC;
+  return (
+    Number(se.net_earnings_from_self_employment) ||
+    Number(se.net_earnings) ||
+    Number(se.net_profit) ||
+    0
+  );
+}
+
 export function crossCheckReturn(summary: Record<string, unknown>): string[] {
   const warnings: string[] = [];
   const form1040 = (summary.form_1040 || {}) as Record<string, unknown>;
@@ -16,13 +35,16 @@ export function crossCheckReturn(summary: Record<string, unknown>): string[] {
     }
   }
 
-  const netSE = Number(schedC.net_profit) || Number(schedSE.net_earnings) || 0;
-  const seTaxReported = Number(schedSE.se_tax);
-  if (Number.isFinite(netSE) && netSE > 0 && Number.isFinite(seTaxReported)) {
+  const netSE = netSelfEmploymentIncomeForCheck(summary);
+  const seTaxReported =
+    Number(schedSE.se_tax) ||
+    Number(form1040.self_employment_tax) ||
+    0;
+  if (Number.isFinite(netSE) && netSE > 0 && Number.isFinite(seTaxReported) && seTaxReported > 0) {
     const expectedSE = Math.round(netSE * 0.9235 * 0.153 * 100) / 100;
     if (Math.abs(seTaxReported - expectedSE) > 15) {
       warnings.push(
-        `SE tax check: expected ~$${expectedSE.toFixed(0)} (92.35% × 15.3% of net), got $${seTaxReported} — verify Schedule SE.`,
+        `SE tax check: expected ~$${expectedSE.toFixed(0)} (92.35% × 15.3% of net SE income), got $${seTaxReported} (schedule_se.se_tax or form_1040.self_employment_tax) — verify Schedule SE.`,
       );
     }
   }
