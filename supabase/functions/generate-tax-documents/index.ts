@@ -414,7 +414,7 @@ serve(async (req) => {
       );
     }
 
-    // Run ingestion for all years in parallel first (skip if recent data exists)
+    // Run ingestion for all years in parallel (always fresh — no json_summary cache)
     const t_start = Date.now();
     const ingestionResults: Record<string, any> = {};
     const supabaseAdmin = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
@@ -422,54 +422,12 @@ serve(async (req) => {
       await resolveClientIdForGenerate(supabaseAdmin, body);
 
     if (body.client_name || body.client_id) {
-      const clientKey = effectiveClientId !== "unknown" ? effectiveClientId : (body.client_id || body.client_name);
-      const ONE_HOUR = 60 * 60 * 1000;
       const ingestionPromises = taxYears.map(async (y) => {
-        // Check for recent ingestion data (< 1 hour old) to skip expensive re-ingestion
-        const { data: recentReturn } = await supabaseAdmin
-          .from("tax_returns")
-          .select("id, json_summary, updated_at")
-          .eq("client_id", clientKey)
-          .eq("tax_year", y)
-          .order("updated_at", { ascending: false })
-          .limit(1)
-          .maybeSingle();
-
-        const recentlyIngested = recentReturn?.updated_at &&
-          (Date.now() - new Date(recentReturn.updated_at).getTime()) < ONE_HOUR;
-
-        let result: Record<string, any>;
-        if (recentlyIngested && recentReturn?.json_summary) {
-          // json_summary is the generated 1040-shaped object — not pl_summary. Use it only when we can
-          // derive a positive income signal; otherwise re-run Drive ingestion (avoids AGI $0 from stale rows).
-          const cachedPayload = {
-            success: true,
-            cached: true,
-            ...(recentReturn.json_summary as Record<string, unknown>),
-          };
-          const cachedIncome = extractIngestionIncome(cachedPayload);
-          if (cachedIncome > 0) {
-            console.log(
-              `[generate] Skipping ingestion for ${y} — recent row has income signal ${cachedIncome} (${recentReturn.id}, ${Math.round((Date.now() - new Date(recentReturn.updated_at).getTime()) / 1000)}s old)`,
-            );
-            result = cachedPayload;
-          } else {
-            console.warn(
-              `[generate] Recent tax_return row has no usable income for cache (${y}) — re-running Drive ingestion`,
-            );
-            result = await runIngestion(
-              effectiveClientName || body.client_name || body.client_id || "unknown",
-              effectiveClientId,
-              y
-            );
-          }
-        } else {
-          result = await runIngestion(
-            effectiveClientName || body.client_name || body.client_id || "unknown",
-            effectiveClientId,
-            y
-          );
-        }
+        const result = await runIngestion(
+          effectiveClientName || body.client_name || body.client_id || "unknown",
+          effectiveClientId,
+          y,
+        );
         return { year: String(y), result };
       });
       const ingestionDone = await Promise.all(ingestionPromises);
@@ -483,6 +441,9 @@ serve(async (req) => {
 
     async function processYear(year: number) {
       console.log(`Processing tax year ${year}...`);
+      console.log(`[generate] year=${year} entry: client_id=${effectiveClientId}`);
+      let manualIncomeEntries: Array<Record<string, unknown>> = [];
+      let manualDeductionEntries: Array<Record<string, unknown>> = [];
       const t0 = Date.now();
 
       const [
@@ -563,7 +524,6 @@ serve(async (req) => {
 
       const priorYear = year - 1;
       let priorYearBlock = "";
-      let manualBlock = "";
       if (effectiveClientId !== "unknown") {
         const { data: priorReturn } = await supabaseAdmin
           .from("tax_returns")
@@ -598,13 +558,11 @@ Use this to:
         const existingJs = (existingYearReturn?.json_summary || {}) as Record<string, unknown>;
         const mi = existingJs.manual_income;
         const md = existingJs.manual_deductions;
-        if (Array.isArray(mi) && mi.length > 0) {
-          manualBlock += `\n\nMANUAL INCOME (already entered — include in totals):\n${JSON.stringify(mi)}`;
-        }
-        if (Array.isArray(md) && md.length > 0) {
-          manualBlock +=
-            `\n\nMANUAL DEDUCTIONS (already entered — include in Schedule C / Schedule A as appropriate):\n${JSON.stringify(md)}`;
-        }
+        if (Array.isArray(mi)) manualIncomeEntries = mi as Array<Record<string, unknown>>;
+        if (Array.isArray(md)) manualDeductionEntries = md as Array<Record<string, unknown>>;
+        console.log(
+          `[generate] year=${year} loaded ${manualIncomeEntries.length} manual_income entries, ${manualDeductionEntries.length} manual_deduction entries (NOT passed to Claude)`,
+        );
       }
 
       const userPrompt = `Generate all three tax document outputs for tax year ${year}. Be concise.
@@ -619,7 +577,7 @@ REQUIRED OUTPUT SHAPE:
 
 Here is the tax data:
 
-${taxDataPayload}${priorYearBlock}${manualBlock}`;
+${taxDataPayload}${priorYearBlock}`;
 
       // Only require json_summary and worksheet — filing_recommendation is optional
       console.log(`[generate] CC Tax fetches took ${Date.now() - t0}ms`);
@@ -652,6 +610,47 @@ ${taxDataPayload}${priorYearBlock}${manualBlock}`;
         agi = ingestionIncome;
         form1040.adjusted_gross_income = ingestionIncome;
         form1040.total_income = ingestionIncome;
+      }
+
+      // Deterministic manual-income application. Claude does not see manual_income in its
+      // prompt (fix for Bug 3: prevents the cache->prompt->Claude double-count loop where
+      // each Generate click re-adds manual_income to the previously-inflated total).
+      const manualIncomeTotal = manualIncomeEntries.reduce((sum, entry) => {
+        const n = Number((entry as Record<string, unknown>).amount);
+        return Number.isFinite(n) ? sum + n : sum;
+      }, 0);
+      const manualDeductionTotal = manualDeductionEntries.reduce((sum, entry) => {
+        const n = Number((entry as Record<string, unknown>).amount);
+        return Number.isFinite(n) ? sum + n : sum;
+      }, 0);
+
+      if (manualIncomeTotal > 0 || manualDeductionTotal > 0) {
+        const scheduleCRaw = (summary.schedule_c || {}) as Record<string, unknown>;
+        const scheduleC = { ...scheduleCRaw };
+
+        const ingestionDerivedBusinessIncome =
+          Number(taxDataPayloadObj.ingestion_income) || 0;
+
+        const businessIncome =
+          Math.round((ingestionDerivedBusinessIncome + manualIncomeTotal) * 100) / 100;
+        const totalExpenses =
+          Math.round(((Number(scheduleC.total_expenses) || 0) + manualDeductionTotal) * 100) / 100;
+        const netProfit = Math.round((businessIncome - totalExpenses) * 100) / 100;
+
+        scheduleC.gross_receipts = businessIncome;
+        scheduleC.business_income = businessIncome;
+        scheduleC.total_expenses = totalExpenses;
+        scheduleC.net_profit = netProfit;
+        scheduleC.net_profit_or_loss = netProfit;
+        scheduleC.line_31 = netProfit;
+        summary.schedule_c = scheduleC;
+
+        const wages = Number(form1040.wages) || 0;
+        form1040.total_income = Math.round((netProfit + wages) * 100) / 100;
+
+        console.log(
+          `[generate] Applied deterministic manual entries: manualIncome=$${manualIncomeTotal}, manualDeductions=$${manualDeductionTotal}, businessIncome=$${businessIncome}, netProfit=$${netProfit}, form_1040.total_income=$${form1040.total_income}`,
+        );
       }
 
       // Validate and normalize core tax math so persisted totals are deterministic.
