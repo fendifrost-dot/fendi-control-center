@@ -1845,7 +1845,7 @@ const AGENT_TOOLS: ToolDef[] = [
   {
     name: "add_manual_income" as const,
     description:
-      "Add manual income (cash, unreported, side jobs, etc.) to a client's tax return json_summary.manual_income. Use when the client reports income without documents.",
+      "PRIORITY: Call this tool IMMEDIATELY when the user says 'add income', 'record income', 'add $X', or mentions a dollar amount with income/revenue/1099/business income. Add manual income (cash, unreported, side jobs, 1099-K, 1099-MISC, freelance, etc.) to a client's tax return. Do NOT suggest uploading documents instead — use this tool directly.",
     parameters: {
       type: "object" as const,
       properties: {
@@ -4784,6 +4784,14 @@ serve(async (req) => {
       /\btax\s+preparation\b/i.test(lowerText) ||
       /\bturbotax\s+export\b/i.test(lowerText) ||
       /\btax.*(20\d{2})/i.test(lowerText));
+    const manualEntryIntent =
+      /\badd\b.*\$?\d+.*\bincome\b/i.test(lowerText) ||
+      /\badd\b.*\bincome\b.*\$?\d+/i.test(lowerText) ||
+      /\badd\b.*\$?\d+.*\bdeduction\b/i.test(lowerText) ||
+      /\badd\b.*\bdeduction\b.*\$?\d+/i.test(lowerText) ||
+      /\bmanual\s+(income|deduction|entry)\b/i.test(lowerText) ||
+      /\brecord\b.*\$([\d,.]+).*\b(income|revenue|earning)/i.test(lowerText) ||
+      /\b(business\s+income|1099|side\s+job|freelance|cash\s+income)\b.*\$?\d/i.test(lowerText);
     const creditIntent =
       /\banalyze\b.*\bcredit\b/i.test(lowerText) ||
       /\bcredit strategy\b/i.test(lowerText) ||
@@ -4797,11 +4805,14 @@ serve(async (req) => {
       /\bgenerate pitch\b/i.test(lowerText) ||
       /\bplaylist pitch workflow\b/i.test(lowerText);
     // Deterministic business routing:
+    // - "add $X income/deduction" => generate_tax_docs (force add_manual_income/deduction tool)
     // - "prepare taxes" / "file taxes" => generate_tax_docs (higher priority than query_cc_tax)
     // - generic tax queries => CC Tax
     // - new/blank client file build => Credit Compass
     // - existing client progress/update => Credit Guardian strategy path
-    if (taxDocIntent && IMPLEMENTED_WORKFLOW_KEYS.has("generate_tax_docs")) {
+    if (manualEntryIntent && IMPLEMENTED_WORKFLOW_KEYS.has("generate_tax_docs")) {
+      autoPromotedWorkflow = SYNTHETIC_GENERATE_TAX_DOCS;
+    } else if (taxDocIntent && IMPLEMENTED_WORKFLOW_KEYS.has("generate_tax_docs")) {
       autoPromotedWorkflow = SYNTHETIC_GENERATE_TAX_DOCS;
     } else if (taxIntent && IMPLEMENTED_WORKFLOW_KEYS.has("query_cc_tax")) {
       autoPromotedWorkflow = SYNTHETIC_QUERY_CC_TAX;
