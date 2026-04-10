@@ -3,6 +3,15 @@
  * Kept in _shared for unit tests and reuse.
  */
 
+/** Normalize Telegram/iOS punctuation that breaks $ and name matching. */
+export function normalizeTelegramTaxText(raw: string): string {
+  return raw
+    .trim()
+    .replace(/\uFF04/g, "$") // fullwidth dollar
+    .replace(/[\u2018\u2019\u201C\u201D]/g, "'")
+    .replace(/\s+/g, " ");
+}
+
 /** Best-effort client name from common Telegram phrasings (deterministic path for /do tax). */
 export function extractClientNameForTaxCommand(userMessage: string): string | null {
   const msg = userMessage.trim().replace(/\s+/g, " ");
@@ -52,6 +61,27 @@ export function extractClientNameForTaxCommand(userMessage: string): string | nu
   return null;
 }
 
+/** Parse a dollar amount: prefers $..., else largest plausible currency number (not a tax year). */
+function parseMoneyAmount(t: string, taxYear: number): number | null {
+  const dollar = t.match(/\$\s*([\d,]+(?:\.\d{1,2})?)/);
+  if (dollar?.[1]) {
+    const n = parseFloat(dollar[1].replace(/,/g, ""));
+    if (Number.isFinite(n) && n > 0) return n;
+  }
+  let best = 0;
+  const re = /\b(\d{1,3}(?:,\d{3})*(?:\.\d{1,2})?|\d+(?:\.\d{1,2})?)\b/g;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(t)) !== null) {
+    const n = parseFloat(m[1].replace(/,/g, ""));
+    if (!Number.isFinite(n) || n <= 0) continue;
+    if (n >= 1900 && n <= 2100 && Math.abs(n - taxYear) < 2) continue;
+    if (n === taxYear || n === taxYear % 100) continue;
+    if (n < 1 || n > 99_999_999) continue;
+    if (n > best) best = n;
+  }
+  return best > 0 ? best : null;
+}
+
 /** Deterministic parse → add_manual_income (bypasses Grok tool selection). */
 export function tryParseManualIncomeMessage(text: string): {
   client_name: string;
@@ -60,7 +90,7 @@ export function tryParseManualIncomeMessage(text: string): {
   category?: string;
   description?: string;
 } | null {
-  const t = text.trim();
+  const t = normalizeTelegramTaxText(text);
   const lower = t.toLowerCase();
   if (/\b(add|record|log)\s+.*\b(deduction|deduct)\b/i.test(t) && !/\bincome\b/i.test(t)) return null;
 
@@ -70,16 +100,33 @@ export function tryParseManualIncomeMessage(text: string): {
     (/\bbusiness\s+income\b/i.test(t) && /\b(add|record|log)\b/i.test(t));
   if (!wantsIncome) return null;
 
+  // Freeform: "add income Sam Higgins 2022 161229.90 business"
+  const free = t.match(
+    /^(?:add|record|log)\s+income\s+([A-Za-z][A-Za-z\s.'-]+?)\s+(20[0-3][0-9])\s+([\d,]+(?:\.\d{1,2})?)\b/i,
+  );
+  if (free?.[1] && free[2] && free[3]) {
+    const tax_year = parseInt(free[2], 10);
+    const amount = parseFloat(free[3].replace(/,/g, ""));
+    if (tax_year >= 2000 && tax_year <= 2036 && Number.isFinite(amount) && amount > 0) {
+      const client_name = free[1].trim();
+      if (client_name.length >= 2) {
+        let category: string | undefined = "other";
+        if (lower.includes("business") || lower.includes("1099") || lower.includes("freelance")) {
+          category = "freelance";
+        }
+        if (lower.includes("cash")) category = "cash";
+        return { client_name, tax_year, amount, category, description: t.slice(0, 500) };
+      }
+    }
+  }
+
   const yearMatch = t.match(/\b(20[0-3][0-9])\b/);
   if (!yearMatch) return null;
   const tax_year = parseInt(yearMatch[1], 10);
   if (tax_year < 2000 || tax_year > 2036) return null;
 
-  const dollarMatch = t.match(/\$\s*([\d,]+(?:\.\d{1,2})?)/);
-  const rawAmt = dollarMatch?.[1];
-  if (!rawAmt) return null;
-  const amount = parseFloat(rawAmt.replace(/,/g, ""));
-  if (!Number.isFinite(amount) || amount <= 0) return null;
+  const amount = parseMoneyAmount(t, tax_year);
+  if (amount == null) return null;
 
   let client_name = "";
   const forYear = t.match(/\bfor\s+([A-Za-z][A-Za-z\s.'-]+?)\s+(20[0-3][0-9])\b/);
@@ -116,7 +163,7 @@ export function tryParseManualDeductionMessage(text: string): {
   description?: string;
   miles?: number;
 } | null {
-  const t = text.trim();
+  const t = normalizeTelegramTaxText(text);
   const lower = t.toLowerCase();
   const wantsDed =
     /\b(add|record|log)\b/i.test(t) &&
@@ -128,11 +175,8 @@ export function tryParseManualDeductionMessage(text: string): {
   if (!yearMatch) return null;
   const tax_year = parseInt(yearMatch[1], 10);
 
-  const dollarMatch = t.match(/\$\s*([\d,]+(?:\.\d{1,2})?)/);
-  const rawAmt = dollarMatch?.[1];
-  if (!rawAmt) return null;
-  const amount = parseFloat(rawAmt.replace(/,/g, ""));
-  if (!Number.isFinite(amount) || amount <= 0) return null;
+  const amount = parseMoneyAmount(t, tax_year);
+  if (amount == null) return null;
 
   let client_name = "";
   const forYear = t.match(/\bfor\s+([A-Za-z][A-Za-z\s.'-]+?)\s+(20[0-3][0-9])\b/);
@@ -154,6 +198,7 @@ export function tryParseManualDeductionMessage(text: string): {
   else if (lower.includes("software") || lower.includes("subscription")) category = "office_expense";
   else if (lower.includes("charit")) category = "charitable_cash";
   else if (lower.includes("medical")) category = "medical_dental";
+  else if (/\bhome\s*office\b/i.test(t)) category = "office_expense";
 
   const milesMatch = t.match(/\b(\d+(?:\.\d+)?)\s*(?:business\s+)?miles?\b/i);
   const miles = milesMatch ? parseFloat(milesMatch[1]) : undefined;
@@ -166,4 +211,14 @@ export function tryParseManualDeductionMessage(text: string): {
     description: t.slice(0, 500),
     miles,
   };
+}
+
+/** Broad intent: used to exit unrelated flows (e.g. playlist confirm) so tax routing can run. */
+export function looksLikeManualTaxCommand(text: string): boolean {
+  const t = normalizeTelegramTaxText(text);
+  return (
+    tryParseManualIncomeMessage(t) != null ||
+    tryParseManualDeductionMessage(t) != null ||
+    /^\s*(?:add|record|log)\b.*\b(?:manual\s+)?(?:income|deduction|deduct|business\s+income)\b/i.test(t)
+  );
 }

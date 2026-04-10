@@ -203,12 +203,27 @@ function netSelfEmploymentIncomeFromSummary(summary: Record<string, unknown>): n
   if (Number.isFinite(fromScheduleC) && fromScheduleC !== 0) {
     return fromScheduleC;
   }
-  return (
+  const fromSe =
     Number(se.net_earnings_from_self_employment) ||
     Number(se.net_earnings) ||
     Number(se.net_profit) ||
-    0
-  );
+    0;
+  if (Number.isFinite(fromSe) && fromSe !== 0) {
+    return fromSe;
+  }
+
+  // Claude often omits Schedule C lines when totals are only on form_1040 — if there are no
+  // wages but total_income > 0, treat total as net self-employment for SE tax (manual / 1099-K flows).
+  const f = (summary.form_1040 || {}) as Record<string, unknown>;
+  const totalIncome = Number(f.total_income) || 0;
+  const wages = Number(f.wages ?? f.wages_salaries_tips ?? (f as Record<string, unknown>).line_1) || 0;
+  if (totalIncome > 0 && wages === 0) {
+    console.log(
+      `[generate] netSEIncome: using form_1040.total_income=$${totalIncome} (no wages; Schedule C/SE lines empty)`,
+    );
+    return totalIncome;
+  }
+  return 0;
 }
 
 /** After Claude: if AGI is missing/zero, fall back to document ingestion total. */
@@ -246,6 +261,7 @@ function normalizeTaxGenerationOutput(
   summary.form_1040 = {
     ...form1040,
     adjusted_gross_income: ingestionIncome,
+    total_income: Math.max(Number(form1040.total_income) || 0, ingestionIncome),
   };
 }
 

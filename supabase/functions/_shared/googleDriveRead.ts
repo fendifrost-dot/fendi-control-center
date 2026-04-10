@@ -406,5 +406,14 @@ export async function findClientTaxFolder(
     }
   }
 
+  console.warn(
+    "[findClientTaxFolder] no folder matched",
+    JSON.stringify({
+      clientName: clientName.slice(0, 80),
+      taxYear,
+      firstName,
+      hasRootId: Boolean(cleanRoot),
+    }),
+  );
   return null;
 }

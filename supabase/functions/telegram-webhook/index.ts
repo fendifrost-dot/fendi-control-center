@@ -13,6 +13,7 @@ import {
 import { callClaude } from "../_shared/claude.ts";
 import {
   extractClientNameForTaxCommand,
+  looksLikeManualTaxCommand,
   tryParseManualDeductionMessage,
   tryParseManualIncomeMessage,
 } from "../_shared/taxTelegramParse.ts";
@@ -3235,6 +3236,7 @@ async function runDeterministicManualTaxTools(
   taskId: string,
   replyModel: "grok" | "gemini",
 ): Promise<boolean> {
+  console.log("[telegram] checking deterministic manual tax:", text.slice(0, 300));
   const incomeArgs = tryParseManualIncomeMessage(text);
   if (incomeArgs) {
     const tool = AGENT_TOOLS.find((x) => x.name === "add_manual_income");
@@ -4221,6 +4223,15 @@ serve(async (req) => {
     // ── Pending playlist vibe: handle BEFORE task row + lane routing (so Lane 2 never steals yes/cancel) ──
     const pendingPlaylistEarly = await getPlaylistConfirm(chatId);
     if (pendingPlaylistEarly) {
+      // Otherwise any non-cancel text is treated as a "vibe" and never reaches manual tax routing.
+      if (looksLikeManualTaxCommand(text)) {
+        await clearPlaylistConfirm(chatId);
+        console.log(JSON.stringify({
+          ts: Date.now(),
+          event: "manual_tax_clears_playlist_confirm",
+          chatId,
+        }));
+      } else {
       const lower = text.toLowerCase().trim();
       const clearAndContinue =
         lower.startsWith("/do ") ||
@@ -4299,6 +4310,7 @@ serve(async (req) => {
         await sendMessage(chatId, `â Done: \`${taskId}\``, {}, `task:${taskId}:done`);
         _currentTaskId = null;
         return new Response("ok");
+      }
       }
     }
 
