@@ -5162,44 +5162,72 @@ serve(async (req) => {
       _currentTaskId = null;
       return new Response("ok");
     }
-    // -- /tax status <name> -- look up tax return status --
+    // -- /tax status <name> [year] -- look up tax return status --
     if (text.toLowerCase().startsWith("/tax status")) {
       await setShortcutAttribution(taskId, "tax_status");
       try {
-        const nameArg = text.replace(/^\/tax\s+status\s*/i, "").trim();
-        if (!nameArg) {
-          await sendMessage(chatId, "Usage: `/tax status <client name>`\nExample: `/tax status Sam Higgins`");
+        const argsStr = text.replace(/^\/tax\s+status\s*/i, "").trim();
+        if (!argsStr) {
+          await sendMessage(chatId, "Usage: `/tax status <client name> [year]`\nExample: `/tax status Sam Higgins 2022`");
           await supabase.from("tasks").update({ status: "succeeded", result_json: { execution_lane: "shortcut", progress_step: "shortcut_tax_status", action: "show_usage" } }).eq("id", taskId);
           await sendMessage(chatId, `✅ Done: \`${taskId}\``);
           _currentTaskId = null;
           return new Response("ok");
         }
-        const { data: returns, error: trErr } = await supabase
+        // Parse: last token might be a 4-digit year (2000-2099); if so, strip it from the client search
+        const tokens = argsStr.split(/\s+/);
+        const lastToken = tokens[tokens.length - 1];
+        let yearFilter: number | null = null;
+        let nameArg: string;
+        if (/^\d{4}$/.test(lastToken) && Number(lastToken) >= 2000 && Number(lastToken) <= 2099) {
+          yearFilter = Number(lastToken);
+          nameArg = tokens.slice(0, -1).join(" ").trim();
+        } else {
+          nameArg = argsStr;
+        }
+        if (!nameArg) {
+          await sendMessage(chatId, "Please provide a client name. Example: `/tax status Sam Higgins 2022`");
+          await supabase.from("tasks").update({ status: "succeeded", result_json: { execution_lane: "shortcut", progress_step: "shortcut_tax_status", action: "show_usage" } }).eq("id", taskId);
+          await sendMessage(chatId, `✅ Done: \`${taskId}\``);
+          _currentTaskId = null;
+          return new Response("ok");
+        }
+        let trQuery = supabase
           .from("tax_returns")
           .select("id, client_id, client_name, tax_year, status, agi, total_income, total_tax, amount_owed_or_refund, filing_status, filing_method, filing_readiness_score, created_at")
           .ilike("client_name", `%${nameArg}%`)
           .order("tax_year", { ascending: false });
+        if (yearFilter != null) {
+          trQuery = trQuery.eq("tax_year", yearFilter);
+        }
+        const { data: returns, error: trErr } = await trQuery;
         if (trErr) throw new Error(`DB error: ${trErr.message}`);
+        const yearSuffix = yearFilter != null ? ` (${yearFilter})` : "";
         if (!returns || returns.length === 0) {
-          await sendMessage(chatId, `No tax returns found for "${nameArg}".`);
+          await sendMessage(
+            chatId,
+            `No tax returns found for "${nameArg}"${yearSuffix}.`,
+            { parse_mode: undefined },
+          );
         } else {
-          const lines: string[] = [`📋 *Tax Returns for "${nameArg}"*\n`];
+          // Send as plain text to avoid Markdown entity parse failures on client names/data.
+          const plainLines: string[] = [`Tax Returns for "${nameArg}"${yearSuffix}:`, ""];
           for (const r of returns) {
-            lines.push(`*${r.tax_year}* — ${r.status || "unknown"}`);
-            if (r.agi != null) lines.push(`  AGI: $${Number(r.agi).toLocaleString()}`);
-            if (r.total_income != null) lines.push(`  Total Income: $${Number(r.total_income).toLocaleString()}`);
-            if (r.total_tax != null) lines.push(`  Total Tax: $${Number(r.total_tax).toLocaleString()}`);
+            plainLines.push(`${r.tax_year} — ${r.status || "unknown"}`);
+            if (r.agi != null) plainLines.push(`  AGI: $${Number(r.agi).toLocaleString()}`);
+            if (r.total_income != null) plainLines.push(`  Total Income: $${Number(r.total_income).toLocaleString()}`);
+            if (r.total_tax != null) plainLines.push(`  Total Tax: $${Number(r.total_tax).toLocaleString()}`);
             if (r.amount_owed_or_refund != null) {
               const amt = Number(r.amount_owed_or_refund);
-              lines.push(`  ${amt >= 0 ? "Owed" : "Refund"}: $${Math.abs(amt).toLocaleString()}`);
+              plainLines.push(`  ${amt >= 0 ? "Owed" : "Refund"}: $${Math.abs(amt).toLocaleString()}`);
             }
-            if (r.filing_method) lines.push(`  Method: ${r.filing_method}`);
-            if (r.filing_readiness_score != null) lines.push(`  Readiness: ${r.filing_readiness_score}/100`);
-            lines.push("");
+            if (r.filing_method) plainLines.push(`  Method: ${r.filing_method}`);
+            if (r.filing_readiness_score != null) plainLines.push(`  Readiness: ${r.filing_readiness_score}/100`);
+            plainLines.push("");
           }
-          await sendMessage(chatId, lines.join("\n"));
+          await sendMessage(chatId, plainLines.join("\n"), { parse_mode: undefined });
         }
-        await supabase.from("tasks").update({ status: "succeeded", result_json: { execution_lane: "shortcut", progress_step: "shortcut_tax_status", action: "tax_status", client_search: nameArg, results_count: returns?.length ?? 0 } }).eq("id", taskId);
+        await supabase.from("tasks").update({ status: "succeeded", result_json: { execution_lane: "shortcut", progress_step: "shortcut_tax_status", action: "tax_status", client_search: nameArg, year: yearFilter, results_count: returns?.length ?? 0 } }).eq("id", taskId);
         await sendMessage(chatId, `✅ Done: \`${taskId}\``);
       } catch (taxStatusErr) {
         const errMsg = taxStatusErr instanceof Error ? taxStatusErr.message : String(taxStatusErr);
