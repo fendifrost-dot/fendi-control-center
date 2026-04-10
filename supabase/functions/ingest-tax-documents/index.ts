@@ -464,6 +464,8 @@ serve(async (req: Request) => {
       tax_year?: number;
       analyze_storage_uploads?: boolean;
     };
+    const hubUrl = Deno.env.get('SUPABASE_URL');
+    const hubKey = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY');
 
     if (tax_year == null || !Number.isFinite(Number(tax_year))) {
       return new Response(JSON.stringify({ error: 'tax_year is required' }), {
@@ -623,6 +625,12 @@ serve(async (req: Request) => {
       generated_at: new Date().toISOString(),
     });
 
+    const aggregated_data = {
+      total_income: plSummary.total_income,
+      total_expenses: plSummary.total_expenses,
+      net_profit: plSummary.net_income,
+    };
+
     const summary = {
       success: true,
       client_name,
@@ -634,7 +642,39 @@ serve(async (req: Request) => {
       processed_files: processedFiles,
       errors: errors.length > 0 ? errors : undefined,
       pl_summary: plSummary,
+      aggregated_data,
     };
+
+    if (
+      hubUrl &&
+      hubKey &&
+      typeof client_id === 'string' &&
+      client_id.length > 10 &&
+      client_id !== 'unknown'
+    ) {
+      try {
+        const hub = createClient(hubUrl, hubKey);
+        await upsertTaxReturn(hub, {
+          client_id,
+          client_name,
+          tax_year: yearNum,
+          status: 'in_progress',
+          analyzed_data: {
+            pl_summary: plSummary,
+            aggregated_data,
+            processed_files: processedFiles,
+            source: 'drive_ingest',
+            folder_id: folderId,
+            folder_name: folderName,
+            updated_at: new Date().toISOString(),
+          },
+          created_by: 'ingest-tax-documents',
+        });
+        console.log(`[ingest-tax-documents] upsert tax_returns analyzed_data for client_id=${client_id} year=${yearNum}`);
+      } catch (e) {
+        console.warn('[ingest-tax-documents] tax_returns upsert failed (non-fatal):', e);
+      }
+    }
 
     console.log(`[ingest-tax-documents] Complete. ${processedFiles.length} files processed.`);
 

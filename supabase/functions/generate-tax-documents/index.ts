@@ -155,6 +155,22 @@ function extractIngestionIncome(ingestionData: Record<string, unknown> | null): 
     const n = Number((agg as Record<string, unknown>).total_income);
     if (Number.isFinite(n) && n > 0) return n;
   }
+  const form1040 = ingestionData.form_1040;
+  if (form1040 && typeof form1040 === "object") {
+    const f = form1040 as Record<string, unknown>;
+    for (const k of ["total_income", "adjusted_gross_income"] as const) {
+      const n = Number(f[k]);
+      if (Number.isFinite(n) && n > 0) return n;
+    }
+  }
+  const schedC = ingestionData.schedule_c;
+  if (schedC && typeof schedC === "object") {
+    const c = schedC as Record<string, unknown>;
+    for (const k of ["gross_receipts", "net_profit", "net_profit_or_loss", "line_31", "net_income"] as const) {
+      const n = Number(c[k]);
+      if (Number.isFinite(n) && n > 0) return n;
+    }
+  }
   const top = Number(ingestionData.total_income);
   return Number.isFinite(top) && top > 0 ? top : 0;
 }
@@ -407,8 +423,29 @@ serve(async (req) => {
 
         let result: Record<string, any>;
         if (recentlyIngested && recentReturn?.json_summary) {
-          console.log(`[generate] Skipping ingestion for ${y} — recent data exists (${recentReturn.id}, ${Math.round((Date.now() - new Date(recentReturn.updated_at).getTime()) / 1000)}s old)`);
-          result = { success: true, cached: true, ...recentReturn.json_summary };
+          // json_summary is the generated 1040-shaped object — not pl_summary. Use it only when we can
+          // derive a positive income signal; otherwise re-run Drive ingestion (avoids AGI $0 from stale rows).
+          const cachedPayload = {
+            success: true,
+            cached: true,
+            ...(recentReturn.json_summary as Record<string, unknown>),
+          };
+          const cachedIncome = extractIngestionIncome(cachedPayload);
+          if (cachedIncome > 0) {
+            console.log(
+              `[generate] Skipping ingestion for ${y} — recent row has income signal ${cachedIncome} (${recentReturn.id}, ${Math.round((Date.now() - new Date(recentReturn.updated_at).getTime()) / 1000)}s old)`,
+            );
+            result = cachedPayload;
+          } else {
+            console.warn(
+              `[generate] Recent tax_return row has no usable income for cache (${y}) — re-running Drive ingestion`,
+            );
+            result = await runIngestion(
+              effectiveClientName || body.client_name || body.client_id || "unknown",
+              effectiveClientId,
+              y
+            );
+          }
         } else {
           result = await runIngestion(
             effectiveClientName || body.client_name || body.client_id || "unknown",
