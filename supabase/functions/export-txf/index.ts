@@ -1,4 +1,4 @@
-import { createClient } from 'https://esm.sh/@supabase/supabase-js@2.49.1';
+import { createClient, type SupabaseClient } from 'https://esm.sh/@supabase/supabase-js@2.49.1';
 import { getAccessToken } from '../_shared/googleDriveUpload.ts';
 
 const corsHeaders = {
@@ -136,7 +136,7 @@ function buildTaxReturnDataFromCcRow(row: Record<string, unknown>): TaxReturnDat
 }
 
 async function uploadTxfToCcBucket(
-  supabase: ReturnType<typeof createClient>,
+  supabase: SupabaseClient,
   taxReturnId: string,
   fileName: string,
   content: string,

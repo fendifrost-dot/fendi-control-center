@@ -68,7 +68,7 @@ export async function fillTaxReturnPdfs(
   if (Array.isArray(options?.formsToFill) && options!.formsToFill!.length > 0) {
     needed = needed.filter((n) => options!.formsToFill!.includes(n));
   }
-  needed = needed.filter(isCoreFormType);
+  const formsToProcess: CoreFormType[] = needed.filter(isCoreFormType);
 
   const taxYear = taxReturn.tax_year as number;
   const clientId = taxReturn.client_id as string;
@@ -214,7 +214,7 @@ export async function fillTaxReturnPdfs(
   }
 
   const results: FillTaxReturnPdfsFormResult[] = [];
-  for (const batch of chunk(needed, 3)) {
+  for (const batch of chunk(formsToProcess, 3)) {
     const batchResults = await Promise.all(batch.map((f) => fillOne(f)));
     results.push(...batchResults);
   }

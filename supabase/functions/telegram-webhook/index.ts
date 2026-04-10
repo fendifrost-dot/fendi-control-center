@@ -11,6 +11,11 @@ import {
   toAnthropicTools,
 } from "../_shared/orchestrator.ts";
 import { callClaude } from "../_shared/claude.ts";
+import {
+  extractClientNameForTaxCommand,
+  tryParseManualDeductionMessage,
+  tryParseManualIncomeMessage,
+} from "../_shared/taxTelegramParse.ts";
 
 const BOT_TOKEN = Deno.env.get("FendiAIbot")!;
 const CHAT_ID = Deno.env.get("TELEGRAM_CHAT_ID") ?? "";
@@ -155,52 +160,6 @@ function extractTaxYearsFromText(text: string): number[] {
   return [...years].sort((a, b) => a - b);
 }
 
-/** Best-effort client name from common Telegram phrasings (deterministic path for /do tax). */
-function extractClientNameForTaxCommand(userMessage: string): string | null {
-  const msg = userMessage.trim().replace(/\s+/g, " ");
-  const normalized = msg
-    .replace(/[’]/g, "'")
-    .replace(/\b(?:'s)\b/gi, "")
-    .replace(/\s+return\b/gi, "")
-    .trim();
-  const cleanup = (name: string): string => {
-    return name
-      .replace(/[’]/g, "'")
-      .replace(/\b(?:'s)\b/gi, "")
-      .replace(/\bfor\s+20\d{2}\b/gi, "")
-      .replace(/\b20\d{2}\b/g, "")
-      .replace(/\b(?:tax|return|forms?)\b/gi, "")
-      .replace(/^[\s"'`“”‘’,.;:!?]+|[\s"'`“”‘’,.;:!?]+$/g, "")
-      .replace(/\s+/g, " ")
-      .trim();
-  };
-  const gen = msg.match(/generate\s+(.+?)\s+tax\s+return/i);
-  if (gen?.[1]) {
-    const name = cleanup(gen[1].replace(/^the\s+/i, ""));
-    if (name.length >= 2 && name.length < 120) return name;
-  }
-  const doTax = normalized.match(/(?:^|\b)(?:do|prepare|file|complete|run|generate)\s+(.+?)\s+tax(?:\s+docs?|(?:\s+return)?)?(?:\s+for\s+20\d{2})?$/i);
-  if (doTax?.[1]) {
-    const name = cleanup(doTax[1].replace(/^the\s+/i, ""));
-    if (name.length >= 2 && name.length < 120) return name;
-  }
-  const possessive = normalized.match(/(?:^|\b)(.+?)\s+(?:20\d{2}\s+)?tax\s+return\b/i);
-  if (possessive?.[1]) {
-    const name = cleanup(possessive[1].replace(/^the\s+/i, ""));
-    if (name.length >= 2 && name.length < 120) return name;
-  }
-  const forYear = msg.match(/\bfor\s+([A-Za-z][A-Za-z\s.'-]+?)\s+for\s+(20\d{2})\b/i);
-  if (forYear?.[1]) {
-    const name = cleanup(forYear[1]);
-    if (name.length >= 2 && name.length < 120) return name;
-  }
-  const tr = msg.match(/tax\s+return\s+for\s+([A-Za-z][A-Za-z\s.'-]+?)(?:\s+for\s+20\d{2}|\s*$)/i);
-  if (tr?.[1]) {
-    const name = cleanup(tr[1]);
-    if (name.length >= 2 && name.length < 120) return name;
-  }
-  return null;
-}
 
 function formatPdfAndTxfSummary(r: Record<string, unknown>): string {
   const lines: string[] = [];
@@ -3270,122 +3229,6 @@ function logEvent(e: Record<string, any>) {
   console.log(JSON.stringify({ ts: Date.now(), ...e }));
 }
 
-/** Deterministic parse → add_manual_income (bypasses Grok tool selection). */
-function tryParseManualIncomeMessage(text: string): {
-  client_name: string;
-  tax_year: number;
-  amount: number;
-  category?: string;
-  description?: string;
-} | null {
-  const t = text.trim();
-  const lower = t.toLowerCase();
-  if (/\b(add|record|log)\s+.*\b(deduction|deduct)\b/i.test(t) && !/\bincome\b/i.test(t)) return null;
-
-  const wantsIncome =
-    /\b(add|record|log)\s+(?:manual\s+)?income\b/i.test(t) ||
-    (/\b(add|record|log)\b/i.test(t) && /\b(?:business\s+)?income\b/i.test(t)) ||
-    (/\bbusiness\s+income\b/i.test(t) && /\b(add|record|log)\b/i.test(t));
-  if (!wantsIncome) return null;
-
-  const yearMatch = t.match(/\b(20[0-3][0-9])\b/);
-  if (!yearMatch) return null;
-  const tax_year = parseInt(yearMatch[1], 10);
-  if (tax_year < 2000 || tax_year > 2036) return null;
-
-  const dollarMatch = t.match(/\$\s*([\d,]+(?:\.\d{1,2})?)/);
-  const rawAmt = dollarMatch?.[1];
-  if (!rawAmt) return null;
-  const amount = parseFloat(rawAmt.replace(/,/g, ""));
-  if (!Number.isFinite(amount) || amount <= 0) return null;
-
-  let client_name = "";
-  const forYear = t.match(/\bfor\s+([A-Za-z][A-Za-z\s.'-]+?)\s+(20[0-3][0-9])\b/);
-  if (forYear?.[1]) {
-    client_name = forYear[1].replace(/\s+from\s+.*$/i, "").trim();
-  }
-  if (!client_name || client_name.length < 2) {
-    const alt = extractClientNameForTaxCommand(t);
-    if (alt) client_name = alt;
-  }
-  if (!client_name || client_name.length < 2) return null;
-
-  let category: string | undefined = "other";
-  if (lower.includes("business") || lower.includes("1099") || lower.includes("freelance")) category = "freelance";
-  if (lower.includes("cash")) category = "cash";
-  if (lower.includes("rental")) category = "rental_cash";
-  if (lower.includes("tip")) category = "tips";
-  if (lower.includes("side")) category = "side_job";
-
-  return {
-    client_name,
-    tax_year,
-    amount,
-    category,
-    description: t.slice(0, 500),
-  };
-}
-
-function tryParseManualDeductionMessage(text: string): {
-  client_name: string;
-  tax_year: number;
-  category: string;
-  amount: number;
-  description?: string;
-  miles?: number;
-} | null {
-  const t = text.trim();
-  const lower = t.toLowerCase();
-  const wantsDed =
-    /\b(add|record|log)\b/i.test(t) &&
-    (/\b(deduction|deduct)\b/i.test(t) || /\b(?:business\s+)?expense\b/i.test(t));
-  if (!wantsDed) return null;
-  if (/\bincome\b/i.test(t) && !/\b(deduction|deduct|expense)\b/i.test(t)) return null;
-
-  const yearMatch = t.match(/\b(20[0-3][0-9])\b/);
-  if (!yearMatch) return null;
-  const tax_year = parseInt(yearMatch[1], 10);
-
-  const dollarMatch = t.match(/\$\s*([\d,]+(?:\.\d{1,2})?)/);
-  const rawAmt = dollarMatch?.[1];
-  if (!rawAmt) return null;
-  const amount = parseFloat(rawAmt.replace(/,/g, ""));
-  if (!Number.isFinite(amount) || amount <= 0) return null;
-
-  let client_name = "";
-  const forYear = t.match(/\bfor\s+([A-Za-z][A-Za-z\s.'-]+?)\s+(20[0-3][0-9])\b/);
-  if (forYear?.[1]) {
-    client_name = forYear[1].replace(/\s+from\s+.*$/i, "").trim();
-  }
-  if (!client_name || client_name.length < 2) {
-    const alt = extractClientNameForTaxCommand(t);
-    if (alt) client_name = alt;
-  }
-  if (!client_name || client_name.length < 2) return null;
-
-  let category = "other_business_expense";
-  if (lower.includes("mileage") || /\bmiles?\b/i.test(t) || lower.includes("vehicle") || lower.includes("car")) {
-    category = "car_truck_expenses";
-  } else if (lower.includes("meal")) category = "meals";
-  else if (lower.includes("supply")) category = "supplies";
-  else if (lower.includes("travel")) category = "travel";
-  else if (lower.includes("software") || lower.includes("subscription")) category = "office_expense";
-  else if (lower.includes("charit")) category = "charitable_cash";
-  else if (lower.includes("medical")) category = "medical_dental";
-
-  const milesMatch = t.match(/\b(\d+(?:\.\d+)?)\s*(?:business\s+)?miles?\b/i);
-  const miles = milesMatch ? parseFloat(milesMatch[1]) : undefined;
-
-  return {
-    client_name,
-    tax_year,
-    category,
-    amount,
-    description: t.slice(0, 500),
-    miles,
-  };
-}
-
 async function runDeterministicManualTaxTools(
   chatId: string,
   text: string,
@@ -4175,19 +4018,24 @@ serve(async (req) => {
 
     // ââ Callback queries (inline button presses) ââ
     if (update.callback_query) {
-      const cb = update.callback_query;
+      const cb = update.callback_query as {
+        id: string;
+        data?: string;
+        message?: { message_id: number };
+      };
       const cbChatId = tgChatId;
+      const cbData = typeof cb.data === "string" ? cb.data : "";
 
       // Create task for callback observability + outbox routing
       try {
         const cbSession = await resolveSession(cbChatId);
-        const cbTaskId = await createTaskRow(cbSession.id, `callback:${cb.data}`, null);
+        const cbTaskId = await createTaskRow(cbSession.id, `callback:${cbData}`, null);
         _currentTaskId = cbTaskId;
       } catch (e) {
         console.error("Callback task creation failed:", e);
       }
 
-      const [action, ...idParts] = cb.data.split(":");
+      const [action, ...idParts] = cbData.split(":");
       const targetId = idParts.join(":");
       await answerCallbackQuery(cb.id, "Processing...");
 
@@ -4204,7 +4052,9 @@ serve(async (req) => {
         default: result = "â Unknown action.";
       }
 
-      await editMessageReplyMarkup(cbChatId, cb.message.message_id);
+      if (cb.message != null) {
+        await editMessageReplyMarkup(cbChatId, cb.message.message_id);
+      }
       await sendMessage(cbChatId, result);
       if (_currentTaskId) {
         await supabase.from("tasks").update({ status: "succeeded", result_json: { action: `callback:${action}` } }).eq("id", _currentTaskId);
@@ -4214,11 +4064,12 @@ serve(async (req) => {
     }
 
     // ── Text messages ──
-    const message = update.message;
-    if (!message?.text) return new Response("ok");
+    const message = update.message as { text?: string } | undefined;
+    const rawText = message?.text;
+    if (rawText == null || rawText === "") return new Response("ok");
 
     const chatId = tgChatId;
-    const text = message.text.trim();
+    const text = rawText.trim();
 
     // ─── DETERMINISTIC SPINE: resolve session + create task ───
     let session: { id: string; active_model: string };

@@ -1,6 +1,6 @@
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
 import { callClaudeJSON } from "../_shared/claude.ts";
-import { createClient } from "https://esm.sh/@supabase/supabase-js@2.49.1";
+import { createClient, type SupabaseClient } from "https://esm.sh/@supabase/supabase-js@2.49.1";
 import { upsertTaxReturn, logAudit } from "../_shared/taxReturns.ts";
 import { crossCheckReturn } from "../_shared/crossCheckReturn.ts";
 
@@ -10,7 +10,7 @@ function escapeIlike(s: string): string {
 
 /** Resolve real client UUID when Telegram/API sent client_id \"unknown\" but client_name is present. */
 async function resolveClientIdForGenerate(
-  supabase: ReturnType<typeof createClient>,
+  supabase: SupabaseClient,
   body: { client_id?: string; client_name?: string },
 ): Promise<{ client_id: string; client_name: string }> {
   const rawId = (body.client_id ?? "").trim();
@@ -26,7 +26,8 @@ async function resolveClientIdForGenerate(
       .limit(1)
       .maybeSingle();
     if (client) {
-      return { client_id: client.id, client_name: client.name };
+      const c = client as { id: string; name: string };
+      return { client_id: c.id, client_name: c.name };
     }
   }
   return { client_id: rawId || "unknown", client_name: rawName || rawId || "unknown" };
