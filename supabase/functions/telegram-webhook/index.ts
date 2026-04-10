@@ -1845,7 +1845,7 @@ const AGENT_TOOLS: ToolDef[] = [
   {
     name: "add_manual_income" as const,
     description:
-      "Add manual income (cash, unreported, side jobs, etc.) to a client's tax return json_summary.manual_income. Use when the client reports income without documents.",
+      "PRIORITY: Call this tool IMMEDIATELY when the user says 'add income', 'record income', 'add $X', or mentions a dollar amount with income/revenue/1099/business income. Add manual income (cash, unreported, side jobs, 1099-K, 1099-MISC, freelance, etc.) to a client's tax return. Do NOT suggest uploading documents instead — use this tool directly.",
     parameters: {
       type: "object" as const,
       properties: {
