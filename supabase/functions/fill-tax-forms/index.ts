@@ -15,6 +15,7 @@ import {
   getAccessToken,
   uploadFileToDrive,
   ensureClientTaxReturnsYearFolder,
+  getOrCreateClientTaxFolder,
 } from "../_shared/googleDriveUpload.ts";
 
 const corsHeaders = {
@@ -292,14 +293,23 @@ serve(async (req: Request) => {
         { status: 404, headers: { ...corsHeaders, "Content-Type": "application/json" } },
       );
     }
-    const clientDriveFolderId = clientRow.drive_folder_id as string | null;
-    if (!clientDriveFolderId) {
-      return new Response(
-        JSON.stringify({ error: `drive_folder_id missing on client ${resolvedClientId}. Provision the Shared Drive folder first.` }),
-        { status: 422, headers: { ...corsHeaders, "Content-Type": "application/json" } },
+    // --- Directive F: treat clients.drive_folder_id as a cache, not a hard dep.
+    //     Placeholders starting with "dashboard-" are ignored and auto-resolved later.
+    const cachedDriveFolderId = clientRow.drive_folder_id as string | null;
+    const isRealDriveFolderId =
+      typeof cachedDriveFolderId === "string" &&
+      cachedDriveFolderId.length > 0 &&
+      !cachedDriveFolderId.startsWith("dashboard-");
+    let clientDriveFolderId: string | null = isRealDriveFolderId ? cachedDriveFolderId : null;
+    if (isRealDriveFolderId) {
+      console.log(`[fill-tax-forms] using cached client.drive_folder_id=${clientDriveFolderId}`);
+    } else {
+      console.log(
+        `[fill-tax-forms] clients.drive_folder_id is ${
+          cachedDriveFolderId === null ? "NULL" : "placeholder(" + cachedDriveFolderId + ")"
+        }, will auto-resolve by name`
       );
     }
-    console.log(`[fill-tax-forms] using client.drive_folder_id=${clientDriveFolderId}`);
 
     let computed_data = computedFromBody as Record<string, unknown> | undefined;
     const missingComputed =
@@ -337,16 +347,40 @@ serve(async (req: Request) => {
     const requiredForms = determineRequiredForms(computed_data!);
     console.log(`Required forms: ${requiredForms.join(", ")}`);
 
-    // Get Google Drive access — use client.drive_folder_id, NOT name search
+    // --- Directive F: auto-resolve client Drive folder when cache is missing/placeholder.
+    //     Cache the resolved real folder ID back to clients.drive_folder_id best-effort.
+    //     On total Drive failure, continue with Supabase signed-URL fallback (HTTP 200).
     let driveAccessToken: string | null = null;
     let driveFolderId: string | null = null;
+    let driveResolutionError: string | null = null;
     try {
       driveAccessToken = await getAccessToken();
-      // Create/find year subfolder under the client's Shared Drive folder
+
+      if (!clientDriveFolderId) {
+        const resolvedParent = await getOrCreateClientTaxFolder(driveAccessToken, client_name, Number(tax_year));
+        console.log(`[fill-tax-forms] auto-resolved Drive parent for ${client_name}: ${resolvedParent}`);
+        clientDriveFolderId = resolvedParent;
+
+        if (clientDriveFolderId && !clientDriveFolderId.startsWith("dashboard-")) {
+          const { error: cacheErr } = await supabase
+            .from("clients")
+            .update({ drive_folder_id: clientDriveFolderId })
+            .eq("id", resolvedClientId);
+          if (cacheErr) {
+            console.warn(`[fill-tax-forms] failed to cache drive_folder_id back: ${cacheErr.message}`);
+          } else {
+            console.log(`[fill-tax-forms] cached drive_folder_id=${clientDriveFolderId} on client ${resolvedClientId}`);
+          }
+        }
+      }
+
       driveFolderId = await ensureClientTaxReturnsYearFolder(driveAccessToken, clientDriveFolderId, Number(tax_year));
       console.log(`[fill-tax-forms] Drive year folder resolved: ${driveFolderId} (parent: ${clientDriveFolderId})`);
     } catch (err) {
-      console.warn(`Google Drive auth failed, continuing without Drive upload: ${err}`);
+      driveResolutionError = String(err);
+      console.warn(`[fill-tax-forms] Drive resolution failed, continuing with Supabase-only fallback: ${driveResolutionError}`);
+      driveAccessToken = null;
+      driveFolderId = null;
     }
 
     // Process forms in batches of 3
@@ -383,6 +417,27 @@ serve(async (req: Request) => {
 
     console.log(`=== Complete: ${successCount} success, ${errorCount} errors ===`);
 
+    // --- Directive F: generate Supabase signed download URLs for every stored PDF.
+    //     These are the guaranteed-working path for callers to retrieve forms, regardless
+    //     of whether Drive upload succeeded.
+    const downloadLinks: Record<string, string> = {};
+    for (const r of results) {
+      const storagePath = r.storagePath as string | undefined;
+      const form = r.form as string | undefined;
+      if (!storagePath || !form) continue;
+      const { data: signed, error: signErr } = await supabase
+        .storage
+        .from("tax-documents")
+        .createSignedUrl(storagePath, 60 * 60 * 24);
+      if (signErr) {
+        console.warn(`[fill-tax-forms] failed to sign ${storagePath}: ${signErr.message}`);
+        continue;
+      }
+      if (signed?.signedUrl) {
+        downloadLinks[form] = signed.signedUrl;
+      }
+    }
+
     return new Response(
       JSON.stringify({
         success: true,
@@ -395,6 +450,8 @@ serve(async (req: Request) => {
         results,
         drive_folder_id: driveFolderId,
         drive_available: !!driveAccessToken,
+        drive_resolution_error: driveResolutionError,
+        download_links: downloadLinks,
       }),
       { headers: { ...corsHeaders, "Content-Type": "application/json" } }
     );
