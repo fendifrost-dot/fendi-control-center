@@ -3,6 +3,8 @@ import { callClaudeJSON } from "../_shared/claude.ts";
 import { createClient, type SupabaseClient } from "https://esm.sh/@supabase/supabase-js@2.49.1";
 import { upsertTaxReturn, logAudit } from "../_shared/taxReturns.ts";
 import { crossCheckReturn } from "../_shared/crossCheckReturn.ts";
+import { normalizeToCanonical, type CanonicalTaxSummary } from "../_shared/canonical.ts";
+import { validateCanonical } from "../_shared/guards.ts";
 
 function escapeIlike(s: string): string {
   return s.replace(/\\/g, "\\\\").replace(/%/g, "\\%").replace(/_/g, "\\_");
@@ -85,6 +87,56 @@ function normalizeFilingStatus(raw: unknown): FilingStatus {
   if (normalized.includes("head")) return "head_of_household";
   if (normalized.includes("widow")) return "qualifying_widow";
   return "single";
+}
+
+function toCanonicalFiling(fs: FilingStatus): CanonicalTaxSummary["filing_status"] {
+  switch (fs) {
+    case "married_filing_jointly":
+      return "mfj";
+    case "married_filing_separately":
+      return "mfs";
+    case "head_of_household":
+      return "hoh";
+    case "qualifying_widow":
+      return "qw";
+    default:
+      return "single";
+  }
+}
+
+function totalIncomeFromCanonical(c: CanonicalTaxSummary): number {
+  const netBusiness = c.business_income - c.business_expenses;
+  return Math.round(
+    (c.wages +
+      c.interest_income +
+      c.dividend_income +
+      c.capital_gains_short +
+      c.capital_gains_long +
+      c.other_income +
+      netBusiness) *
+      100,
+  ) / 100;
+}
+
+/**
+ * Same selection order as netSelfEmploymentIncomeFromSummary, but reads only CanonicalTaxSummary
+ * (schedule_se net is folded into business_* during normalization).
+ */
+function netSelfEmploymentIncomeFromCanonical(c: CanonicalTaxSummary): number {
+  const fromScheduleC = c.business_income - c.business_expenses;
+  if (Number.isFinite(fromScheduleC) && fromScheduleC !== 0) {
+    return fromScheduleC;
+  }
+
+  const totalIncome = totalIncomeFromCanonical(c);
+  const wages = c.wages;
+  if (totalIncome > 0 && wages === 0) {
+    console.log(
+      `[generate] netSEIncome: using canonical component total=$${totalIncome} (no wages; Schedule C/SE lines empty)`,
+    );
+    return totalIncome;
+  }
+  return 0;
 }
 
 function calculate2022FederalIncomeTax(taxableIncome: number, filingStatus: FilingStatus): number {
@@ -653,11 +705,53 @@ ${taxDataPayload}${priorYearBlock}`;
         );
       }
 
+      const llmRaw = generated.json_summary;
+      console.log("[generate-tax-documents] normalizing LLM output", {
+        client_id: effectiveClientId,
+        tax_year: year,
+        raw_keys: Object.keys(
+          llmRaw != null && typeof llmRaw === "object" ? (llmRaw as object) : {},
+        ),
+      });
+
+      const canonical = normalizeToCanonical(
+        summary as Record<string, unknown>,
+        year,
+        toCanonicalFiling(filingStatus),
+      );
+      const guarded = validateCanonical(canonical);
+
+      if (!guarded.ok) {
+        console.error("[generate-tax-documents] canonical validation failed", {
+          client_id: effectiveClientId,
+          tax_year: year,
+          issues: guarded.issues,
+        });
+        throw new Response(
+          JSON.stringify({
+            error: "canonical_validation_failed",
+            issues: guarded.issues,
+          }),
+          {
+            status: 422,
+            headers: { ...corsHeaders, "Content-Type": "application/json" },
+          },
+        );
+      }
+
+      if (guarded.warnings.length > 0) {
+        console.warn("[generate-tax-documents] canonical warnings", {
+          client_id: effectiveClientId,
+          tax_year: year,
+          warnings: guarded.warnings,
+        });
+      }
+
       // Validate and normalize core tax math so persisted totals are deterministic.
       // SE tax: 92.35% of net SE income × 15.3%, capped at SS wage base ($147,000 for 2022)
-      const netSEIncome = netSelfEmploymentIncomeFromSummary(summary as Record<string, unknown>);
+      const netSEIncome = netSelfEmploymentIncomeFromCanonical(guarded.value);
       console.log(
-        `[generate] SE base: netSEIncome=${netSEIncome} (from Schedule C / SE lines; see netSelfEmploymentIncomeFromSummary)`,
+        `[generate] SE base: netSEIncome=${netSEIncome} (from canonical summary; see netSelfEmploymentIncomeFromCanonical)`,
       );
       const seBase = netSEIncome * 0.9235;
       const ssWageBase2022 = 147000;
@@ -667,7 +761,7 @@ ${taxDataPayload}${priorYearBlock}`;
       const deductibleHalfSE = Math.round(seTax / 2 * 100) / 100;
 
       // AGI = total income - deductible half of SE tax (Schedule 1 line 15)
-      const totalIncome = Number(form1040.total_income) || 0;
+      const totalIncome = totalIncomeFromCanonical(guarded.value);
       const adjustedAgi = Math.round((totalIncome - deductibleHalfSE) * 100) / 100;
       agi = adjustedAgi;
       form1040.adjusted_gross_income = adjustedAgi;
@@ -862,6 +956,9 @@ ${taxDataPayload}${priorYearBlock}`;
       { headers: { ...corsHeaders, "Content-Type": "application/json" } }
     );
   } catch (err: unknown) {
+    if (err instanceof Response) {
+      return err;
+    }
     const msg = err instanceof Error ? err.message : String(err);
     console.error("generate-tax-documents error:", msg);
     return new Response(JSON.stringify({ ok: false, error: msg }), {
