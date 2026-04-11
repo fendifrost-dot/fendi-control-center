@@ -14,7 +14,7 @@ import { getExpandedFieldMappings } from "../_shared/irsFieldMappings.ts";
 import {
   getAccessToken,
   uploadFileToDrive,
-  getOrCreateClientTaxFolder,
+  ensureClientTaxReturnsYearFolder,
 } from "../_shared/googleDriveUpload.ts";
 
 const corsHeaders = {
@@ -252,7 +252,7 @@ serve(async (req: Request) => {
       tax_return_id,
       tax_year,
       client_name,
-      client_id: _clientId,
+      client_id: bodyClientId,
       computed_data: computedFromBody,
     } = body;
 
@@ -262,6 +262,55 @@ serve(async (req: Request) => {
           error: "Missing required fields: tax_return_id, tax_year, client_name",
         }),
         { status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" } },
+      );
+    }
+
+    let resolvedClientId =
+      typeof bodyClientId === "string" && bodyClientId.trim() ? bodyClientId.trim() : null;
+    if (!resolvedClientId) {
+      const { data: trForClient, error: trClientErr } = await supabase
+        .from("tax_returns")
+        .select("client_id")
+        .eq("id", tax_return_id)
+        .maybeSingle();
+      if (trClientErr || !trForClient?.client_id) {
+        return new Response(
+          JSON.stringify({
+            error: "could not resolve client_id",
+            detail: trClientErr?.message ?? "tax_returns row missing client_id",
+          }),
+          { status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" } },
+        );
+      }
+      resolvedClientId = trForClient.client_id as string;
+    }
+
+    const { data: clientRow, error: clientErr } = await supabase
+      .from("clients")
+      .select("id, name, drive_folder_id")
+      .eq("id", resolvedClientId)
+      .single();
+
+    if (clientErr || !clientRow) {
+      return new Response(
+        JSON.stringify({ error: "client not found", detail: clientErr?.message }),
+        { status: 404, headers: { ...corsHeaders, "Content-Type": "application/json" } },
+      );
+    }
+
+    if (!clientRow.drive_folder_id) {
+      console.error(
+        `[fill-tax-forms] client ${clientRow.id} (${clientRow.name}) has no drive_folder_id set — refusing to run name-based folder search (ghost folder bug)`,
+      );
+      return new Response(
+        JSON.stringify({
+          error: "client has no drive_folder_id",
+          detail:
+            "Set clients.drive_folder_id to a folder inside the Fendi Tax Returns Shared Drive before running fill-tax-forms. Name-based folder resolution is disabled to prevent creating ghost folders in the service account's My Drive.",
+          client_id: clientRow.id,
+          client_name: clientRow.name,
+        }),
+        { status: 422, headers: { ...corsHeaders, "Content-Type": "application/json" } },
       );
     }
 
@@ -306,8 +355,15 @@ serve(async (req: Request) => {
     let driveFolderId: string | null = null;
     try {
       driveAccessToken = await getAccessToken();
-      driveFolderId = await getOrCreateClientTaxFolder(driveAccessToken, client_name, tax_year);
-      console.log(`Drive folder ID: ${driveFolderId}`);
+      console.log(
+        `[fill-tax-forms] using client.drive_folder_id=${clientRow.drive_folder_id} for client=${clientRow.name} year=${tax_year}`,
+      );
+      driveFolderId = await ensureClientTaxReturnsYearFolder(
+        driveAccessToken,
+        clientRow.drive_folder_id,
+        Number(tax_year),
+      );
+      console.log(`Drive year folder ID: ${driveFolderId}`);
     } catch (err) {
       console.warn(`Google Drive auth failed, continuing without Drive upload: ${err}`);
     }
