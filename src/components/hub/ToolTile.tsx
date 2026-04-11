@@ -18,7 +18,14 @@ export function ToolTile({ tool }: { tool: ToolTileData }) {
         </div>
       )}
       <div className="space-y-1 p-4">
-        <h3 className="pr-16 text-lg font-semibold tracking-tight">{tool.name}</h3>
+        <h3
+          className={cn(
+            "text-lg font-semibold tracking-tight",
+            tool.status !== "live" && "pr-16",
+          )}
+        >
+          {tool.name}
+        </h3>
         <p className="text-sm text-muted-foreground">{tool.tagline}</p>
       </div>
     </>
