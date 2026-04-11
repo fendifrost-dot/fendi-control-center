@@ -14,7 +14,7 @@ import { getExpandedFieldMappings } from "../_shared/irsFieldMappings.ts";
 import {
   getAccessToken,
   uploadFileToDrive,
-  getOrCreateClientTaxFolder,
+  ensureClientTaxReturnsYearFolder,
 } from "../_shared/googleDriveUpload.ts";
 
 const corsHeaders = {
