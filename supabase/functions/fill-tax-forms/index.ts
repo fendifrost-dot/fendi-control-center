@@ -265,6 +265,42 @@ serve(async (req: Request) => {
       );
     }
 
+    // --- Directive D: resolve client_id → clients.drive_folder_id ---
+    // 1. Get client_id from tax_returns
+    const { data: trRow, error: trLookupErr } = await supabase
+      .from("tax_returns")
+      .select("client_id")
+      .eq("id", tax_return_id)
+      .maybeSingle();
+    if (trLookupErr || !trRow?.client_id) {
+      return new Response(
+        JSON.stringify({ error: `tax_return ${tax_return_id} not found or missing client_id` }),
+        { status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" } },
+      );
+    }
+    const resolvedClientId = trRow.client_id;
+
+    // 2. Read clients.drive_folder_id
+    const { data: clientRow, error: clientErr } = await supabase
+      .from("clients")
+      .select("drive_folder_id")
+      .eq("id", resolvedClientId)
+      .maybeSingle();
+    if (clientErr || !clientRow) {
+      return new Response(
+        JSON.stringify({ error: `Client ${resolvedClientId} not found` }),
+        { status: 404, headers: { ...corsHeaders, "Content-Type": "application/json" } },
+      );
+    }
+    const clientDriveFolderId = clientRow.drive_folder_id as string | null;
+    if (!clientDriveFolderId) {
+      return new Response(
+        JSON.stringify({ error: `drive_folder_id missing on client ${resolvedClientId}. Provision the Shared Drive folder first.` }),
+        { status: 422, headers: { ...corsHeaders, "Content-Type": "application/json" } },
+      );
+    }
+    console.log(`[fill-tax-forms] using client.drive_folder_id=${clientDriveFolderId}`);
+
     let computed_data = computedFromBody as Record<string, unknown> | undefined;
     const missingComputed =
       !computed_data ||
@@ -301,13 +337,14 @@ serve(async (req: Request) => {
     const requiredForms = determineRequiredForms(computed_data!);
     console.log(`Required forms: ${requiredForms.join(", ")}`);
 
-    // Get Google Drive access
+    // Get Google Drive access — use client.drive_folder_id, NOT name search
     let driveAccessToken: string | null = null;
     let driveFolderId: string | null = null;
     try {
       driveAccessToken = await getAccessToken();
-      driveFolderId = await getOrCreateClientTaxFolder(driveAccessToken, client_name, tax_year);
-      console.log(`Drive folder ID: ${driveFolderId}`);
+      // Create/find year subfolder under the client's Shared Drive folder
+      driveFolderId = await ensureClientTaxReturnsYearFolder(driveAccessToken, clientDriveFolderId, Number(tax_year));
+      console.log(`[fill-tax-forms] Drive year folder resolved: ${driveFolderId} (parent: ${clientDriveFolderId})`);
     } catch (err) {
       console.warn(`Google Drive auth failed, continuing without Drive upload: ${err}`);
     }
