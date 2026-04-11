@@ -118,7 +118,8 @@ async function processForm(
   taxYear: number,
   taxReturnId: string,
   clientName: string,
-  flatData: Record<string, unknown>
+  flatData: Record<string, unknown>,
+  isFinal: boolean
 ): Promise<Record<string, unknown>> {
   const formLabel = formType.toUpperCase();
   console.log(`Processing form: ${formLabel} for ${taxYear}`);
@@ -150,12 +151,16 @@ async function processForm(
     return { form: formType, status: "error", error: `Failed to fill PDF: ${err}` };
   }
 
-  // 4. Add DRAFT watermark
-  await addDraftWatermark(filledDoc);
+  // 4. Add DRAFT watermark (skip if isFinal)
+  if (!isFinal) {
+    await addDraftWatermark(filledDoc);
+  }
 
   // 5. Save filled PDF
   const filledPdfBytes = await filledDoc.save();
-  const fileName = `${clientName.replace(/\s+/g, "_")}_${taxYear}_${formType}_DRAFT.pdf`;
+  const fileName = isFinal
+    ? `${clientName.replace(/\s+/g, "_")}_${taxYear}_${formType}.pdf`
+    : `${clientName.replace(/\s+/g, "_")}_${taxYear}_${formType}_DRAFT.pdf`;
   const storagePath = `${taxReturnId}/${fileName}`;
 
   // 6. Upload to Supabase storage
@@ -214,7 +219,7 @@ async function processForm(
     tax_return_id: taxReturnId,
     form_type: formType,
     form_year: taxYear,
-    status: "draft",
+    status: isFinal ? "final" : "draft",
     pdf_url: storagePath,
     drive_file_id: driveResult?.id || null,
     field_data: formFieldData,
@@ -254,7 +259,9 @@ serve(async (req: Request) => {
       client_name,
       client_id: _clientId,
       computed_data: computedFromBody,
+      finalize,
     } = body;
+    const isFinal = !!finalize;
 
     if (!tax_return_id || !tax_year || !client_name) {
       return new Response(
@@ -365,17 +372,18 @@ serve(async (req: Request) => {
             Number(tax_year),
             tax_return_id,
             client_name,
-            flatData
+            flatData,
+            isFinal
           )
         )
       );
       results.push(...batchResults);
     }
 
-    // Mark ready for human review after PDF generation
+    // Mark status after PDF generation: "final" if finalize requested, else "review"
     await supabase
       .from("tax_returns")
-      .update({ status: "review", updated_at: new Date().toISOString() })
+      .update({ status: isFinal ? "final" : "review", updated_at: new Date().toISOString() })
       .eq("id", tax_return_id);
 
     const successCount = results.filter((r) => r.status === "success").length;
