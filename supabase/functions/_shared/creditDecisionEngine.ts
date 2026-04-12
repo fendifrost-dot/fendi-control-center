@@ -89,13 +89,21 @@ export function isExplicitCreditGuardianIngestIntent(lowerText: string): boolean
   return true;
 }
 
+/** Strip trailing status phrases between the name and "to Credit Guardian" (not part of the client name). */
+function stripCgIngestNameNoise(s: string): string {
+  let t = s.trim();
+  t = t.replace(/\s+(?:dispute|credit)\s+progress$/i, "");
+  return t.trim();
+}
+
 /** Normalize quoted titles, punctuation noise, and whitespace for extracted CG client names. */
 export function normalizeExtractedCgClientName(raw: string): string | null {
   let s = raw.trim();
   s = s.replace(/^["'`""''´]+|["'`""''´]+$/g, "");
+  s = stripCgIngestNameNoise(s);
   s = s.replace(/^(?:mr\.?|mrs\.?|ms\.?|miss\.?|dr\.?|prof\.?)\s+/i, "");
   s = s.replace(/[.,;:!?…]+$/g, "");
-  s = s.replace(/\b(the|a|an|my|our|client)\b/gi, " ");
+  s = s.replace(/\b(the|a|an|my|our)\b/gi, " ");
   s = s.replace(/\s+/g, " ").trim();
   if (s.length < 2 || s.length > 80) return null;
   return s;
@@ -111,6 +119,10 @@ export function extractCreditGuardianClientNameForIngest(message: string): strin
 
   const patterns: RegExp[] = [
     /\b(?:add|put|sync|ingest|onboard|register|load|bring|import|enroll)\s+["']([^"']{2,80})["']\s+(?:to|into|in)\s+(?:credit\s+guardian|\bcg\b)\b/i,
+    new RegExp(
+      String.raw`\b(?:add|put|sync|ingest|onboard|register|load|bring|import|enroll)\s+(?:client\s+)?([A-Za-z0-9][A-Za-z0-9.'\-]*)\s+dispute\s+progress\s+(?:to|into|in)\s+(?:credit\s+guardian|\bcg\b)\b`,
+      "i",
+    ),
     new RegExp(
       String.raw`\b(?:add|put|sync|ingest|onboard|register|load|bring|import|enroll)\s+(?:client\s+)?(${NAME})\s+(?:to|into|in)\s+(?:credit\s+guardian|\bcg\b)\b`,
       "i",

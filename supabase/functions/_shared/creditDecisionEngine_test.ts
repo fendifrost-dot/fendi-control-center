@@ -55,6 +55,14 @@ Deno.test("extractCreditGuardianClientNameForIngest: Jabril variants", () => {
   assertEquals(extractCreditGuardianClientNameForIngest("Add Jabril to Credit Guardian"), "Jabril");
   assertEquals(extractCreditGuardianClientNameForIngest("Put Jabril in Credit Guardian"), "Jabril");
   assertEquals(extractCreditGuardianClientNameForIngest("Onboard Jabril into CG"), "Jabril");
+  assertEquals(
+    extractCreditGuardianClientNameForIngest("add Jabril dispute progress to credit guardian"),
+    "Jabril",
+  );
+  assertEquals(
+    extractCreditGuardianClientNameForIngest("Add Mary Jane dispute progress to Credit Guardian"),
+    "Mary Jane",
+  );
 });
 
 Deno.test("extractCreditGuardianClientNameForIngest: noisy phrasing, punctuation, titles, quotes", () => {
