@@ -4805,6 +4805,70 @@ serve(async (req) => {
     };
     const hasExecutionIntent = hasPlainEnglishExecutionIntent(lowerText);
 
+    // ══════════════════════════════════════════════════════════
+    // CREDIT DECISION ENGINE — intercepts credit messages before legacy routing
+    // Layered ON TOP: non-credit messages fall through untouched.
+    // ══════════════════════════════════════════════════════════
+    try {
+      const creditDecision = await runCreditDecisionEngine(supabase, text);
+      if (creditDecision.isCreditDomain && creditDecision.action) {
+        const act = creditDecision.action;
+        logEvent({ event: "credit_decision_engine", intent: creditDecision.intent, client: creditDecision.extractedClientName, confidence: creditDecision.confidence, autoExecute: act.autoExecute, workflowKey: act.workflowKey, toolName: act.toolName, taskId });
+
+        // Clarification needed — ask and exit
+        if (act.clarificationNeeded) {
+          const replyModel: "grok" | "gemini" = (session.active_model === "chatgpt" ? "grok" : session.active_model) as "grok" | "gemini";
+          await sendMessage(chatId, formatAssistantMessage(replyModel, act.clarificationNeeded), {}, `task:${taskId}:credit-clarify`);
+          await supabase.from("tasks").update({ status: "succeeded", result_json: { execution_lane: "credit_decision_engine", intent: creditDecision.intent, action: "clarification_sent" } }).eq("id", taskId);
+          await sendMessage(chatId, `✅ Done: \`${taskId}\``, {}, `task:${taskId}:done`);
+          _currentTaskId = null;
+          return new Response("ok");
+        }
+
+        // Auto-execute: send confirmation message, route to existing workflow
+        if (act.autoExecute && act.workflowKey) {
+          const replyModel: "grok" | "gemini" = (session.active_model === "chatgpt" ? "grok" : session.active_model) as "grok" | "gemini";
+          // Send pre-execution confirmation with case state context
+          await sendMessage(chatId, formatAssistantMessage(replyModel, act.confirmationMessage), {}, `task:${taskId}:credit-confirm`);
+
+          console.log("[CREDIT_ENGINE] Auto-executing", { taskId, workflow: act.workflowKey, tool: act.toolName, client: creditDecision.extractedClientName });
+          await supabase.from("tasks").update({
+            status: "running",
+            selected_workflow: act.workflowKey,
+            result_json: { execution_lane: "credit_decision_engine", intent: creditDecision.intent, client: creditDecision.extractedClientName, progress_step: "executing", auto_promoted: true },
+          }).eq("id", taskId);
+
+          try {
+            await Promise.race([
+              executeAgenticLoop(chatId, text, {
+                taskId,
+                lane: "lane1_do",
+                allowTools: true,
+                workflowKey: act.workflowKey,
+                sessionModel: session.active_model as "grok" | "gemini" | "chatgpt",
+              }),
+              new Promise<never>((_, reject) => setTimeout(() => reject(new Error("TIMEOUT")), 55000)),
+            ]);
+
+            // Send next step suggestion after successful execution
+            if (act.nextStep) {
+              await sendMessage(chatId, formatAssistantMessage(replyModel, `💡 *Next step:* ${act.nextStep}`), {}, `task:${taskId}:credit-next`);
+            }
+          } catch (err) {
+            const errMsg = (err as Error).message || "unknown";
+            const failResult = buildFailureResultJson({ execution_lane: "credit_decision_engine" }, errMsg);
+            await supabase.from("tasks").update({ status: "failed", error: errMsg.slice(0, 300), result_json: failResult }).eq("id", taskId);
+            await sendMessage(chatId, `❌ Failed: \`${taskId}\` — ${errMsg.slice(0, 200)}`, {}, `task:${taskId}:failed`);
+          }
+          _currentTaskId = null;
+          return new Response("ok");
+        }
+      }
+    } catch (cdeErr) {
+      // Decision engine failure is non-fatal — fall through to legacy routing
+      console.error("[CREDIT_ENGINE] Error (falling through):", cdeErr);
+    }
+
     let autoPromotedWorkflow: WorkflowEntry | undefined;
     /** Bypass Lane 1 LLM for "run it again" — reuse saved vibe from last_hub research. */
     let playlistDirectRedo: { track_name: string; user_vibe: string } | null = null;
