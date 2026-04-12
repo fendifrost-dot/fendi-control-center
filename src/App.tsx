@@ -6,6 +6,7 @@ import { ThemeProvider } from "next-themes";
 import { BrowserRouter, Routes, Route, Navigate } from "react-router-dom";
 import { TaxShell } from "@/components/tax/TaxShell";
 import Index from "./pages/Index";
+import HubHomePage from "./pages/HubHomePage";
 import Ops from "./pages/Ops";
 import Test from "./pages/Test";
 import Login from "./pages/Login";
@@ -25,7 +26,7 @@ const App = () => (
         <BrowserRouter>
           <Routes>
             <Route path="/login" element={<Login />} />
-            <Route path="/" element={<Index />} />
+            <Route path="/" element={<HubHomePage />} />
             <Route path="/ops" element={<Ops />} />
             <Route path="/test" element={<Test />} />
             <Route path="/tax" element={<Navigate to="/clients" replace />} />
