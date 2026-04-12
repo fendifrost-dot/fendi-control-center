@@ -191,6 +191,22 @@ export async function listFilesInFolder(folderId: string): Promise<DriveFile[]> 
   return allFiles;
 }
 
+/** List all files recursively, traversing into subfolders up to maxDepth levels. */
+export async function listFilesRecursive(folderId: string, depth = 0, maxDepth = 3): Promise<DriveFile[]> {
+  if (depth > maxDepth) return [];
+
+  const files = await listFilesInFolder(folderId);
+  const subfolders = await listSubfolders(folderId);
+
+  for (const subfolder of subfolders) {
+    console.log("  ".repeat(depth) + "Recursing into subfolder: " + subfolder.name);
+    const subFiles = await listFilesRecursive(subfolder.id, depth + 1, maxDepth);
+    files.push(...subFiles);
+  }
+
+  return files;
+}
+
 /** Download a file's content as base64 and raw bytes. Handles Google Docs export. */
 export async function downloadFile(fileId: string, mimeType: string): Promise<{
   base64: string;
