@@ -12,25 +12,66 @@ export function normalizeTelegramTaxText(raw: string): string {
     .replace(/\s+/g, " ");
 }
 
+/**
+ * Strip trailing tax-status noise that operators sometimes insert between the
+ * client name and the anchor phrase (e.g. "extension", "amendment", "refund",
+ * "progress").  Mirrors CG's `stripCgIngestNameNoise`.
+ */
+function stripTaxNameNoise(s: string): string {
+  let t = s.trim();
+  // trailing status phrases
+  t = t.replace(
+    /\s+(?:extension|amendment|refund|progress|filing|status|update|review|info|documents?|docs?)\s*$/i,
+    "",
+  );
+  // trailing possessives that slipped through
+  t = t.replace(/\s+'s$/i, "");
+  return t.trim();
+}
+
 /** Best-effort client name from common Telegram phrasings (deterministic path for /do tax). */
 export function extractClientNameForTaxCommand(userMessage: string): string | null {
   const msg = userMessage.trim().replace(/\s+/g, " ");
   const normalized = msg
-    .replace(/[’]/g, "'")
+    .replace(/[']/g, "'")
     .replace(/\b(?:'s)\b/gi, "")
     .replace(/\s+return\b/gi, "")
     .trim();
   const cleanup = (name: string): string => {
-    return name
-      .replace(/[’]/g, "'")
+    let s = name
+      .replace(/[']/g, "'")
       .replace(/\b(?:'s)\b/gi, "")
       .replace(/\bfor\s+20\d{2}\b/gi, "")
-      .replace(/\b20\d{2}\b/g, "")
-      .replace(/\b(?:tax|return|forms?)\b/gi, "")
-      .replace(/^[\s"'`""''.,.;:!?]+|[\s"'`""''.,.;:!?]+$/g, "")
-      .replace(/\s+/g, " ")
-      .trim();
+      .replace(/\b20\d{2}\b/g, "");
+    // Context-aware stripping: only remove "tax"/"return"/"forms" when they are
+    // standalone filler, NOT part of a business name like "Tax Solutions LLC".
+    // We strip only when the word is surrounded by whitespace/start/end AND not
+    // followed by a capitalized word that suggests a company name.
+    s = s.replace(/(?:^|\s)(?:tax|return|forms?)(?=\s|$)(?!\s+[A-Z])/gi, " ");
+    s = stripTaxNameNoise(s);
+    s = s.replace(/^[\s"'`\u201C\u201D\u2018\u2019''.,.;:!?]+|[\s"'`\u201C\u201D\u2018\u2019''.,.;:!?]+$/g, "");
+    s = s.replace(/\s+/g, " ");
+    return s.trim();
   };
+  // --- High-priority: quoted names (exact, no noise) ---
+  const quoted = msg.match(
+    /(?:do|prepare|file|complete|run|generate)\s+["']([^"']{2,80})["']\s+tax/i,
+  );
+  if (quoted?.[1]) {
+    const name = cleanup(quoted[1]);
+    if (name.length >= 2 && name.length < 120) return name;
+  }
+
+  // --- High-priority: single/two-word name + status noise + "tax return" ---
+  // Catches "generate Jabril extension tax return" → "Jabril"
+  const noisyStatus = msg.match(
+    /(?:do|prepare|file|complete|run|generate)\s+([A-Za-z][A-Za-z.'\-]*(?:\s+[A-Za-z][A-Za-z.'\-]*)?)\s+(?:extension|amendment|refund|progress|filing|status|update)\s+tax\b/i,
+  );
+  if (noisyStatus?.[1]) {
+    const name = cleanup(noisyStatus[1].replace(/^the\s+/i, ""));
+    if (name.length >= 2 && name.length < 120) return name;
+  }
+
   const gen = msg.match(/generate\s+(.+?)\s+tax\s+return/i);
   if (gen?.[1]) {
     const name = cleanup(gen[1].replace(/^the\s+/i, ""));
