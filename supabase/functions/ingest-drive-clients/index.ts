@@ -1,6 +1,7 @@
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.49.1";
 import { fetchCreditGuardian } from "../_shared/creditGuardian.ts";
+import { resolveDriveIngestFilterKey } from "../_shared/driveClientAlias.ts";
 import { isAmbiguousCreditTaxFolderName, shouldIngestCreditSubfolder } from "../_shared/driveFolderPolicy.ts";
 
 const corsHeaders = {
@@ -16,9 +17,9 @@ const DRIVE_FOLDER_ID = RAW_DRIVE_FOLDER.includes("/folders/")
   : RAW_DRIVE_FOLDER;
 
 /** When true, every direct subfolder of DRIVE_FOLDER_ID is treated as a credit client (no "CREDIT" in name required). */
-const _rawDedicated = (Deno.env.get("DRIVE_CREDIT_ROOT_IS_DEDICATED") ?? "").trim().toLowerCase();
-console.log(`[DEBUG] DRIVE_CREDIT_ROOT_IS_DEDICATED raw="${Deno.env.get("DRIVE_CREDIT_ROOT_IS_DEDICATED")}" parsed="${_rawDedicated}"`);
-const DEDICATED_CREDIT_ROOT = _rawDedicated === "1" || _rawDedicated === "true";
+const DEDICATED_CREDIT_ROOT =
+  Deno.env.get("DRIVE_CREDIT_ROOT_IS_DEDICATED") === "1" ||
+  Deno.env.get("DRIVE_CREDIT_ROOT_IS_DEDICATED") === "true";
 
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
 const SUPABASE_SERVICE_ROLE_KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
@@ -27,25 +28,6 @@ const SUPABASE_SERVICE_ROLE_KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
 const GEMINI_KEY = Deno.env.get("Frost_Gemini")!;
 
 const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
-
-/** Map display/client names to Drive subfolder names, e.g. {"jabril":"zeus"} — keys and values are case-insensitive. */
-function resolveDriveFolderFilterKey(requested: string | undefined): string | undefined {
-  if (!requested) return undefined;
-  let key = requested.toLowerCase().trim();
-  const raw = Deno.env.get("DRIVE_CLIENT_FOLDER_ALIASES_JSON");
-  if (raw) {
-    try {
-      const map = JSON.parse(raw) as Record<string, string>;
-      const mapped = map[key];
-      if (typeof mapped === "string" && mapped.trim()) {
-        key = mapped.toLowerCase().trim();
-      }
-    } catch {
-      /* ignore invalid JSON */
-    }
-  }
-  return key;
-}
 
 const SUPPORTED_MIMES = new Set([
   "application/pdf",
@@ -386,9 +368,9 @@ serve(async (req) => {
 
   try {
     const body = await req.json().catch(() => ({}));
-    const filterClientName = resolveDriveFolderFilterKey(
+    const filterClientName = resolveDriveIngestFilterKey(
       typeof body.client_name === "string" ? body.client_name : undefined,
-    );
+    ).key;
     const maxFiles = parseInt(body.max_files) || 0; // 0 = no limit
 
     console.log("Starting Drive ingestion (Gemini multimodal v3 - per-file dedup)...");

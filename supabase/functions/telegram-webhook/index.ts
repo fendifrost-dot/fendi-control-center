@@ -17,7 +17,17 @@ import {
   tryParseManualDeductionMessage,
   tryParseManualIncomeMessage,
 } from "../_shared/taxTelegramParse.ts";
-import { inferCreditWorkflowKey, shouldAutoExecuteCreditIntent } from "../_shared/creditDecisionEngine.ts";
+import {
+  extractCreditGuardianClientNameForIngest,
+  inferCreditWorkflowKey,
+  isExplicitCreditGuardianIngestIntent,
+  shouldAutoExecuteCreditIntent,
+} from "../_shared/creditDecisionEngine.ts";
+import { resolveDriveIngestFilterKey } from "../_shared/driveClientAlias.ts";
+import {
+  resolveExplicitIngestStructuredOutcome,
+  type ExplicitIngestAliasContext,
+} from "../_shared/explicitCgIngestOutcome.ts";
 import {
   extractCreditClientNameLoose,
   formatUnifiedIntelForPrompt,
@@ -3382,7 +3392,19 @@ async function runDeterministicManualTaxTools(
 
 // âââ Execute agentic loop ââââââââââââââââââââââââââââââââââââââ
 
-async function executeAgenticLoop(chatId: string, userMessage: string, opts: { taskId: string; sessionModel: "grok" | "gemini" | "chatgpt"; lane?: "lane1_do" | "lane2_assistant" | "lane3_autonomous"; allowTools?: boolean; workflowKey?: string }): Promise<void> {
+async function executeAgenticLoop(
+  chatId: string,
+  userMessage: string,
+  opts: {
+    taskId: string;
+    sessionModel: "grok" | "gemini" | "chatgpt";
+    lane?: "lane1_do" | "lane2_assistant" | "lane3_autonomous";
+    allowTools?: boolean;
+    workflowKey?: string;
+    /** Set when user issued explicit Credit Guardian ingest command; bypasses LLM tool choice. */
+    explicitCreditGuardianIngest?: boolean;
+  },
+): Promise<void> {
   // ── Resolve deprecated workflow key aliases ──
   if (opts.workflowKey) opts.workflowKey = _resolveWorkflowKey(opts.workflowKey);
 
@@ -3532,6 +3554,7 @@ async function executeAgenticLoop(chatId: string, userMessage: string, opts: { t
   logEvent({ event: "ai_call_start", taskId: opts.taskId, model, workflow: opts.workflowKey });
 
   // Deterministic playlist run: if we can infer track from chat, skip LLM refusal paths
+  let explicitCgIngestAliasMeta: ExplicitIngestAliasContext | undefined;
   let result: { text: string; toolCalls: Array<{ name: string; args: any }> };
   if (opts.workflowKey === "find_playlist_opportunities") {
     const inferredTrack = extractPlaylistTrackName(userMessage, conversationContext);
@@ -3564,12 +3587,77 @@ async function executeAgenticLoop(chatId: string, userMessage: string, opts: { t
         : await agenticGeminiCall(userMessage, docContext, conversationContext, workflowToolNames, opts.workflowKey);
     }
   } else if (opts.workflowKey === "drive_ingest") {
-    const inferredClient = extractClientNameForDriveCommand(userMessage, conversationContext);
+    const cgExplicit = opts.explicitCreditGuardianIngest === true;
+    const extractedCg = extractCreditGuardianClientNameForIngest(userMessage);
+    const inferredClient = extractedCg ?? extractClientNameForDriveCommand(userMessage, conversationContext);
     if (inferredClient) {
-      logEvent({ event: "drive_ingest_client_inferred", taskId: opts.taskId, inferredClient });
+      const aliasRes = resolveDriveIngestFilterKey(inferredClient);
+      explicitCgIngestAliasMeta = {
+        operatorRequestedName: inferredClient,
+        resolvedFolderKey: String(aliasRes.key ?? inferredClient),
+        usedAlias: aliasRes.usedAlias,
+      };
+      if (cgExplicit) {
+        const d = inferCreditWorkflowKey(userMessage.toLowerCase());
+        console.log(
+          JSON.stringify({
+            ts: Date.now(),
+            event: "credit_guardian_routing",
+            taskId: opts.taskId,
+            message_preview: userMessage.slice(0, 280),
+            detected_explicit_credit_guardian_command: true,
+            selected_workflow: "drive_ingest",
+            routing_branch: "deterministic_direct",
+            confidence_score: d.confidence,
+            client_name_extracted: inferredClient,
+            used_alias_match: aliasRes.usedAlias,
+            resolved_filter: aliasRes.key,
+            final_execution_mode: "deterministic_direct",
+          }),
+        );
+      }
+      logEvent({
+        event: "drive_ingest_client_inferred",
+        taskId: opts.taskId,
+        inferredClient,
+        used_alias_match: aliasRes.usedAlias,
+        resolved_filter: aliasRes.key,
+      });
       result = {
         text: "",
-        toolCalls: [{ name: "ingest_drive_clients", args: { client_name: inferredClient } }],
+        toolCalls: [{
+          name: "ingest_drive_clients",
+          args: { client_name: aliasRes.key ?? inferredClient },
+        }],
+      };
+    } else if (cgExplicit) {
+      const d = inferCreditWorkflowKey(userMessage.toLowerCase());
+      console.log(
+        JSON.stringify({
+          ts: Date.now(),
+          event: "credit_guardian_routing",
+          taskId: opts.taskId,
+          message_preview: userMessage.slice(0, 280),
+          detected_explicit_credit_guardian_command: true,
+          selected_workflow: "drive_ingest",
+          routing_branch: "deterministic_direct",
+          confidence_score: d.confidence,
+          client_name_extracted: null,
+          failure_reason: "client_name_not_extracted",
+          final_execution_mode: "deterministic_direct",
+        }),
+      );
+      result = {
+        text: [
+          "*Credit Guardian ingest — client name required*",
+          "",
+          "Could not extract a **client name** from your message.",
+          "",
+          "Example: `Add Jabril to Credit Guardian` or `Ingest Zeus into Credit Guardian`.",
+          "",
+          "If the Drive folder uses a different name, set `DRIVE_CLIENT_FOLDER_ALIASES_JSON` (e.g. `{\"jabril\":\"zeus\"}`).",
+        ].join("\n"),
+        toolCalls: [],
       };
     } else {
       result = model === "grok"
@@ -3627,11 +3715,45 @@ async function executeAgenticLoop(chatId: string, userMessage: string, opts: { t
       at: new Date().toISOString(),
     });
 
+    const explicitCgBadExtraction =
+      opts.workflowKey === "drive_ingest" &&
+      opts.explicitCreditGuardianIngest === true &&
+      (responseText.includes("client name required") || responseText.includes("Could not extract"));
+    if (explicitCgBadExtraction) {
+      console.log(
+        JSON.stringify({
+          ts: Date.now(),
+          event: "credit_guardian_routing",
+          taskId: opts.taskId,
+          final_outcome: "blocked_bad_extraction",
+          selected_workflow: "drive_ingest",
+          routing_branch: "deterministic_direct",
+        }),
+      );
+    }
+
     const executionDuration = Date.now() - executionStart;
     await supabase.from("tasks").update({
       status: "succeeded",
       selected_tools: [],
-      result_json: { execution_complete: true, workflow: opts.workflowKey, text_response: responseText.slice(0, 2000), model_used: opts.sessionModel, execution_duration_ms: executionDuration, execution_lock: null, execution_lock_released_ts: Date.now() },
+      result_json: {
+        execution_complete: true,
+        workflow: opts.workflowKey,
+        text_response: responseText.slice(0, 2000),
+        model_used: opts.sessionModel,
+        execution_duration_ms: executionDuration,
+        execution_lock: null,
+        execution_lock_released_ts: Date.now(),
+        ...(explicitCgBadExtraction
+          ? {
+            credit_routing: {
+              final_outcome: "blocked_bad_extraction",
+              selected_workflow: "drive_ingest",
+              routing_branch: "deterministic_direct",
+            },
+          }
+          : {}),
+      },
     }).eq("id", opts.taskId);
     await sendMessage(chatId, `â Done: \`${opts.taskId}\``, {}, `task:${opts.taskId}:done`);
     return;
@@ -3711,6 +3833,75 @@ async function executeAgenticLoop(chatId: string, userMessage: string, opts: { t
 
   // Step 4: If we have tool results, feed them back to AI for a final summary
   const executedToolNames = result.toolCalls.map(tc => tc.name);
+
+  /** Explicit CG + ingest_drive_clients: fully deterministic operator messages (no LLM), including success. */
+  if (opts.explicitCreditGuardianIngest === true && confirmationButtons.length === 0) {
+    const ingestIdx = result.toolCalls.findIndex((tc) => tc.name === "ingest_drive_clients");
+    if (ingestIdx >= 0) {
+      const raw = toolResults[ingestIdx] ?? "";
+      const requestedLabel = String(result.toolCalls[ingestIdx].args?.client_name ?? "").trim() || "unknown";
+      const resolved = resolveExplicitIngestStructuredOutcome(raw, requestedLabel, explicitCgIngestAliasMeta);
+      console.log(
+        JSON.stringify({
+          ts: Date.now(),
+          event: "credit_guardian_routing",
+          taskId: opts.taskId,
+          message_preview: userMessage.slice(0, 280),
+          detected_explicit_credit_guardian_command: true,
+          selected_workflow: "drive_ingest",
+          routing_branch: "deterministic_direct",
+          client_name_extracted: requestedLabel,
+          ingest_result_count: resolved.ingest_result_count,
+          has_alias_suggestions: resolved.has_alias_suggestions,
+          final_outcome: resolved.final_outcome,
+          used_alias_match: explicitCgIngestAliasMeta?.usedAlias ?? false,
+          final_execution_mode: "deterministic_direct",
+        }),
+      );
+      const finalSummary = formatAssistantMessage(model, resolved.operatorMessage);
+      logEvent({
+        event: "sending_summary",
+        taskId: opts.taskId,
+        workflow: opts.workflowKey,
+        summary_kind: "explicit_cg_deterministic",
+        final_outcome: resolved.final_outcome,
+      });
+      await sendMessage(chatId, finalSummary, {}, `task:${opts.taskId}:summary`);
+      await appendConversationTurn(chatId, {
+        role: "assistant",
+        content: finalSummary,
+        model,
+        at: new Date().toISOString(),
+      });
+      const executionDuration = Date.now() - executionStart;
+      await supabase.from("tasks").update({
+        status: "succeeded",
+        selected_tools: executedToolNames,
+        result_json: {
+          execution_complete: true,
+          workflow: opts.workflowKey,
+          text_response: resolved.operatorMessage.slice(0, 2000),
+          model_used: opts.sessionModel,
+          execution_duration_ms: executionDuration,
+          execution_lock: null,
+          execution_lock_released_ts: Date.now(),
+          credit_routing: {
+            final_outcome: resolved.final_outcome,
+            ingest_result_count: resolved.ingest_result_count,
+            has_alias_suggestions: resolved.has_alias_suggestions,
+            client_name_extracted: requestedLabel,
+            used_alias_match: explicitCgIngestAliasMeta?.usedAlias ?? false,
+            resolved_folder_key: explicitCgIngestAliasMeta?.resolvedFolderKey ?? requestedLabel,
+            operator_requested_name: explicitCgIngestAliasMeta?.operatorRequestedName ?? requestedLabel,
+            routing_branch: "deterministic_direct",
+          },
+        },
+      }).eq("id", opts.taskId);
+      await sendMessage(chatId, `✅ Done: \`${opts.taskId}\``, {}, `task:${opts.taskId}:done`);
+      await flushTelegramOutbox(chatId, 10);
+      return;
+    }
+  }
 
   if (toolResults.length > 0 && confirmationButtons.length === 0) {
     // All tools were non-destructive, get a summary
@@ -3813,7 +4004,17 @@ RULES:
     await supabase.from("tasks").update({
       status: "succeeded",
       selected_tools: executedToolNames,
-      result_json: { execution_complete: true, workflow: opts.workflowKey, progress_step: "F_succeeded", summary: summary.slice(0, 2000), toolResults: toolResults.map(r => r.slice(0, 500)), model_used: opts.sessionModel, execution_duration_ms: executionDuration, execution_lock: null, execution_lock_released_ts: Date.now() },
+      result_json: {
+        execution_complete: true,
+        workflow: opts.workflowKey,
+        progress_step: "F_succeeded",
+        summary: summary.slice(0, 2000),
+        toolResults: toolResults.map((r) => r.slice(0, 500)),
+        model_used: opts.sessionModel,
+        execution_duration_ms: executionDuration,
+        execution_lock: null,
+        execution_lock_released_ts: Date.now(),
+      },
     }).eq("id", opts.taskId);
     logEvent({ event: "task_succeeded", taskId: opts.taskId, workflow: opts.workflowKey, execution_duration_ms: executionDuration });
       await flushTelegramOutbox(chatId, 10);
@@ -4955,6 +5156,51 @@ serve(async (req) => {
     };
     const hasExecutionIntent = hasPlainEnglishExecutionIntent(lowerText);
 
+    /** Must win over new/existing-client heuristics, tax, Credit Compass, NL classify, and Lane 2. */
+    const explicitCgIngestIntent = isExplicitCreditGuardianIngestIntent(lowerText);
+
+    if (explicitCgIngestIntent && !IMPLEMENTED_WORKFLOW_KEYS.has("drive_ingest")) {
+      const modelCg = (session.active_model === "grok" ? "grok" : "gemini") as "grok" | "gemini";
+      await sendMessage(
+        chatId,
+        formatAssistantMessage(
+          modelCg,
+          [
+            "*Credit Guardian ingest — not enabled*",
+            "",
+            "This bot build does not expose the `drive_ingest` workflow.",
+            "Deploy or register `drive_ingest` to run Drive → Credit Guardian imports.",
+          ].join("\n"),
+        ),
+        {},
+        `task:${taskId}:cg-ingest-missing`,
+      );
+      await supabase.from("tasks").update({
+        status: "succeeded",
+        result_json: {
+          execution_lane: "lane1_blocked",
+          credit_routing: {
+            detected_explicit_credit_guardian_command: true,
+            failure_reason: "drive_ingest_not_implemented",
+            final_execution_mode: "blocked",
+            final_outcome: "blocked_unimplemented",
+          },
+        },
+      }).eq("id", taskId);
+      console.log(
+        JSON.stringify({
+          ts: Date.now(),
+          event: "credit_guardian_routing",
+          taskId,
+          final_outcome: "blocked_unimplemented",
+          selected_workflow: "drive_ingest",
+        }),
+      );
+      await sendMessage(chatId, `✅ Done: \`${taskId}\``, {}, `task:${taskId}:done`);
+      _currentTaskId = null;
+      return new Response("ok");
+    }
+
     const pickedCreditWorkflow = resolveAutoCreditWorkflow(lowerText);
 
     let autoPromotedWorkflow: WorkflowEntry | undefined;
@@ -4987,12 +5233,15 @@ serve(async (req) => {
       /\bgenerate pitch\b/i.test(lowerText) ||
       /\bplaylist pitch workflow\b/i.test(lowerText);
     // Deterministic business routing:
+    // - explicit Credit Guardian ingest ("add X to credit guardian", etc.) => drive_ingest FIRST
     // - "add $X income/deduction" => generate_tax_docs (force add_manual_income/deduction tool)
     // - "prepare taxes" / "file taxes" => generate_tax_docs (higher priority than query_cc_tax)
     // - generic tax queries => CC Tax
     // - new/blank client file build => Credit Compass
     // - existing client progress/update => Credit Guardian strategy path
-    if (manualEntryIntent && IMPLEMENTED_WORKFLOW_KEYS.has("generate_tax_docs")) {
+    if (explicitCgIngestIntent && IMPLEMENTED_WORKFLOW_KEYS.has("drive_ingest")) {
+      autoPromotedWorkflow = SYNTHETIC_DRIVE_INGEST;
+    } else if (manualEntryIntent && IMPLEMENTED_WORKFLOW_KEYS.has("generate_tax_docs")) {
       autoPromotedWorkflow = SYNTHETIC_GENERATE_TAX_DOCS;
     } else if (taxDocIntent && IMPLEMENTED_WORKFLOW_KEYS.has("generate_tax_docs")) {
       autoPromotedWorkflow = SYNTHETIC_GENERATE_TAX_DOCS;
@@ -5014,7 +5263,10 @@ serve(async (req) => {
       const intentWorkflows = await fetchWorkflowRegistry();
       const { chosen: intentChosen } = _matchWorkflows(intentArg, intentWorkflows);
       if (intentChosen && IMPLEMENTED_WORKFLOW_KEYS.has(intentChosen.key)) {
-        autoPromotedWorkflow = intentChosen;
+        // Explicit CG ingest beats registry substring matches (e.g. "credit" → wrong workflow).
+        if (!(explicitCgIngestIntent && intentChosen.key !== "drive_ingest")) {
+          autoPromotedWorkflow = intentChosen;
+        }
       }
       if (!intentChosen && taxDocIntent && IMPLEMENTED_WORKFLOW_KEYS.has("generate_tax_docs")) {
         autoPromotedWorkflow = SYNTHETIC_GENERATE_TAX_DOCS;
@@ -5043,6 +5295,10 @@ serve(async (req) => {
           playlistDirectRedo = { track_name: lastPl.track_name, user_vibe: uv };
         }
       }
+    }
+
+    if (explicitCgIngestIntent && IMPLEMENTED_WORKFLOW_KEYS.has("drive_ingest")) {
+      autoPromotedWorkflow = SYNTHETIC_DRIVE_INGEST;
     }
 
     if (playlistDirectRedo) {
@@ -5091,14 +5347,57 @@ serve(async (req) => {
     }
 
     if (autoPromotedWorkflow) {
+      const dCredit = inferCreditWorkflowKey(lowerText);
+      const extractedCgName = extractCreditGuardianClientNameForIngest(text);
+      const aliasProbe = extractedCgName ? resolveDriveIngestFilterKey(extractedCgName) : { key: undefined as string | undefined, usedAlias: false };
       console.log("[AUTO_PROMOTE] Routing to Lane 1", {
         taskId,
         workflowKey: autoPromotedWorkflow.key,
+        detected_explicit_credit_guardian_command: explicitCgIngestIntent,
+        routing_branch: explicitCgIngestIntent && autoPromotedWorkflow.key === "drive_ingest" ? "deterministic_direct" : "heuristic_auto",
+        confidence_score: dCredit.confidence,
+        client_name_extracted: extractedCgName,
+        used_alias_match: aliasProbe.usedAlias,
+        final_execution_mode:
+          explicitCgIngestIntent && autoPromotedWorkflow.key === "drive_ingest" ? "deterministic_direct" : "heuristic_auto",
       });
+      console.log(
+        JSON.stringify({
+          ts: Date.now(),
+          event: "credit_guardian_routing",
+          message_text: text.slice(0, 500),
+          detected_explicit_credit_guardian_command: explicitCgIngestIntent,
+          selected_workflow: autoPromotedWorkflow.key,
+          routing_branch: explicitCgIngestIntent && autoPromotedWorkflow.key === "drive_ingest" ? "deterministic_direct" : "heuristic_auto",
+          confidence_score: dCredit.confidence,
+          client_name_extracted: extractedCgName,
+          used_alias_match: aliasProbe.usedAlias,
+          final_execution_mode:
+            explicitCgIngestIntent && autoPromotedWorkflow.key === "drive_ingest" ? "deterministic_direct" : "heuristic_auto",
+        }),
+      );
       await supabase.from("tasks").update({
         status: "running",
         selected_workflow: autoPromotedWorkflow.key,
-        result_json: { execution_lane: "lane1_do", progress_step: "lane1_auto_promoted", auto_promoted: true },
+        result_json: {
+          execution_lane: "lane1_do",
+          progress_step: "lane1_auto_promoted",
+          auto_promoted: true,
+          credit_routing: {
+            detected_explicit_credit_guardian_command: explicitCgIngestIntent,
+            selected_workflow: autoPromotedWorkflow.key,
+            routing_branch: explicitCgIngestIntent && autoPromotedWorkflow.key === "drive_ingest" ? "deterministic_direct" : "heuristic_auto",
+            confidence_score: dCredit.confidence,
+            client_name_extracted: extractedCgName,
+            used_alias_match: aliasProbe.usedAlias,
+            final_execution_mode:
+              explicitCgIngestIntent && autoPromotedWorkflow.key === "drive_ingest" ? "deterministic_direct" : "heuristic_auto",
+            final_outcome:
+              explicitCgIngestIntent && autoPromotedWorkflow.key === "drive_ingest"
+                ? null
+                : undefined,
+          },
+        },
       }).eq("id", taskId);
       try {
         await Promise.race([
@@ -5108,6 +5407,7 @@ serve(async (req) => {
             allowTools: true,
             workflowKey: autoPromotedWorkflow.key,
             sessionModel: session.active_model as "grok" | "gemini" | "chatgpt",
+            explicitCreditGuardianIngest: explicitCgIngestIntent && autoPromotedWorkflow.key === "drive_ingest",
           }),
           new Promise<never>((_, reject) => setTimeout(() => reject(new Error("TIMEOUT")), 55000)),
         ]);
@@ -5717,9 +6017,17 @@ serve(async (req) => {
       const timeoutPromise = new Promise<never>((_, reject) =>
         setTimeout(() => reject(new Error("TIMEOUT")), LOOP_TIMEOUT_MS)
       );
+      const explicitCgForDo = isExplicitCreditGuardianIngestIntent(doArg.toLowerCase());
       try {
         await Promise.race([
-          executeAgenticLoop(chatId, doArg, { taskId, lane: "lane1_do", allowTools: true, workflowKey: chosen!.key, sessionModel: session.active_model as "grok" | "gemini" | "chatgpt" }),
+          executeAgenticLoop(chatId, doArg, {
+            taskId,
+            lane: "lane1_do",
+            allowTools: true,
+            workflowKey: chosen!.key,
+            sessionModel: session.active_model as "grok" | "gemini" | "chatgpt",
+            explicitCreditGuardianIngest: chosen!.key === "drive_ingest" && explicitCgForDo,
+          }),
           timeoutPromise,
         ]);
       } catch (loopErr) {
@@ -5749,6 +6057,7 @@ serve(async (req) => {
       "what's the best way", "how should i handle",
     ];
     const isAutonomousRequest =
+      !explicitCgIngestIntent &&
       !hasExecutionIntent &&
       !text.toLowerCase().startsWith("/do") &&
       !text.toLowerCase().startsWith("/") &&
@@ -5805,7 +6114,7 @@ serve(async (req) => {
     // ══════════════════════════════════════════════════════════
     // NL INTENT CLASSIFICATION — auto-promote to Lane 1 if Gemini detects execution intent
     // ══════════════════════════════════════════════════════════
-    if (!text.startsWith("/") && !hasExecutionIntent && !isAutonomousRequest) {
+    if (!text.startsWith("/") && !hasExecutionIntent && !isAutonomousRequest && !explicitCgIngestIntent) {
       const nlWorkflows = await fetchWorkflowRegistry();
       const nlMatch = await classifyNaturalLanguageIntent(text, nlWorkflows);
       if (nlMatch) {

@@ -10,7 +10,7 @@
     "lint": "eslint .",
     "preview": "vite preview",
     "test": "vitest run",
-    "test:deno": "deno test supabase/functions/_shared/creditKnowledgeRetrieval_test.ts --allow-env",
+    "test:deno": "deno test supabase/functions/_shared/creditDecisionEngine_test.ts supabase/functions/_shared/driveClientAlias_test.ts supabase/functions/_shared/explicitCgIngestOutcome_test.ts supabase/functions/_shared/explicitCgTelegramStructuredOutput_test.ts supabase/functions/_shared/creditGuardianExplicitRoute_integration_test.ts supabase/functions/_shared/creditKnowledgeRetrieval_test.ts --allow-env",
     "test:watch": "vitest",
     "regression:build": "npm run typecheck && vite build",
     "typecheck": "tsc --noEmit -p tsconfig.app.json"
