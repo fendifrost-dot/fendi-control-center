@@ -16,9 +16,8 @@ const DRIVE_FOLDER_ID = RAW_DRIVE_FOLDER.includes("/folders/")
   : RAW_DRIVE_FOLDER;
 
 /** When true, every direct subfolder of DRIVE_FOLDER_ID is treated as a credit client (no "CREDIT" in name required). */
-const DEDICATED_CREDIT_ROOT =
-  Deno.env.get("DRIVE_CREDIT_ROOT_IS_DEDICATED") === "1" ||
-  Deno.env.get("DRIVE_CREDIT_ROOT_IS_DEDICATED") === "true";
+const _rawDedicated = (Deno.env.get("DRIVE_CREDIT_ROOT_IS_DEDICATED") ?? "").trim().toLowerCase();
+const DEDICATED_CREDIT_ROOT = _rawDedicated === "1" || _rawDedicated === "true";
 
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
 const SUPABASE_SERVICE_ROLE_KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
