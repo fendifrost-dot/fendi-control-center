@@ -49,10 +49,18 @@
 
 **File:** `.env.example` — comments for `DRIVE_FOLDER_ID`, `Google_Cloud_Key`, `DRIVE_CREDIT_ROOT_IS_DEDICATED`.
 
+### 6. Unified Client Intelligence Layer (credit)
+
+**Files:** `supabase/functions/_shared/unifiedClientIntelligence.ts`, `telegram-webhook` (`executeAgenticLoop`)
+
+- Resolves a client name across **Hub** (`fuzzyClientSearch`), **Credit Guardian** (`get_clients`, `get_client_detail`, `get_documents`), and **Drive** (subfolders of `DRIVE_FOLDER_ID`).
+- Emits **recommended next action** (e.g. `ingest_drive`, `run_guardian_analysis`, `generate_disputes`, `generate_rebuttal`) from heuristics — does **not** remove or replace existing workflows; **augments** `docContext` for credit workflows so the model is state-aware.
+
 ### Git commits (local `main`; push/rebase with `origin` as needed)
 
 - `7f8d416` — CG name resolution, autonomous routing, case memory migration, `creditDecisionEngine.ts`
 - `6e142d8` — Dedicated credit root + drive ingest policy + “add to CG” intents
+- `85d8c1e` — Unified Client Intelligence layer (Hub + CG + Drive grounding in agentic loop)
 
 ---
 
@@ -111,6 +119,7 @@ supabase/functions/ingest-drive-clients/index.ts
 supabase/functions/analyze-credit-strategy/index.ts
 supabase/functions/_shared/creditGuardian.ts
 supabase/functions/_shared/creditDecisionEngine.ts
+supabase/functions/_shared/unifiedClientIntelligence.ts
 supabase/functions/_shared/driveFolderPolicy.ts
 supabase/migrations/20260411120000_credit_case_memory.sql
 docs/FAIRWAY_FIXER_INTEGRATION.md (CG API contract)
