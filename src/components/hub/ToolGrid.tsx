@@ -1,4 +1,4 @@
-import { TOOL_REGISTRY } from "./toolRegistry";
+import { TOOL_REGISTRY } from "@/lib/hubTools";
 import { ToolTile } from "./ToolTile";
 
 export function ToolGrid() {

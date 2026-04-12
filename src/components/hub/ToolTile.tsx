@@ -1,5 +1,5 @@
 import { Link } from "react-router-dom";
-import type { ToolTileData } from "./toolRegistry";
+import type { ToolTileData } from "@/lib/hubTools";
 
 const statusBadge: Record<string, { label: string; className: string }> = {
   beta: { label: "Beta", className: "bg-yellow-500/20 text-yellow-300" },
@@ -30,8 +30,23 @@ export function ToolTile({ tool }: { tool: ToolTileData }) {
   );
 
   if (tool.external) {
+    if (tool.urlMissing || !tool.route) {
+      return (
+        <div
+          className="cursor-not-allowed rounded-lg opacity-60"
+          title="Configure the Vite env URL for this tool"
+        >
+          {card}
+        </div>
+      );
+    }
     return (
-      <a href={tool.route} target="_blank" rel="noreferrer" className="focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring rounded-lg">
+      <a
+        href={tool.route}
+        target="_blank"
+        rel="noreferrer"
+        className="focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring rounded-lg"
+      >
         {card}
       </a>
     );
