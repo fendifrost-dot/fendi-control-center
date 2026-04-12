@@ -624,7 +624,7 @@ serve(async (req: Request) => {
     const driveResults: IngestResult[] = [];
 
     // === Gemini Flash parallel parser (with Claude fallback) ===
-    const useGemini = !!Deno.env.get("GEMINI_API_KEY");
+    const useGemini = !!Deno.env.get("Frost_Gemini");
     console.log(`[ingest] Parser: ${useGemini ? "Gemini Flash (parallel)" : "Claude Sonnet (sequential fallback)"}`);
 
     if (useGemini) {
