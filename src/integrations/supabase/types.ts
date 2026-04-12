@@ -231,6 +231,39 @@ export type Database = {
         }
         Relationships: []
       }
+      credit_knowledge_base: {
+        Row: {
+          case_type: string | null
+          content: string
+          created_at: string
+          embedding: string | null
+          id: string
+          metadata: Json | null
+          trigger: string | null
+          type: string
+        }
+        Insert: {
+          case_type?: string | null
+          content: string
+          created_at?: string
+          embedding?: string | null
+          id?: string
+          metadata?: Json | null
+          trigger?: string | null
+          type: string
+        }
+        Update: {
+          case_type?: string | null
+          content?: string
+          created_at?: string
+          embedding?: string | null
+          id?: string
+          metadata?: Json | null
+          trigger?: string | null
+          type?: string
+        }
+        Relationships: []
+      }
       dispute_letters: {
         Row: {
           account_name: string | null
