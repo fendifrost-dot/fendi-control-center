@@ -349,7 +349,9 @@ export function buildTriggerEvidenceContext(
 }
 
 function sortTriggersByPriority(ids: string[]): string[] {
-  const order = new Map<string, number>(KB_TRIGGER_PRIORITY.map((t, i) => [t, i]));
+  const order = new Map<string, number>(
+    KB_TRIGGER_PRIORITY.map((t, i): [string, number] => [t, i]),
+  );
   return [...new Set(ids)].sort((a, b) => {
     const ia = order.get(a) ?? 99;
     const ib = order.get(b) ?? 99;
@@ -854,6 +856,11 @@ function buildQueryText(intent: RetrieveKnowledgeIntent, caseState: CaseStateFor
 
 /**
  * Calls public.match_credit_knowledge RPC. Safe if RPC missing — returns empty.
+ *
+ * **`CREDIT_RPC_RETRIEVAL_DISABLED=1`:** skips this RPC path and the anchor RPC in `fetchKbViolationAnchorLine`.
+ * The standalone **`credit-knowledge-retrieval`** edge function (embedding + `match_credit_knowledge`) honors the **same** flag.
+ * **Not** applied to HTTP retrieval — see `retrieveRelevantKnowledge` (`CREDIT_RETRIEVAL_URL`).
+ * @see docs/CREDIT_KB_RPC_RETRIEVAL_DISABLED.md
  */
 export async function retrieveKnowledgeFromRpc(
   supabase: SupabaseClient,
@@ -928,6 +935,7 @@ function firstRpcRowContentIgnoringSimilarity(rows: RpcRow[] | null): string | n
  * Secondary anchor attempt: targeted RPC row(s) for violation_logic + primary trigger — no similarity cut on rows.
  * Falls back to a second payload without `filter_type` if the RPC omits that parameter.
  */
+/** Secondary `match_credit_knowledge` RPC for anchor line — same `CREDIT_RPC_RETRIEVAL_DISABLED` as `retrieveKnowledgeFromRpc`. */
 async function fetchKbViolationAnchorLine(
   supabase: SupabaseClient,
   primaryTrigger: string,

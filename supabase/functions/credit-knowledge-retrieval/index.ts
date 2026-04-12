@@ -6,6 +6,34 @@ const corsHeaders = {
   "Access-Control-Allow-Headers": "authorization, x-client-info, apikey, content-type",
 };
 
+/**
+ * When set to `"1"`, **all** `match_credit_knowledge` RPC usage for credit KB is skipped:
+ * - this edge function (embedding-based RPC), and
+ * - `_shared/creditKnowledgeRetrieval.ts` (text RPC + anchor RPC).
+ * Does **not** disable HTTP retrieval (`CREDIT_RETRIEVAL_URL` / inline) in the shared module.
+ * @see docs/CREDIT_KB_RPC_RETRIEVAL_DISABLED.md
+ */
+function isCreditKbRpcRetrievalDisabled(): boolean {
+  return Deno.env.get("CREDIT_RPC_RETRIEVAL_DISABLED") === "1";
+}
+
+const EMPTY_RETRIEVAL = {
+  disputeExamples: [] as string[],
+  analysisPatterns: [] as string[],
+  violationLogic: [] as string[],
+};
+
+function jsonDisabledResponse(): Response {
+  const body = {
+    ...EMPTY_RETRIEVAL,
+    credit_kb_rpc_retrieval_disabled: true,
+    retrieval_disabled_reason: "CREDIT_RPC_RETRIEVAL_DISABLED=1 (no match_credit_knowledge RPC; embedding path skipped)",
+  };
+  return new Response(JSON.stringify(body), {
+    headers: { ...corsHeaders, "Content-Type": "application/json" },
+  });
+}
+
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
 const SUPABASE_SERVICE_ROLE_KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
 const OPENAI_API_KEY = Deno.env.get("OPENAI_API_KEY")!;
@@ -56,6 +84,18 @@ serve(async (req) => {
   if (req.method === "OPTIONS") return new Response(null, { headers: corsHeaders });
 
   try {
+    if (isCreditKbRpcRetrievalDisabled()) {
+      console.log(
+        JSON.stringify({
+          ts: Date.now(),
+          event: "credit_kb_rpc_retrieval_skipped",
+          function: "credit-knowledge-retrieval",
+          reason: "CREDIT_RPC_RETRIEVAL_DISABLED",
+        }),
+      );
+      return jsonDisabledResponse();
+    }
+
     const body: RetrievalRequest = await req.json();
     const { task, intentSummary, caseStateSummary, maxItems = 8 } = body;
 
