@@ -9,7 +9,8 @@ import { Sheet, SheetContent, SheetHeader, SheetTitle } from "@/components/ui/sh
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Switch } from "@/components/ui/switch";
-import { RefreshCw, Zap } from "lucide-react";
+import { Link } from "react-router-dom";
+import { Home, RefreshCw, Zap } from "lucide-react";
 import { useToast } from "@/hooks/use-toast";
 import { RequireSession } from "@/components/auth/RequireSession";
 
@@ -125,8 +126,18 @@ export default function Ops() {
     <RequireSession>
       <div className="min-h-screen bg-background p-4">
       {/* Header */}
-      <div className="flex items-center justify-between mb-3">
-        <h1 className="text-2xl font-bold text-foreground">Ops Dashboard</h1>
+      <div className="flex flex-wrap items-center justify-between gap-3 mb-3">
+        <div className="flex flex-wrap items-center gap-3">
+          <Link
+            to="/"
+            className="inline-flex items-center gap-1.5 text-sm text-muted-foreground transition-colors hover:text-foreground"
+          >
+            <Home className="h-4 w-4" />
+            Control Hub
+          </Link>
+          <span className="text-border hidden sm:inline">|</span>
+          <h1 className="text-2xl font-bold text-foreground">Ops Dashboard</h1>
+        </div>
         <div className="flex items-center gap-3">
           <span className="text-xs text-muted-foreground">Last: {fmtTime(lastRefreshed)}</span>
           <div className="flex items-center gap-1.5">

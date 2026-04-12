@@ -14,7 +14,6 @@ import {
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import type { Session } from "@supabase/supabase-js";
 import { ArrowLeft, CalendarPlus } from "lucide-react";
 
 const DEFAULT_YEARS = [2022, 2023, 2024, 2025];
@@ -33,19 +32,12 @@ function displayStatus(
 
 export default function ClientReturnsPage() {
   const { clientId } = useParams<{ clientId: string }>();
-  const [session, setSession] = useState<Session | null>(null);
   const [clientName, setClientName] = useState("");
   const [returnsMap, setReturnsMap] = useState<Record<number, Record<string, unknown>>>({});
   const [docCounts, setDocCounts] = useState<Record<number, number>>({});
   const [extraOpen, setExtraOpen] = useState(false);
   const [extraYear, setExtraYear] = useState("");
   const [extras, setExtras] = useState<number[]>([]);
-
-  useEffect(() => {
-    supabase.auth.getSession().then(({ data }) => setSession(data.session));
-    const { data: sub } = supabase.auth.onAuthStateChange((_e, s) => setSession(s));
-    return () => sub.subscription.unsubscribe();
-  }, []);
 
   const load = useCallback(async () => {
     if (!clientId) return;
@@ -115,10 +107,6 @@ export default function ClientReturnsPage() {
     setExtras((e) => (e.includes(y) ? e : [...e, y]));
     setExtraYear("");
     setExtraOpen(false);
-  }
-
-  if (!session) {
-    return <p className="text-muted-foreground">Sign in to continue.</p>;
   }
 
   if (!clientId) return null;

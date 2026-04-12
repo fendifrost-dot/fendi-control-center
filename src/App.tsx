@@ -5,6 +5,7 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { ThemeProvider } from "next-themes";
 import { BrowserRouter, Routes, Route, Navigate } from "react-router-dom";
 import { TaxShell } from "@/components/tax/TaxShell";
+import { RequireSession } from "@/components/auth/RequireSession";
 import Index from "./pages/Index";
 import HubHomePage from "./pages/HubHomePage";
 import Ops from "./pages/Ops";
@@ -31,7 +32,13 @@ const App = () => (
             <Route path="/test" element={<Test />} />
             <Route path="/tax" element={<Navigate to="/clients" replace />} />
             <Route path="/tax/*" element={<Navigate to="/clients" replace />} />
-            <Route element={<TaxShell />}>
+            <Route
+              element={
+                <RequireSession>
+                  <TaxShell />
+                </RequireSession>
+              }
+            >
               <Route path="/clients" element={<ClientsPage />} />
               <Route path="/clients/:clientId" element={<ClientReturnsPage />} />
               <Route path="/clients/:clientId/:year" element={<YearWorkspacePage />} />

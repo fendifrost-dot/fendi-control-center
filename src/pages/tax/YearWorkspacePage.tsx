@@ -14,7 +14,6 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
-import type { Session } from "@supabase/supabase-js";
 import { ArrowLeft, FileText, Loader2, Trash2, Upload } from "lucide-react";
 import { useToast } from "@/hooks/use-toast";
 import type { Database, Json } from "@/integrations/supabase/types";
@@ -37,7 +36,6 @@ export default function YearWorkspacePage() {
   const year = yearParam ? parseInt(yearParam, 10) : NaN;
   const { toast } = useToast();
 
-  const [session, setSession] = useState<Session | null>(null);
   const [clientName, setClientName] = useState("");
   const [taxReturnId, setTaxReturnId] = useState<string | null>(null);
   const [taxRow, setTaxRow] = useState<Record<string, unknown> | null>(null);
@@ -53,12 +51,6 @@ export default function YearWorkspacePage() {
   const [formRows, setFormRows] = useState<
     { id: string; form_type: string; pdf_url: string | null }[]
   >([]);
-
-  useEffect(() => {
-    supabase.auth.getSession().then(({ data }) => setSession(data.session));
-    const { data: sub } = supabase.auth.onAuthStateChange((_e, s) => setSession(s));
-    return () => sub.subscription.unsubscribe();
-  }, []);
 
   const loadDocs = useCallback(async () => {
     if (!clientId || !Number.isFinite(year)) return;
@@ -285,10 +277,6 @@ export default function YearWorkspacePage() {
       return null;
     }
   })();
-
-  if (!session) {
-    return <p className="text-muted-foreground">Sign in to continue.</p>;
-  }
 
   if (!clientId || !Number.isFinite(year)) {
     return <p className="text-destructive">Invalid year.</p>;

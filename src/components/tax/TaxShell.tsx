@@ -1,6 +1,6 @@
 import { Link, Outlet } from "react-router-dom";
 import { Button } from "@/components/ui/button";
-import { Moon, Sun, LogOut } from "lucide-react";
+import { Home, Moon, Sun, LogOut } from "lucide-react";
 import { useTheme } from "next-themes";
 import { useCallback, useEffect, useState } from "react";
 import { supabase } from "@/integrations/supabase/client";
@@ -23,7 +23,14 @@ export function TaxShell() {
     <div className="min-h-screen bg-background text-foreground">
       <header className="sticky top-0 z-40 border-b border-border/80 bg-background/95 backdrop-blur supports-[backdrop-filter]:bg-background/80">
         <div className="container flex h-14 max-w-6xl items-center justify-between gap-4 px-4">
-          <nav className="flex items-center gap-6">
+          <nav className="flex flex-wrap items-center gap-4 sm:gap-6">
+            <Link
+              to="/"
+              className="flex items-center gap-1.5 text-sm text-muted-foreground transition-colors hover:text-foreground"
+            >
+              <Home className="h-4 w-4" />
+              Home
+            </Link>
             <Link to="/clients" className="text-lg font-semibold tracking-tight">
               Tax Prep
             </Link>
