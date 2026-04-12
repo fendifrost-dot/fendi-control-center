@@ -1,6 +1,6 @@
 import { serve } from 'https://deno.land/std@0.168.0/http/server.ts';
 import { createClient, type SupabaseClient } from 'https://esm.sh/@supabase/supabase-js@2.49.1';
-import { findClientTaxFolder, listFilesInFolder, downloadFile } from '../_shared/googleDriveRead.ts';
+import { findClientTaxFolder, listFilesInFolder, listFilesRecursive, downloadFile } from '../_shared/googleDriveRead.ts';
 import { upsertTaxReturn } from '../_shared/taxReturns.ts';
 import { classifyDocument, type DocClass, type DocClassification } from '../_shared/docClassifier.ts';
 import {
@@ -597,7 +597,7 @@ serve(async (req: Request) => {
     const { folderId, folderName } = folderResult;
     console.log(`[ingest-tax-documents] Found folder: ${folderName} (${folderId})`);
 
-    const files = await listFilesInFolder(folderId);
+    const files = await listFilesRecursive(folderId);
     console.log(`[ingest-tax-documents] Found ${files.length} files in folder`);
 
     if (files.length === 0) {
