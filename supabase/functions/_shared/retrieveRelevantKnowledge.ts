@@ -45,9 +45,9 @@ function normalizePayload(j: Record<string, unknown>, maxItems: number): Retriev
   const n = Math.ceil(per / 3) + 3;
   return clampArrays(
     {
-      disputeExamples: j.disputeExamples ?? j.dispute_examples,
-      analysisPatterns: j.analysisPatterns ?? j.analysis_patterns,
-      violationLogic: j.violationLogic ?? j.violation_logic,
+      disputeExamples: (j.disputeExamples ?? j.dispute_examples) as string[] | undefined,
+      analysisPatterns: (j.analysisPatterns ?? j.analysis_patterns) as string[] | undefined,
+      violationLogic: (j.violationLogic ?? j.violation_logic) as string[] | undefined,
     },
     n,
   );

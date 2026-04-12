@@ -1419,6 +1419,21 @@ export type Database = {
           trigger_phrases: Json
         }[]
       }
+      match_credit_knowledge: {
+        Args: {
+          filter_type?: string
+          match_count?: number
+          match_threshold?: number
+          query_embedding: string
+        }
+        Returns: {
+          content: string
+          id: string
+          metadata: Json
+          similarity: number
+          type: string
+        }[]
+      }
     }
     Enums: {
       [_ in never]: never
