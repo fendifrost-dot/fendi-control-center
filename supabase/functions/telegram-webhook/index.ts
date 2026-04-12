@@ -17,6 +17,7 @@ import {
   tryParseManualDeductionMessage,
   tryParseManualIncomeMessage,
 } from "../_shared/taxTelegramParse.ts";
+import { inferCreditWorkflowKey, shouldAutoExecuteCreditIntent } from "../_shared/creditDecisionEngine.ts";
 
 const BOT_TOKEN = Deno.env.get("FendiAIbot")!;
 const CHAT_ID = Deno.env.get("TELEGRAM_CHAT_ID") ?? "";
@@ -359,6 +360,30 @@ const SYNTHETIC_CREDIT_ANALYSIS_AND_DISPUTES: WorkflowEntry = {
   trigger_phrases: ["generate dispute", "dispute letter", "pull report and dispute"],
   tools: ["analyze_credit_strategy", "generate_dispute_letters"],
 };
+
+const SYNTHETIC_DRIVE_INGEST: WorkflowEntry = {
+  key: "drive_ingest",
+  name: "Drive ingest (Credit Guardian)",
+  description: "Scan Google Drive client folders and import timeline events into Credit Guardian.",
+  trigger_phrases: ["sync drive", "ingest drive", "import drive"],
+  tools: ["ingest_drive_clients"],
+};
+
+/** Lane 1 auto-route: deterministic credit / drive workflows without /do (see creditDecisionEngine). */
+function resolveAutoCreditWorkflow(lowerText: string): WorkflowEntry | undefined {
+  if (!shouldAutoExecuteCreditIntent(lowerText)) return undefined;
+  const d = inferCreditWorkflowKey(lowerText);
+  if (d.workflowKey === "credit_analysis_and_disputes" && IMPLEMENTED_WORKFLOW_KEYS.has("credit_analysis_and_disputes")) {
+    return SYNTHETIC_CREDIT_ANALYSIS_AND_DISPUTES;
+  }
+  if (d.workflowKey === "drive_ingest" && IMPLEMENTED_WORKFLOW_KEYS.has("drive_ingest")) {
+    return SYNTHETIC_DRIVE_INGEST;
+  }
+  if (d.workflowKey === "analyze_credit_strategy" && IMPLEMENTED_WORKFLOW_KEYS.has("analyze_credit_strategy")) {
+    return SYNTHETIC_ANALYZE_CREDIT_STRATEGY;
+  }
+  return undefined;
+}
 
 // ─── Workflow key aliases (deprecated → canonical) ──────────
 // Routes old keys to new canonical handlers. "/do analyze_client_credit" → analyze_credit_strategy
@@ -2896,7 +2921,9 @@ function extractPlaylistTrackName(userMessage: string, conversationContext: stri
 
 function extractClientNameForCreditCommand(userMessage: string, conversationContext: string): string | null {
   const combined = `${userMessage}\n${conversationContext}`;
-  const explicit = userMessage.match(/\banaly[sz]e\s+(.+?)\s+(?:new\s+)?(?:equifax|experian|transunion)?\s*credit\s+report\b/i);
+  const explicit = userMessage.match(
+    /\banaly[sz]e\s+(.+?)\s+(?:new\s+)?(?:equifax|experian|transunion)?\s*credit\s+reports?\b/i,
+  );
   if (explicit?.[1]) {
     const name = explicit[1].replace(/\b(my|the|a)\b/gi, "").trim();
     if (name.length >= 2 && name.length <= 80) return name;
@@ -2907,6 +2934,18 @@ function extractClientNameForCreditCommand(userMessage: string, conversationCont
     if (name.length >= 2 && name.length <= 80) return name;
   }
   return null;
+}
+
+/** Infer client folder for Drive ingest (deterministic path before LLM). */
+function extractClientNameForDriveCommand(userMessage: string, conversationContext: string): string | null {
+  const forMatch = userMessage.match(
+    /\b(?:for|sync|ingest|folder|client)\s+([A-Za-z][A-Za-z0-9\s.'-]{1,78})\b/i,
+  );
+  if (forMatch?.[1]) {
+    const name = forMatch[1].replace(/\b(the|a|my|our)\b/gi, "").trim();
+    if (name.length >= 2 && name.length <= 80) return name;
+  }
+  return extractClientNameForCreditCommand(userMessage, conversationContext);
 }
 
 function isNewClientCreditIntent(lowerText: string): boolean {
@@ -3372,6 +3411,10 @@ async function executeAgenticLoop(chatId: string, userMessage: string, opts: { t
     matchedWorkflow = SYNTHETIC_CREDIT_ANALYSIS_AND_DISPUTES;
     console.log(JSON.stringify({ ts: Date.now(), event: "workflow_synthetic_fallback", key: opts.workflowKey, taskId: opts.taskId }));
   }
+  if (!matchedWorkflow && opts.workflowKey === "drive_ingest" && IMPLEMENTED_WORKFLOW_KEYS.has("drive_ingest")) {
+    matchedWorkflow = SYNTHETIC_DRIVE_INGEST;
+    console.log(JSON.stringify({ ts: Date.now(), event: "workflow_synthetic_fallback", key: opts.workflowKey, taskId: opts.taskId }));
+  }
   // Synthetic fallback - if registry missing analyze_client_credit, use analyze_credit_strategy
   if (!matchedWorkflow && opts.workflowKey === "analyze_client_credit" && IMPLEMENTED_WORKFLOW_KEYS.has("analyze_credit_strategy")) {
     matchedWorkflow = SYNTHETIC_ANALYZE_CREDIT_STRATEGY as any;
@@ -3430,6 +3473,21 @@ async function executeAgenticLoop(chatId: string, userMessage: string, opts: { t
       result = {
         text: "",
         toolCalls: [{ name: "analyze_credit_strategy", args: { client_name: inferredClient } }],
+      };
+    } else {
+      result = model === "grok"
+        ? await (anthropicApiKeyConfigured()
+          ? agenticClaudeCall(userMessage, docContext, conversationContext, workflowToolNames, opts.workflowKey)
+          : agenticGrokCall(userMessage, docContext, conversationContext, workflowToolNames, opts.workflowKey))
+        : await agenticGeminiCall(userMessage, docContext, conversationContext, workflowToolNames, opts.workflowKey);
+    }
+  } else if (opts.workflowKey === "drive_ingest") {
+    const inferredClient = extractClientNameForDriveCommand(userMessage, conversationContext);
+    if (inferredClient) {
+      logEvent({ event: "drive_ingest_client_inferred", taskId: opts.taskId, inferredClient });
+      result = {
+        text: "",
+        toolCalls: [{ name: "ingest_drive_clients", args: { client_name: inferredClient } }],
       };
     } else {
       result = model === "grok"
@@ -4804,6 +4862,8 @@ serve(async (req) => {
     };
     const hasExecutionIntent = hasPlainEnglishExecutionIntent(lowerText);
 
+    const pickedCreditWorkflow = resolveAutoCreditWorkflow(lowerText);
+
     let autoPromotedWorkflow: WorkflowEntry | undefined;
     /** Bypass Lane 1 LLM for "run it again" — reuse saved vibe from last_hub research. */
     let playlistDirectRedo: { track_name: string; user_vibe: string } | null = null;
@@ -4829,14 +4889,6 @@ serve(async (req) => {
       /\bmanual\s+(income|deduction|entry)\b/i.test(lowerText) ||
       /\brecord\b.*\$([\d,.]+).*\b(income|revenue|earning)/i.test(lowerText) ||
       /\b(business\s+income|1099|side\s+job|freelance|cash\s+income)\b.*\$?\d/i.test(lowerText);
-    const creditIntent =
-      /\banalyze\b.*\bcredit\b/i.test(lowerText) ||
-      /\bcredit strategy\b/i.test(lowerText) ||
-      /\bdispute strategy\b/i.test(lowerText) ||
-      /\bdispute\s+letter/i.test(lowerText) ||
-      /\bpull\b.*\breport\b/i.test(lowerText) ||
-      /\bcredit\b.*\bdispute/i.test(lowerText) ||
-      /\bexperian\b.*\breport/i.test(lowerText);
     const playlistPitchIntent =
       /\bresearch playlists?\b/i.test(lowerText) ||
       /\bgenerate pitch\b/i.test(lowerText) ||
@@ -4855,8 +4907,10 @@ serve(async (req) => {
       autoPromotedWorkflow = SYNTHETIC_QUERY_CC_TAX;
     } else if (newClientIntent && IMPLEMENTED_WORKFLOW_KEYS.has("query_credit_compass")) {
       autoPromotedWorkflow = SYNTHETIC_QUERY_CREDIT_COMPASS;
-    } else if ((existingClientIntent || creditIntent) && IMPLEMENTED_WORKFLOW_KEYS.has("analyze_credit_strategy")) {
+    } else if (existingClientIntent && IMPLEMENTED_WORKFLOW_KEYS.has("analyze_credit_strategy")) {
       autoPromotedWorkflow = SYNTHETIC_ANALYZE_CREDIT_STRATEGY;
+    } else if (pickedCreditWorkflow) {
+      autoPromotedWorkflow = pickedCreditWorkflow;
     } else if (playlistPitchIntent && IMPLEMENTED_WORKFLOW_KEYS.has("playlist_pitch_workflow")) {
       autoPromotedWorkflow = SYNTHETIC_PLAYLIST_PITCH_WORKFLOW;
     }
@@ -4875,8 +4929,10 @@ serve(async (req) => {
         autoPromotedWorkflow = SYNTHETIC_QUERY_CC_TAX;
       } else if (!intentChosen && newClientIntent && IMPLEMENTED_WORKFLOW_KEYS.has("query_credit_compass")) {
         autoPromotedWorkflow = SYNTHETIC_QUERY_CREDIT_COMPASS;
-      } else if (!intentChosen && (existingClientIntent || creditIntent) && IMPLEMENTED_WORKFLOW_KEYS.has("analyze_credit_strategy")) {
+      } else if (!intentChosen && existingClientIntent && IMPLEMENTED_WORKFLOW_KEYS.has("analyze_credit_strategy")) {
         autoPromotedWorkflow = SYNTHETIC_ANALYZE_CREDIT_STRATEGY;
+      } else if (!intentChosen && pickedCreditWorkflow) {
+        autoPromotedWorkflow = pickedCreditWorkflow;
       } else if (!intentChosen && playlistPitchIntent && IMPLEMENTED_WORKFLOW_KEYS.has("playlist_pitch_workflow")) {
         autoPromotedWorkflow = SYNTHETIC_PLAYLIST_PITCH_WORKFLOW;
       } else if (!intentChosen && IMPLEMENTED_WORKFLOW_KEYS.has("find_playlist_opportunities")) {
@@ -5727,7 +5783,7 @@ serve(async (req) => {
       // Fetch workflow registry for context (so assistant can suggest /do commands)
       const workflows = await fetchWorkflowRegistry();
       const workflowContext = workflows.length > 0
-        ? `\n\nAvailable workflows (execute via *run* / *execute* + intent, or \`/do <workflow_key>\`):\n${workflows.map(w => `- ${w.name} (\`${w.key}\`): ${w.trigger_phrases.slice(0, 2).join(", ")}`).join("\n")}`
+        ? `\n\nRegistered workflows (many run automatically from plain English; \`/do\` is optional):\n${workflows.map(w => `- ${w.name} (\`${w.key}\`): ${w.trigger_phrases.slice(0, 2).join(", ")}`).join("\n")}`
         : "";
 
       const assistantSystemPrompt = `You are the ${SYSTEM_IDENTITY}. You serve Fendi Frost as a personal command center assistant.
@@ -5740,10 +5796,10 @@ TWO-LANE RULE â You are in ASSISTANT MODE (Lane 2).
 - DO NOT output tool calls. DO NOT claim a tool was used. DO NOT simulate execution.
 - When the user asks to run or execute something in plain English (e.g. "please run the search", "execute again", "go ahead and run it"), do NOT refuse or say you cannot act. Tell them the system auto-routes phrases like *run*, *execute*, *start*, or *trigger* (e.g. "execute the playlist search again") and that \`/do <workflow_key>\` is optional. Do NOT insist that slash syntax is the only way.
 
-CREDIT ANALYSIS ROUTING: When the user asks about credit reports, credit analysis, credit disputes, or anything related to analyzing a client's credit â suggest /do analyze_client_credit. This is the full pipeline that syncs Drive, ingests documents, and runs Credit Guardian analysis. Do NOT suggest /do client_overview for credit analysis requests..
+CREDIT & DISPUTES (AUTONOMOUS): For credit reports, disputes, bureau responses, comparing pulls, or dispute letters — do NOT tell the user to type slash commands. The execution lane runs automatically when they describe the task (analyze credit, compare reports, generate dispute letters, sync Drive, etc.). If something is unclear (e.g. which client), ask for the missing fact only.
 
 Available commands:
-- /do <workflow> â Execute a workflow (Lane 1)
+- /do <workflow> â Optional explicit workflow (Lane 1); natural-language credit tasks usually auto-execute without this.
 - /status â System status
 - /ping â Connectivity test
 - /workflows â See all registered workflows
