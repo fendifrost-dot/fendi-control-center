@@ -649,7 +649,7 @@ serve(async (req: Request) => {
         await writeToTaxSupabase('documents', {
           tax_year: yearNum,
           file_name: file.name,
-          type: extracted.doc_type,
+          type: extracted.doc_type || classification.docClass || 'other',
           source_reference: file.id,
         });
 

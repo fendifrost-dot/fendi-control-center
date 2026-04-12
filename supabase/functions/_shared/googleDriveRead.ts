@@ -242,7 +242,14 @@ export async function downloadFile(fileId: string, mimeType: string): Promise<{
 
   const buffer = await resp.arrayBuffer();
   const bytes = new Uint8Array(buffer);
-  const base64 = btoa(String.fromCharCode(...bytes));
+  // Chunked base64 to avoid "Maximum call stack size exceeded" on large files
+  let binary = "";
+  const CHUNK = 8192;
+  for (let i = 0; i < bytes.length; i += CHUNK) {
+    const chunk = bytes.subarray(i, Math.min(i + CHUNK, bytes.length));
+    binary += String.fromCharCode.apply(null, Array.from(chunk));
+  }
+  const base64 = btoa(binary);
 
   return { base64, bytes, downloadMime };
 }
