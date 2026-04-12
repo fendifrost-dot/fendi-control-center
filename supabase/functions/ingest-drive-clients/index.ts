@@ -28,6 +28,25 @@ const GEMINI_KEY = Deno.env.get("Frost_Gemini")!;
 
 const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
 
+/** Map display/client names to Drive subfolder names, e.g. {"jabril":"zeus"} — keys and values are case-insensitive. */
+function resolveDriveFolderFilterKey(requested: string | undefined): string | undefined {
+  if (!requested) return undefined;
+  let key = requested.toLowerCase().trim();
+  const raw = Deno.env.get("DRIVE_CLIENT_FOLDER_ALIASES_JSON");
+  if (raw) {
+    try {
+      const map = JSON.parse(raw) as Record<string, string>;
+      const mapped = map[key];
+      if (typeof mapped === "string" && mapped.trim()) {
+        key = mapped.toLowerCase().trim();
+      }
+    } catch {
+      /* ignore invalid JSON */
+    }
+  }
+  return key;
+}
+
 const SUPPORTED_MIMES = new Set([
   "application/pdf",
   "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
@@ -367,7 +386,9 @@ serve(async (req) => {
 
   try {
     const body = await req.json().catch(() => ({}));
-    const filterClientName = body.client_name?.toLowerCase()?.trim();
+    const filterClientName = resolveDriveFolderFilterKey(
+      typeof body.client_name === "string" ? body.client_name : undefined,
+    );
     const maxFiles = parseInt(body.max_files) || 0; // 0 = no limit
 
     console.log("Starting Drive ingestion (Gemini multimodal v3 - per-file dedup)...");
@@ -378,6 +399,11 @@ serve(async (req) => {
 
     const { files: subfolders } = await listSubfolders(DRIVE_FOLDER_ID);
     console.log(`Found ${subfolders?.length || 0} client folders`);
+
+    let skippedAmbiguous = 0;
+    let skippedNotCreditRule = 0;
+    let skippedByClientNameFilter = 0;
+    const folderNamesSample = (subfolders || []).slice(0, 12).map((f: { name: string }) => f.name);
 
     const results: Array<{
       client: string;
@@ -390,10 +416,12 @@ serve(async (req) => {
 
     for (const folder of (subfolders || [])) {
       if (isAmbiguousCreditTaxFolderName(folder.name)) {
+        skippedAmbiguous++;
         console.log(`Skipping ambiguous folder (rename to separate credit vs tax): ${folder.name}`);
         continue;
       }
       if (!shouldIngestCreditSubfolder(folder.name, { dedicatedCreditRoot: DEDICATED_CREDIT_ROOT })) {
+        skippedNotCreditRule++;
         console.log(
           `Skipping folder (not a credit client folder under current rules): ${folder.name} ` +
             `(dedicatedCreditRoot=${DEDICATED_CREDIT_ROOT} — set DRIVE_CREDIT_ROOT_IS_DEDICATED=true if this root is credit-only)`,
@@ -401,6 +429,7 @@ serve(async (req) => {
         continue;
       }
       if (filterClientName && !folder.name.toLowerCase().includes(filterClientName)) {
+        skippedByClientNameFilter++;
         continue;
       }
 
@@ -496,6 +525,30 @@ serve(async (req) => {
       results.push(clientResult);
     }
 
+    const hint = (() => {
+      const n = (subfolders || []).length;
+      if (n === 0) {
+        return "Drive list returned zero subfolders. Check DRIVE_FOLDER_ID (must be the parent folder that contains client subfolders), Shared Drive permissions, and Google_Cloud_Key (Drive API enabled).";
+      }
+      if (!DEDICATED_CREDIT_ROOT && skippedNotCreditRule > 0 && results.length === 0) {
+        return (
+          "Every subfolder was skipped: names must contain the word CREDIT unless you set Edge secret " +
+          "DRIVE_CREDIT_ROOT_IS_DEDICATED=true for a credit-only root (then names like Zeus/Jabril ingest). " +
+          `Sample folder names seen: ${folderNamesSample.join(", ")}`
+        );
+      }
+      if (filterClientName && results.length === 0 && skippedByClientNameFilter > 0) {
+        return (
+          `No folder name contains "${filterClientName}". client_name must match the Google Drive folder name ` +
+          `(e.g. folder "Zeus" → use client_name "zeus", not a display name). Sample names: ${folderNamesSample.join(", ")}`
+        );
+      }
+      if (results.length === 0 && skippedNotCreditRule === 0 && skippedByClientNameFilter === 0) {
+        return "No files processed: folders matched but had no supported files (PDF/DOCX/Google Doc) or all were already ingested (dedup).";
+      }
+      return "";
+    })();
+
     const summary = {
       total_clients: results.length,
       total_files_processed: results.reduce((s, r) => s + r.files_processed, 0),
@@ -503,6 +556,17 @@ serve(async (req) => {
       total_events_pushed: results.reduce((s, r) => s + r.events_pushed, 0),
       total_errors: results.reduce((s, r) => s + r.errors.length, 0),
       clients: results,
+      ingest_diagnostics: {
+        drive_folder_id_suffix: DRIVE_FOLDER_ID.length > 8 ? `…${DRIVE_FOLDER_ID.slice(-8)}` : DRIVE_FOLDER_ID,
+        dedicated_credit_root: DEDICATED_CREDIT_ROOT,
+        subfolders_total: (subfolders || []).length,
+        skipped_ambiguous: skippedAmbiguous,
+        skipped_not_credit_rule: skippedNotCreditRule,
+        skipped_by_client_name_filter: skippedByClientNameFilter,
+        folder_names_sample: folderNamesSample,
+        filter_client_name: filterClientName || null,
+      },
+      ...(hint ? { hint } : {}),
     };
 
     console.log("Ingestion complete:", JSON.stringify(summary, null, 2));

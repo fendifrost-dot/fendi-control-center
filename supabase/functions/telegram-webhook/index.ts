@@ -273,6 +273,40 @@ STRATEGIC NORTH STAR (weigh this in prioritization, advice, and follow-ups — n
 • Evidence: stream counts, playlist names, DMs, and other facts still come only from tools or what the user explicitly gave you. Exploration is *how* you reason, prioritize, and recommend — not fabricating data.
 `.trim();
 
+/** When the user message is about credit/Drive/CG, Lane 2 should not inherit the music growth mission. */
+const CREDIT_CONVERSATION_ADDENDUM = `
+CREDIT / DISPUTE CONTEXT (this message): Stay on credit repair, Credit Guardian, Google Drive ingestion, and bureau disputes only.
+Do NOT pivot to music streaming, FanFuel, playlists, or artist growth unless the user explicitly asked for that.
+Do not joke that credit work “doesn’t vibe” with growth — treat credit ops as first-class.
+`.trim();
+
+function isCreditRelatedUserText(text: string): boolean {
+  const t = text.toLowerCase();
+  return /\b(credit|dispute|bureau|equifax|experian|transunion|tradeline|fico|score|charge-?off|collection|guardian|ingest|drive\s*folder|furnisher|reinsert|611|fcta)\b/i
+    .test(t);
+}
+
+function isCreditWorkflowForSummary(workflowKey?: string): boolean {
+  if (!workflowKey) return false;
+  return (
+    workflowKey === "drive_ingest" ||
+    workflowKey === "analyze_credit_strategy" ||
+    workflowKey === "credit_analysis_and_disputes" ||
+    workflowKey === "analyze_client_credit" ||
+    workflowKey === "query_credit_compass" ||
+    workflowKey === "generate_dispute_letters" ||
+    workflowKey === "generate_dispute_letter"
+  );
+}
+
+const CREDIT_TOOL_SUMMARY_SYSTEM = `You are the ${SYSTEM_IDENTITY}. Summarize credit / Drive / Credit Guardian tool results with strict factual accuracy.
+
+RULES:
+- Do NOT pivot to music marketing, Spotify, SoundCloud, FanFuel, playlists, streams, or “fan growth” unless the tool output is explicitly about that.
+- No “witty take” that dismisses credit work or tells the user to switch topics to music.
+- If ingest_drive_clients returned JSON with ingest_diagnostics or hint, explain those fields (e.g. set DRIVE_CREDIT_ROOT_IS_DEDICATED, client_name must match Drive folder name, use aliases in DRIVE_CLIENT_FOLDER_ALIASES_JSON).
+- Stay concise, professional, and actionable for credit operations.`;
+
 // ─── Implemented workflow keys → handler names (deterministic routing) ───
 // Cardinality is IMPLEMENTED_WORKFLOW_KEYS.size (also exposed in /status health); do not hardcode counts in docs.
 const IMPLEMENTED_WORKFLOW_KEYS = new Set([
@@ -1429,14 +1463,19 @@ const AGENT_TOOLS: ToolDef[] = [
   },
   {
     name: "ingest_drive_clients" as const,
-    description: "Scans Google Drive for all client folders, reads every document, extracts forensic credit timeline events using AI, and imports them into Credit Guardian. WRITE operation â always call propose_plan first in autonomous mode.",
+    description:
+      "Scans Google Drive under DRIVE_FOLDER_ID: each direct subfolder is a client. Extracts timeline events and pushes to Credit Guardian. " +
+      "IMPORTANT: client_name must match the Google Drive folder name (e.g. folder 'Zeus' → client_name 'zeus'), not a nickname. " +
+      "If ingest returns 0 clients, read response fields hint and ingest_diagnostics: subfolders often need the word CREDIT in the name UNLESS secret DRIVE_CREDIT_ROOT_IS_DEDICATED=true (credit-only root; then names like Jabril/Zeus work). " +
+      "WRITE — call propose_plan first in autonomous mode when required.",
     destructive: false,
     parameters: {
       type: "object" as const,
       properties: {
         client_name: {
           type: "string",
-          description: "Optional: only process one specific client folder by name. Omit to process all clients.",
+          description:
+            "Optional: only process folders whose name contains this string (case-insensitive). Must match Drive folder name (e.g. 'zeus' for folder Zeus), not necessarily the person's legal name.",
         },
       },
       required: [],
@@ -2943,6 +2982,19 @@ function extractClientNameForCreditCommand(userMessage: string, conversationCont
 
 /** Infer client folder for Drive ingest (deterministic path before LLM). */
 function extractClientNameForDriveCommand(userMessage: string, conversationContext: string): string | null {
+  const addCg = userMessage.match(
+    /\badd\s+(?:client\s+)?([A-Za-z][A-Za-z0-9\s.'-]{0,78}?)\s+to\s+credit\s+guardian\b/i,
+  );
+  if (addCg?.[1]) {
+    const name = addCg[1].replace(/\b(the|a|my|our|client)\b/gi, "").trim();
+    if (name.length >= 2 && name.length <= 80) return name;
+  }
+  const combined = `${userMessage}\n${conversationContext}`;
+  const findCredit = combined.match(/\bfind\s+["']?([^"'\n]+?)["']?\s+credit\b/i);
+  if (findCredit?.[1]) {
+    const name = findCredit[1].replace(/^["']|["']$/g, "").trim();
+    if (name.length >= 2 && name.length <= 80) return name;
+  }
   const forMatch = userMessage.match(
     /\b(?:for|sync|ingest|folder|client)\s+([A-Za-z][A-Za-z0-9\s.'-]{1,78})\b/i,
   );
@@ -3682,6 +3734,15 @@ RULES:
     const defaultSummarySystem =
       `You are the ${SYSTEM_IDENTITY}. Summarize tool results concisely. Be witty and direct.\n\n${ARTIST_GROWTH_MISSION}\nWhen summarizing, highlight practical next moves that best serve the north star when the results relate to growth, fans, or releases.`;
 
+    const summarySystemForRun = opts.workflowKey === "generate_tax_docs"
+      ? taxDocSummarySystem
+      : isCreditWorkflowForSummary(opts.workflowKey)
+      ? CREDIT_TOOL_SUMMARY_SYSTEM
+      : defaultSummarySystem;
+
+    const geminiDefaultSummaryInstruction =
+      `You are the ${SYSTEM_IDENTITY}. Summarize tool results concisely and clearly.\n\n${ARTIST_GROWTH_MISSION}\nWhen summarizing, highlight practical next moves that best serve the north star when the results relate to growth, fans, or releases.`;
+
     let summary: string;
     const useClaudeForTaxSummary =
       opts.workflowKey === "generate_tax_docs" && anthropicApiKeyConfigured();
@@ -3703,7 +3764,7 @@ RULES:
           messages: [
             {
               role: "system",
-              content: opts.workflowKey === "generate_tax_docs" ? taxDocSummarySystem : defaultSummarySystem,
+              content: summarySystemForRun,
             },
             { role: "user", content: summaryPrompt },
           ],
@@ -3724,7 +3785,9 @@ RULES:
               parts: [{
                 text: opts.workflowKey === "generate_tax_docs"
                   ? taxDocSummarySystem
-                  : `You are the ${SYSTEM_IDENTITY}. Summarize tool results concisely and clearly.\n\n${ARTIST_GROWTH_MISSION}\nWhen summarizing, highlight practical next moves that best serve the north star when the results relate to growth, fans, or releases.`,
+                  : isCreditWorkflowForSummary(opts.workflowKey)
+                  ? CREDIT_TOOL_SUMMARY_SYSTEM
+                  : geminiDefaultSummaryInstruction,
               }],
             },
             generationConfig: { maxOutputTokens: 1024 },
@@ -5816,9 +5879,11 @@ serve(async (req) => {
         ? `\n\nRegistered workflows (many run automatically from plain English; \`/do\` is optional):\n${workflows.map(w => `- ${w.name} (\`${w.key}\`): ${w.trigger_phrases.slice(0, 2).join(", ")}`).join("\n")}`
         : "";
 
+      const lane2Mission = isCreditRelatedUserText(text) ? CREDIT_CONVERSATION_ADDENDUM : ARTIST_GROWTH_MISSION;
+
       const assistantSystemPrompt = `You are the ${SYSTEM_IDENTITY}. You serve Fendi Frost as a personal command center assistant.
 
-${ARTIST_GROWTH_MISSION}
+${lane2Mission}
 
 TWO-LANE RULE â You are in ASSISTANT MODE (Lane 2).
 - Answer questions, explain, draft, brainstorm, plan.

@@ -44,6 +44,8 @@
 - **Previous behavior:** Only subfolders whose **name contained the word `CREDIT`** were ingested. Folders like **“Zeus”** or **“Jabril”** were **skipped**, so Drive files never reached Credit Guardian.
 - **Fix:** Env **`DRIVE_CREDIT_ROOT_IS_DEDICATED`** (`true` / `1`). When set, all direct subfolders under `DRIVE_FOLDER_ID` are treated as credit clients **except** ambiguous tax+credit names and tax-labeled folders (`shouldIngestCreditSubfolder`).
 - **Intent patterns:** “Add … to credit guardian” etc. map toward `drive_ingest` in `creditDecisionEngine.ts`.
+- **`client_name` filter:** Matches substrings on the **Drive folder name**. If the folder is **“Zeus”** but the user says “Jabril,” passing `client_name: "jabril"` matches **nothing** — use **`zeus`** (or omit `client_name` to scan all eligible folders).
+- **Ingest JSON:** Responses include **`ingest_diagnostics`** (skip counts, sample folder names) and often a **`hint`** when zero clients were processed (wrong root, missing `DRIVE_CREDIT_ROOT_IS_DEDICATED`, or name filter mismatch).
 
 ### 5. Documentation
 
