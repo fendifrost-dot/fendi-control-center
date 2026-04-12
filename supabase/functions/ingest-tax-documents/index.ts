@@ -2,6 +2,14 @@ import { serve } from 'https://deno.land/std@0.168.0/http/server.ts';
 import { createClient, type SupabaseClient } from 'https://esm.sh/@supabase/supabase-js@2.49.1';
 import { findClientTaxFolder, listFilesInFolder, downloadFile } from '../_shared/googleDriveRead.ts';
 import { upsertTaxReturn } from '../_shared/taxReturns.ts';
+import { classifyDocument, type DocClass, type DocClassification } from '../_shared/docClassifier.ts';
+import {
+  pickSystemPrompt,
+  INCOME_1099_PROMPT,
+  INCOME_W2_PROMPT,
+  FINANCIAL_STATEMENT_PROMPT,
+  RECEIPT_OR_INVOICE_PROMPT,
+} from '../_shared/ingestPrompts.ts';
 
 const corsHeaders = {
   'Access-Control-Allow-Origin': '*',
@@ -44,10 +52,19 @@ interface PLSummary {
   net_income: number;
 }
 
+interface IngestResult {
+  documentId: string;
+  docClass: DocClass;
+  extracted?: ExtractedData;
+  skipped?: boolean;
+  skipReason?: string;
+}
+
 async function analyzeDocumentWithClaude(
   base64Content: string,
   fileName: string,
-  mimeType: string
+  mimeType: string,
+  injectedSystemPrompt?: string
 ): Promise<ExtractedData> {
   const apiKey = Deno.env.get('ANTHROPIC_API_KEY');
   if (!apiKey) throw new Error('ANTHROPIC_API_KEY not set');
@@ -55,7 +72,7 @@ async function analyzeDocumentWithClaude(
   const isImage = mimeType.startsWith('image/');
   const isPdf = mimeType === 'application/pdf';
 
-  const systemPrompt = `You are a tax document analyzer. Extract ALL financial data from this document.
+  const systemPrompt = injectedSystemPrompt ?? `You are a tax document analyzer. Extract ALL financial data from this document.
 
 Return ONLY valid JSON with this exact structure:
 {
@@ -277,6 +294,7 @@ async function ingestFromUploadedDocuments(
   const allExtracted: ExtractedData[] = [];
   const processedFiles: Array<{ name: string; doc_type: string; status: string }> = [];
   const errors: Array<{ name: string; error: string }> = [];
+  const results: IngestResult[] = [];
 
   for (const row of docRows as Array<{
     id: string;
@@ -300,8 +318,32 @@ async function ingestFromUploadedDocuments(
       const mime =
         row.mime_type || row.original_mime_type || 'application/pdf';
 
-      const extracted = await analyzeDocumentWithClaude(base64, row.file_name, mime);
+      // Change 2: classify before the Claude call
+      const classification: DocClassification = classifyDocument({
+        filename: row.file_name ?? "",
+        mimeType: mime,
+        textSample: "",
+      });
+      console.log(
+        `[ingest] doc=${row.id} class=${classification.docClass} confidence=${classification.confidence} reasons=${classification.reasons.join("|")}`
+      );
+
+      const systemPrompt = pickSystemPrompt(classification.docClass);
+      if (systemPrompt === null) {
+        console.log(`[ingest] doc=${row.id} class=${classification.docClass} → skipping LLM pass, recording as filed-only`);
+        results.push({
+          documentId: row.id,
+          docClass: classification.docClass,
+          skipped: true,
+          skipReason: "non-dollar-bearing document class",
+        });
+        processedFiles.push({ name: row.file_name, doc_type: classification.docClass, status: 'skipped' });
+        continue;
+      }
+
+      const extracted = await analyzeDocumentWithClaude(base64, row.file_name, mime, systemPrompt);
       allExtracted.push(extracted);
+      results.push({ documentId: row.id, docClass: classification.docClass, extracted });
 
       await hub
         .from('documents')
@@ -358,6 +400,30 @@ async function ingestFromUploadedDocuments(
       });
     }
   }
+
+  // Change 3: Cross-document dedup — financial statements never contribute income.
+  // Bug 2 fix — previously 1099 income and the matching bank deposit were both summed.
+  const incomeSources = results.filter(
+    (r) => r.docClass === "income_1099" || r.docClass === "income_w2"
+  );
+  const financialStatements = results.filter((r) => r.docClass === "financial_statement");
+
+  for (const stmt of financialStatements) {
+    if (stmt.extracted && "reported_income" in stmt.extracted) {
+      // The prompt should have set this to null. If it isn't, clobber it.
+      if ((stmt.extracted as Record<string, unknown>)["reported_income"] != null) {
+        console.warn(
+          `[ingest] financial_statement doc=${stmt.documentId} reported non-null income despite prompt — forcing to null`
+        );
+        (stmt.extracted as Record<string, unknown>)["reported_income"] = null;
+        (stmt.extracted as Record<string, unknown>)["reported_income_reason"] = "clobbered by dedup pass (prompt rule violated)";
+      }
+    }
+  }
+
+  console.log(
+    `[ingest] dedup summary: ${incomeSources.length} authoritative income docs, ${financialStatements.length} financial statements (contributing $0 income), ${results.length - incomeSources.length - financialStatements.length} other docs`
+  );
 
   const plSummary = aggregatePL(allExtracted);
   console.log(
@@ -544,6 +610,7 @@ serve(async (req: Request) => {
     const allExtracted: ExtractedData[] = [];
     const processedFiles: Array<{ name: string; doc_type: string; status: string }> = [];
     const errors: Array<{ name: string; error: string }> = [];
+    const driveResults: IngestResult[] = [];
 
     for (const file of files) {
       try {
@@ -552,8 +619,32 @@ serve(async (req: Request) => {
         const { base64, downloadMime } = await downloadFile(file.id, file.mimeType);
         console.log(`[ingest-tax-documents] Downloaded ${file.name}, mime: ${downloadMime}, base64 length: ${base64.length}`);
 
-        const extracted = await analyzeDocumentWithClaude(base64, file.name, downloadMime);
+        // Change 2: classify before the Claude call
+        const classification: DocClassification = classifyDocument({
+          filename: file.name ?? "",
+          mimeType: downloadMime,
+          textSample: "",
+        });
+        console.log(
+          `[ingest] doc=${file.id} class=${classification.docClass} confidence=${classification.confidence} reasons=${classification.reasons.join("|")}`
+        );
+
+        const systemPrompt = pickSystemPrompt(classification.docClass);
+        if (systemPrompt === null) {
+          console.log(`[ingest] doc=${file.id} class=${classification.docClass} → skipping LLM pass, recording as filed-only`);
+          driveResults.push({
+            documentId: file.id,
+            docClass: classification.docClass,
+            skipped: true,
+            skipReason: "non-dollar-bearing document class",
+          });
+          processedFiles.push({ name: file.name, doc_type: classification.docClass, status: 'skipped' });
+          continue;
+        }
+
+        const extracted = await analyzeDocumentWithClaude(base64, file.name, downloadMime, systemPrompt);
         allExtracted.push(extracted);
+        driveResults.push({ documentId: file.id, docClass: classification.docClass, extracted });
 
         await writeToTaxSupabase('documents', {
           tax_year: yearNum,
@@ -606,6 +697,29 @@ serve(async (req: Request) => {
         });
       }
     }
+
+    // Change 3: Cross-document dedup — financial statements never contribute income.
+    // Bug 2 fix — previously 1099 income and the matching bank deposit were both summed.
+    const driveIncomeSources = driveResults.filter(
+      (r) => r.docClass === "income_1099" || r.docClass === "income_w2"
+    );
+    const driveFinancialStatements = driveResults.filter((r) => r.docClass === "financial_statement");
+
+    for (const stmt of driveFinancialStatements) {
+      if (stmt.extracted && "reported_income" in stmt.extracted) {
+        if ((stmt.extracted as Record<string, unknown>)["reported_income"] != null) {
+          console.warn(
+            `[ingest] financial_statement doc=${stmt.documentId} reported non-null income despite prompt — forcing to null`
+          );
+          (stmt.extracted as Record<string, unknown>)["reported_income"] = null;
+          (stmt.extracted as Record<string, unknown>)["reported_income_reason"] = "clobbered by dedup pass (prompt rule violated)";
+        }
+      }
+    }
+
+    console.log(
+      `[ingest] dedup summary: ${driveIncomeSources.length} authoritative income docs, ${driveFinancialStatements.length} financial statements (contributing $0 income), ${driveResults.length - driveIncomeSources.length - driveFinancialStatements.length} other docs`
+    );
 
     const plSummary = aggregatePL(allExtracted);
     console.log(
