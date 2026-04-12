@@ -153,7 +153,17 @@ Return ONLY valid JSON with this exact structure:
   const jsonMatch = textContent.text.match(/\{[\s\S]*\}/);
   if (!jsonMatch) throw new Error('No JSON found in Claude response');
 
-  return JSON.parse(jsonMatch[0]) as ExtractedData;
+  const parsed = JSON.parse(jsonMatch[0]) as Partial<ExtractedData>;
+  // Ensure extracted_data and its arrays always exist
+  return {
+    doc_type: parsed.doc_type || 'other',
+    classification: parsed.classification || 'mixed',
+    extracted_data: {
+      income_items: parsed.extracted_data?.income_items || [],
+      expense_items: parsed.extracted_data?.expense_items || [],
+      payer_info: parsed.extracted_data?.payer_info || { name: '', ein: '', address: '' },
+    },
+  };
 }
 
 function aggregatePL(allExtracted: ExtractedData[]): PLSummary {
@@ -357,7 +367,7 @@ async function ingestFromUploadedDocuments(
       await safeWriteToTaxSupabase('documents', {
         tax_year: taxYear,
         file_name: row.file_name,
-        type: extracted.doc_type,
+        type: extracted.doc_type || classification.docClass || 'other',
         source_reference: row.id,
       });
 
@@ -649,7 +659,7 @@ serve(async (req: Request) => {
         await writeToTaxSupabase('documents', {
           tax_year: yearNum,
           file_name: file.name,
-          type: extracted.doc_type,
+          type: extracted.doc_type || classification.docClass || 'other',
           source_reference: file.id,
         });
 
