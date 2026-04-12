@@ -10,6 +10,7 @@ import {
   FINANCIAL_STATEMENT_PROMPT,
   RECEIPT_OR_INVOICE_PROMPT,
 } from '../_shared/ingestPrompts.ts';
+import { analyzeDocumentWithGemini } from '../_shared/geminiParser.ts';
 
 const corsHeaders = {
   'Access-Control-Allow-Origin': '*',
@@ -622,7 +623,104 @@ serve(async (req: Request) => {
     const errors: Array<{ name: string; error: string }> = [];
     const driveResults: IngestResult[] = [];
 
-    for (const file of files) {
+    // === Gemini Flash parallel parser (with Claude fallback) ===
+    const useGemini = !!Deno.env.get("GEMINI_API_KEY");
+    console.log(`[ingest] Parser: ${useGemini ? "Gemini Flash (parallel)" : "Claude Sonnet (sequential fallback)"}`);
+
+    if (useGemini) {
+      // Phase 1: Download all files and classify
+      const downloadedFiles: Array<{
+        file: typeof files[0];
+        base64: string;
+        mimeType: string;
+        classification: DocClassification;
+      }> = [];
+
+      for (const file of files) {
+        try {
+          console.log(`[ingest] Downloading: ${file.name} (${file.mimeType})`);
+          const { base64, downloadMime } = await downloadFile(file.id, file.mimeType);
+          const classification = classifyDocument({
+            filename: file.name ?? "",
+            mimeType: downloadMime,
+            textSample: "",
+          });
+          console.log(`[ingest] doc=${file.id} class=${classification.docClass} confidence=${classification.confidence}`);
+          const systemPrompt = pickSystemPrompt(classification.docClass);
+          if (systemPrompt === null) {
+            console.log(`[ingest] doc=${file.id} -> skipping (non-dollar-bearing)`);
+            driveResults.push({ documentId: file.id, docClass: classification.docClass, skipped: true, skipReason: "non-dollar-bearing document class" });
+            processedFiles.push({ name: file.name, doc_type: classification.docClass, status: 'skipped' });
+            continue;
+          }
+          downloadedFiles.push({ file, base64, mimeType: downloadMime, classification });
+        } catch (err) {
+          const message = err instanceof Error ? err.message : String(err);
+          console.error(`[ingest] Download error ${file.name}: ${message}`);
+          errors.push({ name: file.name, error: message });
+          processedFiles.push({ name: file.name, doc_type: 'unknown', status: 'error' });
+        }
+      }
+
+      // Phase 2: Parse in parallel batches of 4 via Gemini Flash
+      const BATCH_SIZE = 4;
+      for (let i = 0; i < downloadedFiles.length; i += BATCH_SIZE) {
+        const batch = downloadedFiles.slice(i, i + BATCH_SIZE);
+        console.log(`[ingest] Gemini batch ${Math.floor(i / BATCH_SIZE) + 1}/${Math.ceil(downloadedFiles.length / BATCH_SIZE)}: ${batch.map(b => b.file.name).join(", ")}`);
+
+        const batchResults = await Promise.allSettled(
+          batch.map(async ({ file, base64, mimeType, classification }) => {
+            const extracted = await analyzeDocumentWithGemini(base64, file.name, mimeType);
+            return { file, extracted, classification };
+          })
+        );
+
+        for (let bi = 0; bi < batchResults.length; bi++) {
+          const settled = batchResults[bi];
+          if (settled.status === "fulfilled") {
+            const { file, extracted, classification } = settled.value;
+            allExtracted.push(extracted);
+            driveResults.push({ documentId: file.id, docClass: classification.docClass, extracted });
+            await writeToTaxSupabase('documents', {
+              tax_year: yearNum,
+              file_name: file.name,
+              type: extracted.doc_type || classification.docClass || 'other',
+              source_reference: file.id,
+            });
+            const transactions: Record<string, unknown>[] = [];
+            for (const income of extracted.extracted_data.income_items) {
+              transactions.push({
+                tax_year: yearNum,
+                description: `${income.type}: ${income.source}`,
+                source: income.payer_name || income.source,
+                amount: income.amount,
+                date: income.date || new Date().toISOString().split('T')[0],
+              });
+            }
+            for (const expense of extracted.extracted_data.expense_items) {
+              transactions.push({
+                tax_year: yearNum,
+                description: `${expense.category}: ${expense.description}`,
+                source: expense.payee || expense.description,
+                amount: -Math.abs(expense.amount),
+                date: expense.date || new Date().toISOString().split('T')[0],
+              });
+            }
+            if (transactions.length > 0) await writeToTaxSupabase('transactions', transactions);
+            processedFiles.push({ name: file.name, doc_type: extracted.doc_type, status: 'success' });
+            console.log(`[ingest] Done: ${file.name} -> ${extracted.doc_type} (${extracted.extracted_data.income_items.length} income, ${extracted.extracted_data.expense_items.length} expense items)`);
+          } else {
+            const err = settled.reason instanceof Error ? settled.reason.message : String(settled.reason);
+            const batchFile = batch[bi]?.file;
+            console.error(`[ingest] Gemini error ${batchFile?.name}: ${err}`);
+            errors.push({ name: batchFile?.name || 'unknown', error: err });
+            processedFiles.push({ name: batchFile?.name || 'unknown', doc_type: 'unknown', status: 'error' });
+          }
+        }
+      }
+    } else {
+      // Fallback: original sequential Claude-based processing
+      for (const file of files) {
       try {
         console.log(`[ingest-tax-documents] Processing: ${file.name} (${file.mimeType})`);
 
@@ -710,6 +808,9 @@ serve(async (req: Request) => {
 
     // Change 3: Cross-document dedup — financial statements never contribute income.
     // Bug 2 fix — previously 1099 income and the matching bank deposit were both summed.
+
+    }
+
     const driveIncomeSources = driveResults.filter(
       (r) => r.docClass === "income_1099" || r.docClass === "income_w2"
     );
