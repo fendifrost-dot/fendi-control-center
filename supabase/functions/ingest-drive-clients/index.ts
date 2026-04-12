@@ -1,10 +1,7 @@
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.49.1";
 import { fetchCreditGuardian } from "../_shared/creditGuardian.ts";
-import {
-  isAmbiguousCreditTaxFolderName,
-  isCreditWorkspaceFolderName,
-} from "../_shared/driveFolderPolicy.ts";
+import { isAmbiguousCreditTaxFolderName, shouldIngestCreditSubfolder } from "../_shared/driveFolderPolicy.ts";
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
@@ -17,6 +14,11 @@ const RAW_DRIVE_FOLDER = Deno.env.get("DRIVE_FOLDER_ID")!;
 const DRIVE_FOLDER_ID = RAW_DRIVE_FOLDER.includes("/folders/")
   ? RAW_DRIVE_FOLDER.split("/folders/").pop()!.split("?")[0]
   : RAW_DRIVE_FOLDER;
+
+/** When true, every direct subfolder of DRIVE_FOLDER_ID is treated as a credit client (no "CREDIT" in name required). */
+const DEDICATED_CREDIT_ROOT =
+  Deno.env.get("DRIVE_CREDIT_ROOT_IS_DEDICATED") === "1" ||
+  Deno.env.get("DRIVE_CREDIT_ROOT_IS_DEDICATED") === "true";
 
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
 const SUPABASE_SERVICE_ROLE_KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
@@ -370,6 +372,7 @@ serve(async (req) => {
 
     console.log("Starting Drive ingestion (Gemini multimodal v3 - per-file dedup)...");
     console.log(`Root folder: ${DRIVE_FOLDER_ID}`);
+    console.log(`DRIVE_CREDIT_ROOT_IS_DEDICATED: ${DEDICATED_CREDIT_ROOT}`);
     if (filterClientName) console.log(`Filtering to client: ${filterClientName}`);
     if (maxFiles > 0) console.log(`Max files per client: ${maxFiles}`);
 
@@ -390,8 +393,11 @@ serve(async (req) => {
         console.log(`Skipping ambiguous folder (rename to separate credit vs tax): ${folder.name}`);
         continue;
       }
-      if (!isCreditWorkspaceFolderName(folder.name)) {
-        console.log(`Skipping non–credit-workspace folder (Credit Guardian only): ${folder.name}`);
+      if (!shouldIngestCreditSubfolder(folder.name, { dedicatedCreditRoot: DEDICATED_CREDIT_ROOT })) {
+        console.log(
+          `Skipping folder (not a credit client folder under current rules): ${folder.name} ` +
+            `(dedicatedCreditRoot=${DEDICATED_CREDIT_ROOT} — set DRIVE_CREDIT_ROOT_IS_DEDICATED=true if this root is credit-only)`,
+        );
         continue;
       }
       if (filterClientName && !folder.name.toLowerCase().includes(filterClientName)) {

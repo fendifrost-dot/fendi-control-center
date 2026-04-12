@@ -20,3 +20,20 @@ export function isTaxWorkspaceFolderName(name: string): boolean {
 export function isCreditWorkspaceFolderName(name: string): boolean {
   return CREDIT_RE.test(name);
 }
+
+/**
+ * When the configured Drive root is *only* the credit workspace (every subfolder is a client),
+ * subfolder names are often just the person's name (e.g. "Zeus", "Jabril") — they do NOT
+ * contain the word "CREDIT". In that case pass dedicatedCreditRoot=true so we still ingest.
+ * Mixed tax+credit roots should keep dedicatedCreditRoot=false and use "Name CREDIT" subfolders.
+ */
+export function shouldIngestCreditSubfolder(
+  name: string,
+  opts: { dedicatedCreditRoot: boolean },
+): boolean {
+  if (isAmbiguousCreditTaxFolderName(name)) return false;
+  if (opts.dedicatedCreditRoot) {
+    return !isTaxWorkspaceFolderName(name);
+  }
+  return isCreditWorkspaceFolderName(name);
+}

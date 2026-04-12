@@ -42,11 +42,15 @@ const ANALYSIS_PATTERNS: RegExp[] = [
 ];
 
 const DRIVE_INGEST_PATTERNS: RegExp[] = [
+  /\badd\b.*\b(credit\s+guardian|to\s+credit(\s+guardian)?)/i,
+  /\b(enroll|register)\b.*\b(in\s+)?credit\s+guardian/i,
   /\bsync\b.*\bdrive/i,
   /\bingest\b.*\b(drive|folder|client)/i,
   /\bpull\b.*\b(files?|documents?)\b.*\bdrive/i,
   /\bimport\b.*\b(drive|folder)/i,
   /\bscan\b.*\bdrive/i,
+  /\bupload\b.*\b(credit|reports?).*\b(drive|folder)/i,
+  /\bprocess\b.*\b(drive|folder).*\bcredit/i,
 ];
 
 function firstMatchReason(patterns: RegExp[], text: string, label: string): string | null {
