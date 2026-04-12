@@ -18,6 +18,11 @@ import {
   tryParseManualIncomeMessage,
 } from "../_shared/taxTelegramParse.ts";
 import { inferCreditWorkflowKey, shouldAutoExecuteCreditIntent } from "../_shared/creditDecisionEngine.ts";
+import {
+  extractCreditClientNameLoose,
+  formatUnifiedIntelForPrompt,
+  gatherUnifiedClientState,
+} from "../_shared/unifiedClientIntelligence.ts";
 
 const BOT_TOKEN = Deno.env.get("FendiAIbot")!;
 const CHAT_ID = Deno.env.get("TELEGRAM_CHAT_ID") ?? "";
@@ -3434,7 +3439,7 @@ async function executeAgenticLoop(chatId: string, userMessage: string, opts: { t
   logEvent({ event: "workflow_tools_loaded", workflow: opts.workflowKey, tools: workflowToolNames || "all", taskId: opts.taskId });
 
   const model: "grok" | "gemini" = opts.sessionModel === "chatgpt" ? "grok" : opts.sessionModel as "grok" | "gemini";
-  const docContext = await getRecentDocContext();
+  let docContext = await getRecentDocContext();
   const requestId = crypto.randomUUID();
 
   await appendConversationTurn(chatId, {
@@ -3445,6 +3450,31 @@ async function executeAgenticLoop(chatId: string, userMessage: string, opts: { t
   });
 
   const conversationContext = await buildConversationContext(chatId);
+
+  // Unified Client Intelligence (credit): cross-system state + recommended next action — inject before LLM.
+  const creditIntelWorkflows = new Set([
+    "analyze_credit_strategy",
+    "credit_analysis_and_disputes",
+    "drive_ingest",
+    "query_credit_compass",
+  ]);
+  if (opts.workflowKey && creditIntelWorkflows.has(opts.workflowKey)) {
+    const cn = extractCreditClientNameLoose(userMessage, conversationContext);
+    if (cn) {
+      try {
+        const intel = await gatherUnifiedClientState(supabase, cn);
+        docContext = `${docContext}\n\n${formatUnifiedIntelForPrompt(intel)}`;
+        logEvent({
+          event: "unified_credit_intel",
+          taskId: opts.taskId,
+          client: cn,
+          next: intel.recommendedNext,
+        });
+      } catch (intelErr) {
+        console.error("[unified_credit_intel]", intelErr);
+      }
+    }
+  }
 
   // Step 1: Get AI response with workflow-scoped tool calls
   logEvent({ event: "ai_call_start", taskId: opts.taskId, model, workflow: opts.workflowKey });
