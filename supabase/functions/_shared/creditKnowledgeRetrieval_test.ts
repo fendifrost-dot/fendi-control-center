@@ -47,7 +47,7 @@ Deno.test("L: empty violation slice still takes strongest violation when pool no
 });
 
 Deno.test("M: analysis-only tier-1 bias uses confidence < 0.6; dispute path keeps 0.7 threshold", () => {
-  assertEquals(shouldForceTier1(undefined, null, true), true);
+  assertEquals(shouldForceTier1(undefined, undefined, true), true);
   assertEquals(shouldForceTier1(undefined, 0.5, true), true);
   assertEquals(shouldForceTier1(undefined, 0.65, true), false);
   assertEquals(shouldForceTier1(undefined, 0.65, false), true);
