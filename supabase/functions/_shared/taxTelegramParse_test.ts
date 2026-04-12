@@ -1,5 +1,6 @@
 import { assertEquals } from "https://deno.land/std@0.168.0/testing/asserts.ts";
 import {
+  extractClientNameForTaxCommand,
   tryParseManualDeductionMessage,
   tryParseManualIncomeMessage,
 } from "./taxTelegramParse.ts";
@@ -40,7 +41,7 @@ Deno.test("tryParseManualIncomeMessage: freeform add income name year amount", (
 
 Deno.test("tryParseManualIncomeMessage: fullwidth dollar sign", () => {
   const r = tryParseManualIncomeMessage(
-    "Add ＄5,000 cash income for Sam 2022",
+    "Add \uFF04" + "5,000 cash income for Sam 2022",
   );
   assertEquals(r?.amount, 5000);
   assertEquals(r?.tax_year, 2022);
@@ -52,4 +53,78 @@ Deno.test("tryParseManualDeductionMessage: home office keyword", () => {
   );
   assertEquals(r?.client_name, "Sam Higgins");
   assertEquals(r?.category, "office_expense");
+});
+
+// --- extractClientNameForTaxCommand tests (CG pattern parity) ---
+
+Deno.test("extractClientNameForTaxCommand: basic generate", () => {
+  assertEquals(
+    extractClientNameForTaxCommand("generate Sam Higgins tax return"),
+    "Sam Higgins",
+  );
+});
+
+Deno.test("extractClientNameForTaxCommand: do + name + tax", () => {
+  assertEquals(
+    extractClientNameForTaxCommand("do Jabril tax return for 2022"),
+    "Jabril",
+  );
+});
+
+Deno.test("extractClientNameForTaxCommand: noisy status word stripped", () => {
+  assertEquals(
+    extractClientNameForTaxCommand("generate Jabril extension tax return"),
+    "Jabril",
+  );
+  assertEquals(
+    extractClientNameForTaxCommand("file Ashley amendment tax return for 2023"),
+    "Ashley",
+  );
+  assertEquals(
+    extractClientNameForTaxCommand("prepare Deleon progress tax docs"),
+    "Deleon",
+  );
+});
+
+Deno.test("extractClientNameForTaxCommand: multi-word name + noise stripped", () => {
+  assertEquals(
+    extractClientNameForTaxCommand("generate Mary Jane extension tax return"),
+    "Mary Jane",
+  );
+});
+
+Deno.test("extractClientNameForTaxCommand: quoted name exact", () => {
+  assertEquals(
+    extractClientNameForTaxCommand(`generate "North Star Client LLC" tax return`),
+    "North Star Client LLC",
+  );
+});
+
+Deno.test("extractClientNameForTaxCommand: LLC name with 'Tax' in business name preserved", () => {
+  // "Tax" should NOT be stripped from "Tax Solutions LLC" because it's part of the entity name
+  assertEquals(
+    extractClientNameForTaxCommand(`generate "Tax Solutions LLC" tax return`),
+    "Tax Solutions LLC",
+  );
+});
+
+Deno.test("extractClientNameForTaxCommand: possessive form", () => {
+  assertEquals(
+    extractClientNameForTaxCommand("prepare Sam Higgins's tax return for 2022"),
+    "Sam Higgins",
+  );
+});
+
+Deno.test("extractClientNameForTaxCommand: tax return for NAME pattern", () => {
+  assertEquals(
+    extractClientNameForTaxCommand("tax return for Leon Dorset"),
+    "Leon Dorset",
+  );
+});
+
+Deno.test("extractClientNameForTaxCommand: file + name + for year", () => {
+  assertEquals(
+    extractClientNameForTaxCommand("file Terrence tax return for 2024"),
+    "Terrence",
+  );
 });
