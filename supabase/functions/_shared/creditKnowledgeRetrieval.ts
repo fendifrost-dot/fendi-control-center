@@ -349,7 +349,7 @@ export function buildTriggerEvidenceContext(
 }
 
 function sortTriggersByPriority(ids: string[]): string[] {
-  const order = new Map(KB_TRIGGER_PRIORITY.map((t, i) => [t, i]));
+  const order = new Map<string, number>(KB_TRIGGER_PRIORITY.map((t, i) => [t, i]));
   return [...new Set(ids)].sort((a, b) => {
     const ia = order.get(a) ?? 99;
     const ib = order.get(b) ?? 99;

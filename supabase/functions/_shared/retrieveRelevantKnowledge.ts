@@ -107,7 +107,7 @@ function normalizePayload(j: Record<string, unknown>, maxItems: number): Retriev
       disputeExamples: (j.disputeExamples ?? j.dispute_examples) as string[] | undefined,
       analysisPatterns: (j.analysisPatterns ?? j.analysis_patterns) as string[] | undefined,
       violationLogic: (j.violationLogic ?? j.violation_logic) as string[] | undefined,
-      violationTriggers: j.violationTriggers ?? j.violation_triggers,
+      violationTriggers: (j.violationTriggers ?? j.violation_triggers) as (string | undefined)[] | undefined,
     },
     n,
   );
