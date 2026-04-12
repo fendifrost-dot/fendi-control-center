@@ -357,7 +357,7 @@ async function ingestFromUploadedDocuments(
       await safeWriteToTaxSupabase('documents', {
         tax_year: taxYear,
         file_name: row.file_name,
-        type: extracted.doc_type,
+        type: extracted.doc_type || classification.docClass || 'other',
         source_reference: row.id,
       });
 
