@@ -487,6 +487,43 @@ serve(async (req) => {
         ingestionResults[year] = result;
       }
       console.log(`[generate] Ingestion took ${Date.now() - t_start}ms for ${taxYears.join(", ")}.`);
+
+    // Cache fallback: if ingestion failed, try reading previously stored analyzed_data
+    for (const y of taxYears) {
+      const key = String(y);
+      const ingResult = ingestionResults[key];
+      const isFailed = !ingResult || ingResult.code === "WORKER_LIMIT" || ingResult.error;
+
+      if (isFailed && effectiveClientId !== "unknown") {
+        console.log(`[generate] Ingestion failed for ${key} (${ingResult?.code || ingResult?.error || "null"}) — checking cached analyzed_data`);
+        const { data: cached } = await supabaseAdmin
+          .from("tax_returns")
+          .select("analyzed_data")
+          .eq("client_id", effectiveClientId)
+          .eq("tax_year", y)
+          .maybeSingle();
+
+        if (cached?.analyzed_data && typeof cached.analyzed_data === "object") {
+          const ad = cached.analyzed_data as Record<string, unknown>;
+          if (ad.pl_summary || ad.aggregated_data || ad.processed_files) {
+            console.log(`[generate] Using cached analyzed_data for ${key} (source: ${ad.source || "unknown"}, updated: ${ad.updated_at || "?"})`);
+            ingestionResults[key] = {
+              success: true,
+              source: "cache_fallback",
+              pl_summary: ad.pl_summary,
+              aggregated_data: ad.aggregated_data || ad.pl_summary,
+              processed_files: ad.processed_files,
+              documents: ad.documents,
+              files_processed: Array.isArray(ad.processed_files) ? (ad.processed_files as unknown[]).length : 0,
+            };
+          }
+        }
+
+        if (!ingestionResults[key] || ingestionResults[key].code === "WORKER_LIMIT") {
+          console.warn(`[generate] No cached data available for ${key} — proceeding with manual data only`);
+        }
+      }
+    }
     } else {
       console.warn("[generate] No client_name or client_id — skipping ingestion step");
     }
