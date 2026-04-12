@@ -13,5 +13,7 @@ export const supabase = createClient<Database>(SUPABASE_URL, SUPABASE_PUBLISHABL
     storage: localStorage,
     persistSession: true,
     autoRefreshToken: true,
-  }
+    /** Required so password-recovery links (`#access_token=…&type=recovery`) establish a session in the SPA. */
+    detectSessionInUrl: true,
+  },
 });

@@ -11,6 +11,8 @@ import HubHomePage from "./pages/HubHomePage";
 import Ops from "./pages/Ops";
 import Test from "./pages/Test";
 import Login from "./pages/Login";
+import ForgotPassword from "./pages/ForgotPassword";
+import ResetPassword from "./pages/ResetPassword";
 import NotFound from "./pages/NotFound";
 import ClientsPage from "./pages/tax/ClientsPage";
 import ClientReturnsPage from "./pages/tax/ClientReturnsPage";
@@ -27,6 +29,8 @@ const App = () => (
         <BrowserRouter>
           <Routes>
             <Route path="/login" element={<Login />} />
+            <Route path="/forgot-password" element={<ForgotPassword />} />
+            <Route path="/reset-password" element={<ResetPassword />} />
             <Route path="/" element={<HubHomePage />} />
             <Route path="/ops" element={<Ops />} />
             <Route path="/test" element={<Test />} />
