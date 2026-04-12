@@ -2,6 +2,8 @@ import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.49.1";
 import { fetchCreditGuardian } from "../_shared/creditGuardian.ts";
 import { callClaudeJSON } from "../_shared/claude.ts";
+import { assembleCreditAnalysisUserPrompt, buildRetrievalIntentSummary, inferRetrievalTaskFromDocs } from "../_shared/creditPromptComposer.ts";
+import { retrieveRelevantKnowledge } from "../_shared/retrieveRelevantKnowledge.ts";
 import { fuzzyClientSearch } from "../_shared/fuzzyClientSearch.ts";
 
 const corsHeaders = {
@@ -14,6 +16,7 @@ const SUPABASE_SERVICE_ROLE_KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
 const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
 
 const SYSTEM_PROMPT = `You are a credit repair analyst operating under FCRA, FDCPA, and CFPB guidelines.
+The user message is structured as: client state summary, optional retrieved prior-case knowledge, full client JSON, then the task line. Use retrieved patterns only when consistent with the client data; never invent facts.
 Analyze the client's credit timeline events and generate a prioritized dispute strategy.
 
 You MUST return valid JSON with exactly these top-level keys:
@@ -252,15 +255,24 @@ serve(async (req) => {
 
     const detail = await detailResp.json();
     const docs = await docsResp.json();
-    const userPrompt = [
-      "Client detail JSON:",
-      JSON.stringify(detail).slice(0, 80_000),
-      "",
-      "Client documents JSON:",
-      JSON.stringify(docs).slice(0, 30_000),
-      "",
-      "Return the required strategy object.",
-    ].join("\n");
+    const detailObj = detail as Record<string, unknown>;
+    const docsObj = docs as Record<string, unknown>;
+
+    const retrievalTask = inferRetrievalTaskFromDocs(docsObj);
+    const intentSummary = buildRetrievalIntentSummary(retrievalTask, detailObj, docsObj);
+    const retrieved = await retrieveRelevantKnowledge({
+      task: retrievalTask,
+      intentSummary,
+      caseStateSummary: intentSummary.slice(0, 800),
+      maxItems: 8,
+    });
+
+    const userPrompt = assembleCreditAnalysisUserPrompt({
+      detail: detailObj,
+      docs: docsObj,
+      retrieved,
+      taskInstruction: "Return the required strategy object.",
+    });
 
     const analysis = await callClaudeJSON<Record<string, unknown>>(SYSTEM_PROMPT, userPrompt, {
       required: ["priority_disputes", "bureau_strategies", "risk_flags", "next_steps"],

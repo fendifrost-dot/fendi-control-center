@@ -2,6 +2,8 @@ import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.49.1";
 import { fetchCreditGuardian } from "../_shared/creditGuardian.ts";
 import { callClaudeJSON } from "../_shared/claude.ts";
+import { assembleDisputeLetterUserPrompt } from "../_shared/creditPromptComposer.ts";
+import { retrieveRelevantKnowledge } from "../_shared/retrieveRelevantKnowledge.ts";
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
@@ -12,7 +14,8 @@ const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
 const SUPABASE_SERVICE_ROLE_KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
 const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
 
-const SYSTEM_PROMPT = "You are a compliance-aware credit dispute specialist. Draft concise, formal dispute letters referencing applicable FCRA sections. Do not fabricate legal outcomes.";
+const SYSTEM_PROMPT =
+  "You are a compliance-aware credit dispute specialist. The user message includes: a short context line, optional retrieved prior-case dispute examples and violation logic, then client JSON and the dispute item. Use retrieval only when it matches the facts; do not fabricate legal outcomes. Draft concise, formal dispute letters referencing applicable FCRA sections.";
 
 serve(async (req) => {
   if (req.method === "OPTIONS") return new Response(null, { headers: corsHeaders });
@@ -42,16 +45,27 @@ serve(async (req) => {
     const detailResp = await fetchCreditGuardian({ action: "get_client_detail", params: { client_id: clientId } });
     if (!detailResp.ok) throw new Error(`get_client_detail failed: ${detailResp.status}`);
     const detail = await detailResp.json();
+    const detailObj = detail as Record<string, unknown>;
 
-    const userPrompt = [
-      "Client detail JSON:",
-      JSON.stringify(detail).slice(0, 60_000),
-      "",
-      "Dispute item JSON:",
-      JSON.stringify(disputeItem),
-      "",
-      "Return JSON with keys: subject, letter_body, bureau, legal_citations (array), confidence.",
-    ].join("\n");
+    const intentSummary = [
+      `task=dispute_generation`,
+      `bureau=${String(disputeItem.bureau ?? "unknown")}`,
+      `account=${String(disputeItem.account_name ?? disputeItem.account ?? "")}`.slice(0, 400),
+    ].join("; ");
+
+    const retrieved = await retrieveRelevantKnowledge({
+      task: "dispute_generation",
+      intentSummary,
+      caseStateSummary: intentSummary.slice(0, 800),
+      maxItems: 8,
+    });
+
+    const userPrompt = assembleDisputeLetterUserPrompt({
+      detail: detailObj,
+      disputeItem,
+      retrieved,
+      taskInstruction: "Return JSON with keys: subject, letter_body, bureau, legal_citations (array), confidence.",
+    });
 
     const draft = await callClaudeJSON<Record<string, unknown>>(SYSTEM_PROMPT, userPrompt, {
       required: ["subject", "letter_body", "bureau"],
