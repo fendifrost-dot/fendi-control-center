@@ -1,15 +1,9 @@
 import { serve } from 'https://deno.land/std@0.168.0/http/server.ts';
 import { createClient, type SupabaseClient } from 'https://esm.sh/@supabase/supabase-js@2.49.1';
-import { findClientTaxFolder, listFilesInFolder, listFilesRecursive, downloadFile } from '../_shared/googleDriveRead.ts';
-import { upsertTaxReturn } from '../_shared/taxReturns.ts';
+import { findClientTaxFolder, listFilesInFolder, downloadFile } from '../_shared/googleDriveRead.ts';
+import { upsertTaxReturn, getTaxReturn } from '../_shared/taxReturns.ts';
 import { classifyDocument, type DocClass, type DocClassification } from '../_shared/docClassifier.ts';
-import {
-  pickSystemPrompt,
-  INCOME_1099_PROMPT,
-  INCOME_W2_PROMPT,
-  FINANCIAL_STATEMENT_PROMPT,
-  RECEIPT_OR_INVOICE_PROMPT,
-} from '../_shared/ingestPrompts.ts';
+import { pickSystemPrompt } from '../_shared/ingestPrompts.ts';
 import { analyzeDocumentWithGemini } from '../_shared/geminiParser.ts';
 
 const corsHeaders = {
@@ -17,6 +11,9 @@ const corsHeaders = {
   'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type',
   'Access-Control-Allow-Methods': 'POST, OPTIONS',
 };
+
+/** Persisted between process_single calls; aggregate reads this from tax_returns.analyzed_data */
+const DRIVE_INGEST_SESSION_KEY = 'drive_ingest_session';
 
 interface IncomeItem {
   source: string;
@@ -61,11 +58,37 @@ interface IngestResult {
   skipReason?: string;
 }
 
+interface DriveIngestFileRecord {
+  file_id: string;
+  file_name: string;
+  file_mime?: string;
+  docClass: DocClass;
+  extracted?: ExtractedData;
+  skipped?: boolean;
+  skipReason?: string;
+  status: 'success' | 'skipped' | 'error';
+  error?: string;
+}
+
+interface DriveIngestSession {
+  folder_id: string;
+  folder_name: string;
+  client_name: string;
+  tax_year: number;
+  files: Record<string, DriveIngestFileRecord>;
+  started_at?: string;
+}
+
+function useGeminiForTax(): boolean {
+  const k = Deno.env.get('Frost_Gemini');
+  return typeof k === 'string' && k.length > 0;
+}
+
 async function analyzeDocumentWithClaude(
   base64Content: string,
   fileName: string,
   mimeType: string,
-  injectedSystemPrompt?: string
+  injectedSystemPrompt?: string,
 ): Promise<ExtractedData> {
   const apiKey = Deno.env.get('ANTHROPIC_API_KEY');
   if (!apiKey) throw new Error('ANTHROPIC_API_KEY not set');
@@ -165,6 +188,18 @@ Return ONLY valid JSON with this exact structure:
       payer_info: parsed.extracted_data?.payer_info || { name: '', ein: '', address: '' },
     },
   };
+}
+
+async function analyzeDocumentRouter(
+  base64Content: string,
+  fileName: string,
+  mimeType: string,
+  systemPrompt: string,
+): Promise<ExtractedData> {
+  if (useGeminiForTax()) {
+    return await analyzeDocumentWithGemini(base64Content, fileName, mimeType, systemPrompt);
+  }
+  return await analyzeDocumentWithClaude(base64Content, fileName, mimeType, systemPrompt);
 }
 
 function aggregatePL(allExtracted: ExtractedData[]): PLSummary {
@@ -267,6 +302,49 @@ async function safeWriteToTaxSupabase(
   }
 }
 
+function fileAnalyzable(classification: DocClassification): boolean {
+  return pickSystemPrompt(classification.docClass) !== null;
+}
+
+async function mergeDriveIngestSession(
+  hub: SupabaseClient,
+  clientId: string,
+  clientName: string,
+  taxYear: number,
+  folderId: string,
+  folderName: string,
+  fileRecord: DriveIngestFileRecord,
+): Promise<void> {
+  const existing = await getTaxReturn(hub, clientId, taxYear);
+  const prev = (existing?.analyzed_data as Record<string, unknown> | null) || {};
+  const sessionRaw = prev[DRIVE_INGEST_SESSION_KEY] as DriveIngestSession | undefined;
+  const session: DriveIngestSession = sessionRaw ?? {
+    folder_id: folderId,
+    folder_name: folderName,
+    client_name: clientName,
+    tax_year: taxYear,
+    files: {},
+    started_at: new Date().toISOString(),
+  };
+  session.folder_id = folderId;
+  session.folder_name = folderName;
+  session.client_name = clientName;
+  session.tax_year = taxYear;
+  session.files[fileRecord.file_id] = fileRecord;
+
+  await upsertTaxReturn(hub, {
+    client_id: clientId,
+    client_name: clientName,
+    tax_year: taxYear,
+    status: 'in_progress',
+    analyzed_data: {
+      ...prev,
+      [DRIVE_INGEST_SESSION_KEY]: session,
+    },
+    created_by: 'ingest-tax-documents',
+  });
+}
+
 /** Analyze documents uploaded to Supabase Storage (dashboard tax workflow). */
 async function ingestFromUploadedDocuments(
   hub: SupabaseClient,
@@ -352,7 +430,7 @@ async function ingestFromUploadedDocuments(
         continue;
       }
 
-      const extracted = await analyzeDocumentWithClaude(base64, row.file_name, mime, systemPrompt);
+      const extracted = await analyzeDocumentRouter(base64, row.file_name, mime, systemPrompt);
       allExtracted.push(extracted);
       results.push({ documentId: row.id, docClass: classification.docClass, extracted });
 
@@ -521,6 +599,383 @@ async function writeToTaxSupabase(
   return res.json();
 }
 
+async function handleDriveList(
+  clientName: string,
+  taxYear: number,
+  hub: SupabaseClient | null,
+  clientId?: string,
+): Promise<Response> {
+  const folderResult = await findClientTaxFolder(clientName, taxYear);
+  if (!folderResult) {
+    return new Response(
+      JSON.stringify({
+        error: `No tax folder found for ${clientName} ${taxYear}. Searched patterns: ${clientName.toUpperCase()} ${taxYear} TAXES, ${clientName.toUpperCase().split(/\s+/)[0]} ${taxYear} TAXES, etc.`,
+      }),
+      { status: 404, headers: { ...corsHeaders, 'Content-Type': 'application/json' } },
+    );
+  }
+
+  const { folderId, folderName } = folderResult;
+  const files = await listFilesInFolder(folderId);
+  if (files.length === 0) {
+    return new Response(
+      JSON.stringify({ error: 'No files found in the tax folder' }),
+      { status: 404, headers: { ...corsHeaders, 'Content-Type': 'application/json' } },
+    );
+  }
+
+  const outFiles = files.map((f) => {
+    const classification = classifyDocument({
+      filename: f.name ?? "",
+      mimeType: f.mimeType,
+      textSample: "",
+    });
+    return {
+      id: f.id,
+      name: f.name,
+      mimeType: f.mimeType,
+      analyzable: fileAnalyzable(classification),
+    };
+  });
+
+  if (hub && clientId && clientId.length > 10 && clientId !== 'unknown') {
+    const existing = await getTaxReturn(hub, clientId, taxYear);
+    const prev = (existing?.analyzed_data as Record<string, unknown> | null) || {};
+    await upsertTaxReturn(hub, {
+      client_id: clientId,
+      client_name: clientName,
+      tax_year: taxYear,
+      status: 'in_progress',
+      analyzed_data: {
+        ...prev,
+        [DRIVE_INGEST_SESSION_KEY]: {
+          folder_id: folderId,
+          folder_name: folderName,
+          client_name: clientName,
+          tax_year: taxYear,
+          files: {},
+          started_at: new Date().toISOString(),
+        },
+      },
+      created_by: 'ingest-tax-documents',
+    });
+  }
+
+  return new Response(
+    JSON.stringify({
+      success: true,
+      mode: 'list',
+      client_name: clientName,
+      tax_year: taxYear,
+      folder_id: folderId,
+      folder_name: folderName,
+      files: outFiles,
+    }),
+    { headers: { ...corsHeaders, 'Content-Type': 'application/json' } },
+  );
+}
+
+async function handleDriveProcessSingle(
+  hub: SupabaseClient,
+  clientName: string,
+  clientId: string,
+  taxYear: number,
+  fileId: string,
+  fileName: string,
+  fileMime: string | undefined,
+  folderIdIn: string | undefined,
+  folderNameIn: string | undefined,
+): Promise<Response> {
+  let folderId = folderIdIn ?? '';
+  let folderName = folderNameIn ?? '';
+
+  if (!folderId) {
+    const folderResult = await findClientTaxFolder(clientName, taxYear);
+    if (!folderResult) {
+      return new Response(
+        JSON.stringify({
+          error: `No tax folder found for ${clientName} ${taxYear}.`,
+        }),
+        { status: 404, headers: { ...corsHeaders, 'Content-Type': 'application/json' } },
+      );
+    }
+    folderId = folderResult.folderId;
+    folderName = folderResult.folderName;
+  }
+
+  const mimeHint = fileMime && fileMime.length > 0 ? fileMime : 'application/pdf';
+
+  try {
+    const { base64, downloadMime } = await downloadFile(fileId, mimeHint);
+    const classification: DocClassification = classifyDocument({
+      filename: fileName ?? "",
+      mimeType: downloadMime,
+      textSample: "",
+    });
+
+    const systemPrompt = pickSystemPrompt(classification.docClass);
+    if (systemPrompt === null) {
+      const rec: DriveIngestFileRecord = {
+        file_id: fileId,
+        file_name: fileName,
+        file_mime: downloadMime,
+        docClass: classification.docClass,
+        skipped: true,
+        skipReason: 'non-dollar-bearing document class',
+        status: 'skipped',
+      };
+      await mergeDriveIngestSession(hub, clientId, clientName, taxYear, folderId, folderName, rec);
+
+      return new Response(
+        JSON.stringify({
+          success: true,
+          mode: 'process_single',
+          document_id: fileId,
+          doc_type: classification.docClass,
+          status: 'skipped',
+          skip_reason: rec.skipReason,
+        }),
+        { headers: { ...corsHeaders, 'Content-Type': 'application/json' } },
+      );
+    }
+
+    const extracted = await analyzeDocumentRouter(base64, fileName, downloadMime, systemPrompt);
+
+    await writeToTaxSupabase('documents', {
+      tax_year: taxYear,
+      file_name: fileName,
+      type: extracted.doc_type,
+      source_reference: fileId,
+    });
+
+    const transactions: Record<string, unknown>[] = [];
+    for (const income of extracted.extracted_data.income_items) {
+      transactions.push({
+        tax_year: taxYear,
+        description: `${income.type}: ${income.source}`,
+        source: income.payer_name || income.source,
+        amount: income.amount,
+        date: income.date || new Date().toISOString().split('T')[0],
+      });
+    }
+    for (const expense of extracted.extracted_data.expense_items) {
+      transactions.push({
+        tax_year: taxYear,
+        description: `${expense.category}: ${expense.description}`,
+        source: expense.payee || expense.description,
+        amount: -Math.abs(expense.amount),
+        date: expense.date || new Date().toISOString().split('T')[0],
+      });
+    }
+    if (transactions.length > 0) {
+      await writeToTaxSupabase('transactions', transactions);
+    }
+
+    const rec: DriveIngestFileRecord = {
+      file_id: fileId,
+      file_name: fileName,
+      file_mime: downloadMime,
+      docClass: classification.docClass,
+      extracted,
+      status: 'success',
+    };
+    await mergeDriveIngestSession(hub, clientId, clientName, taxYear, folderId, folderName, rec);
+
+    return new Response(
+      JSON.stringify({
+        success: true,
+        mode: 'process_single',
+        document_id: fileId,
+        doc_type: extracted.doc_type,
+        status: 'success',
+        extracted_data: extracted,
+      }),
+      { headers: { ...corsHeaders, 'Content-Type': 'application/json' } },
+    );
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    console.error(`[ingest-tax-documents] process_single ${fileName}: ${message}`);
+    const rec: DriveIngestFileRecord = {
+      file_id: fileId,
+      file_name: fileName,
+      file_mime: fileMime,
+      docClass: 'unknown',
+      status: 'error',
+      error: message,
+    };
+    await mergeDriveIngestSession(hub, clientId, clientName, taxYear, folderId, folderName, rec);
+
+    return new Response(
+      JSON.stringify({
+        success: false,
+        mode: 'process_single',
+        document_id: fileId,
+        status: 'error',
+        error: message,
+      }),
+      { status: 500, headers: { ...corsHeaders, 'Content-Type': 'application/json' } },
+    );
+  }
+}
+
+async function handleDriveAggregate(
+  hub: SupabaseClient,
+  clientName: string,
+  clientId: string,
+  taxYear: number,
+  folderIdHint: string | undefined,
+  folderNameHint: string | undefined,
+): Promise<Response> {
+  const tr = await getTaxReturn(hub, clientId, taxYear);
+  const analyzed = (tr?.analyzed_data as Record<string, unknown> | null) || {};
+  const session = analyzed[DRIVE_INGEST_SESSION_KEY] as DriveIngestSession | undefined;
+
+  let folderId = folderIdHint ?? session?.folder_id ?? '';
+  let folderName = folderNameHint ?? session?.folder_name ?? '';
+
+  const fileCount = session?.files ? Object.keys(session.files).length : 0;
+  if (!folderId || !session || fileCount === 0) {
+    return new Response(
+      JSON.stringify({
+        error:
+          'No drive_ingest_session with processed files. Run mode=list (with client_id to reset session), then mode=process_single for each file.',
+      }),
+      { status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' } },
+    );
+  }
+
+  const fileRecords = Object.values(session.files);
+  const driveResults: IngestResult[] = [];
+  const allExtracted: ExtractedData[] = [];
+  const processedFiles: Array<{ name: string; doc_type: string; status: string }> = [];
+  const errors: Array<{ name: string; error: string }> = [];
+
+  for (const fr of fileRecords) {
+    if (fr.status === 'success' && fr.extracted) {
+      driveResults.push({
+        documentId: fr.file_id,
+        docClass: fr.docClass,
+        extracted: fr.extracted,
+      });
+      allExtracted.push(fr.extracted);
+      processedFiles.push({
+        name: fr.file_name,
+        doc_type: fr.extracted.doc_type,
+        status: 'success',
+      });
+    } else if (fr.status === 'skipped') {
+      driveResults.push({
+        documentId: fr.file_id,
+        docClass: fr.docClass,
+        skipped: true,
+        skipReason: fr.skipReason,
+      });
+      processedFiles.push({
+        name: fr.file_name,
+        doc_type: fr.docClass,
+        status: 'skipped',
+      });
+    } else if (fr.status === 'error') {
+      driveResults.push({
+        documentId: fr.file_id,
+        docClass: fr.docClass,
+      });
+      processedFiles.push({
+        name: fr.file_name,
+        doc_type: 'unknown',
+        status: 'error',
+      });
+      if (fr.error) errors.push({ name: fr.file_name, error: fr.error });
+    }
+  }
+
+  const driveIncomeSources = driveResults.filter(
+    (r) => r.docClass === "income_1099" || r.docClass === "income_w2"
+  );
+  const driveFinancialStatements = driveResults.filter((r) => r.docClass === "financial_statement");
+
+  for (const stmt of driveFinancialStatements) {
+    if (stmt.extracted && "reported_income" in stmt.extracted) {
+      if ((stmt.extracted as Record<string, unknown>)["reported_income"] != null) {
+        console.warn(
+          `[ingest] financial_statement doc=${stmt.documentId} reported non-null income despite prompt — forcing to null`
+        );
+        (stmt.extracted as Record<string, unknown>)["reported_income"] = null;
+        (stmt.extracted as Record<string, unknown>)["reported_income_reason"] = "clobbered by dedup pass (prompt rule violated)";
+      }
+    }
+  }
+
+  console.log(
+    `[ingest] dedup summary: ${driveIncomeSources.length} authoritative income docs, ${driveFinancialStatements.length} financial statements (contributing $0 income), ${driveResults.length - driveIncomeSources.length - driveFinancialStatements.length} other docs`
+  );
+
+  const plSummary = aggregatePL(allExtracted);
+  console.log(
+    `[ingest-tax-documents] P&L: Income=${plSummary.total_income}, Expenses=${plSummary.total_expenses}, Net=${plSummary.net_income}`
+  );
+
+  await writeToTaxSupabase('pl_reports', {
+    tax_year: taxYear,
+    period: `${taxYear} Annual`,
+    gross_income: plSummary.total_income,
+    total_expenses: plSummary.total_expenses,
+    net_profit: plSummary.net_income,
+    category_breakdown: {
+      income_by_category: plSummary.income_by_category,
+      expenses_by_category: plSummary.expenses_by_category,
+    },
+    generated_at: new Date().toISOString(),
+  });
+
+  const aggregated_data = {
+    total_income: plSummary.total_income,
+    total_expenses: plSummary.total_expenses,
+    net_profit: plSummary.net_income,
+  };
+
+  const prev = analyzed;
+  await upsertTaxReturn(hub, {
+    client_id: clientId,
+    client_name: clientName,
+    tax_year: taxYear,
+    status: 'in_progress',
+    analyzed_data: {
+      ...prev,
+      pl_summary: plSummary,
+      aggregated_data,
+      processed_files: processedFiles,
+      errors: errors.length > 0 ? errors : undefined,
+      source: 'drive_ingest',
+      folder_id: folderId,
+      folder_name: folderName,
+      updated_at: new Date().toISOString(),
+      [DRIVE_INGEST_SESSION_KEY]: session,
+    },
+    created_by: 'ingest-tax-documents',
+  });
+
+  const summary = {
+    success: true,
+    mode: 'aggregate',
+    client_name: clientName,
+    client_id: clientId,
+    tax_year: taxYear,
+    folder_id: folderId,
+    folder_name: folderName,
+    files_processed: processedFiles.length,
+    files_with_errors: errors.length,
+    processed_files: processedFiles,
+    errors: errors.length > 0 ? errors : undefined,
+    pl_summary: plSummary,
+    aggregated_data,
+  };
+
+  return new Response(JSON.stringify(summary), {
+    headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+  });
+}
+
 serve(async (req: Request) => {
   if (req.method === 'OPTIONS') {
     return new Response('ok', { headers: corsHeaders });
@@ -535,11 +990,28 @@ serve(async (req: Request) => {
     }
 
     const body = await req.json();
-    const { client_name, client_id, tax_year, analyze_storage_uploads } = body as {
+    const {
+      client_name,
+      client_id,
+      tax_year,
+      analyze_storage_uploads,
+      mode,
+      file_id,
+      file_name,
+      file_mime,
+      folder_id: body_folder_id,
+      folder_name: body_folder_name,
+    } = body as {
       client_name?: string;
       client_id?: string;
       tax_year?: number;
       analyze_storage_uploads?: boolean;
+      mode?: string;
+      file_id?: string;
+      file_name?: string;
+      file_mime?: string;
+      folder_id?: string;
+      folder_name?: string;
     };
     const hubUrl = Deno.env.get('SUPABASE_URL');
     const hubKey = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY');
@@ -592,318 +1064,92 @@ serve(async (req: Request) => {
       );
     }
 
-    console.log(`[ingest-tax-documents] Starting Drive ingestion for ${client_name} ${yearNum}`);
+    const hub =
+      hubUrl && hubKey ? createClient(hubUrl, hubKey) : null;
 
-    const folderResult = await findClientTaxFolder(client_name, yearNum);
+    const m = typeof mode === 'string' ? mode.trim().toLowerCase() : '';
 
-    if (!folderResult) {
-      return new Response(
-        JSON.stringify({
-          error: `No tax folder found for ${client_name} ${yearNum}. Searched patterns: ${client_name.toUpperCase()} ${yearNum} TAXES, ${client_name.toUpperCase().split(/\s+/)[0]} ${yearNum} TAXES, etc.`,
-        }),
-        { status: 404, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+    if (m === 'list') {
+      return await handleDriveList(client_name, yearNum, hub, typeof client_id === 'string' ? client_id : undefined);
+    }
+
+    if (m === 'process_single') {
+      if (!hub) {
+        return new Response(JSON.stringify({ error: 'Supabase not configured' }), {
+          status: 500,
+          headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+        });
+      }
+      if (!client_id || typeof client_id !== 'string' || client_id.length < 10) {
+        return new Response(
+          JSON.stringify({ error: 'client_id is required for mode=process_single' }),
+          { status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' } },
+        );
+      }
+      if (!file_id || !file_name) {
+        return new Response(
+          JSON.stringify({ error: 'file_id and file_name are required for mode=process_single' }),
+          { status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' } },
+        );
+      }
+      return await handleDriveProcessSingle(
+        hub,
+        client_name,
+        client_id,
+        yearNum,
+        file_id,
+        file_name,
+        typeof file_mime === 'string' ? file_mime : undefined,
+        typeof body_folder_id === 'string' ? body_folder_id : undefined,
+        typeof body_folder_name === 'string' ? body_folder_name : undefined,
       );
     }
 
-    const { folderId, folderName } = folderResult;
-    console.log(`[ingest-tax-documents] Found folder: ${folderName} (${folderId})`);
-
-    const files = await listFilesRecursive(folderId);
-    console.log(`[ingest-tax-documents] Found ${files.length} files in folder`);
-
-    if (files.length === 0) {
-      return new Response(
-        JSON.stringify({ error: 'No files found in the tax folder' }),
-        { status: 404, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+    if (m === 'aggregate') {
+      if (!hub) {
+        return new Response(JSON.stringify({ error: 'Supabase not configured' }), {
+          status: 500,
+          headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+        });
+      }
+      if (!client_id || typeof client_id !== 'string' || client_id.length < 10) {
+        return new Response(
+          JSON.stringify({ error: 'client_id is required for mode=aggregate' }),
+          { status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' } },
+        );
+      }
+      return await handleDriveAggregate(
+        hub,
+        client_name,
+        client_id,
+        yearNum,
+        typeof body_folder_id === 'string' ? body_folder_id : undefined,
+        typeof body_folder_name === 'string' ? body_folder_name : undefined,
       );
     }
 
-    const allExtracted: ExtractedData[] = [];
-    const processedFiles: Array<{ name: string; doc_type: string; status: string }> = [];
-    const errors: Array<{ name: string; error: string }> = [];
-    const driveResults: IngestResult[] = [];
-
-    // === Gemini Flash parallel parser (with Claude fallback) ===
-    const useGemini = !!Deno.env.get("Frost_Gemini");
-    console.log(`[ingest] Parser: ${useGemini ? "Gemini Flash (parallel)" : "Claude Sonnet (sequential fallback)"}`);
-
-    if (useGemini) {
-      // Phase 1: Download all files and classify
-      const downloadedFiles: Array<{
-        file: typeof files[0];
-        base64: string;
-        mimeType: string;
-        classification: DocClassification;
-      }> = [];
-
-      for (const file of files) {
-        try {
-          console.log(`[ingest] Downloading: ${file.name} (${file.mimeType})`);
-          const { base64, downloadMime } = await downloadFile(file.id, file.mimeType);
-          const classification = classifyDocument({
-            filename: file.name ?? "",
-            mimeType: downloadMime,
-            textSample: "",
-          });
-          console.log(`[ingest] doc=${file.id} class=${classification.docClass} confidence=${classification.confidence}`);
-          const systemPrompt = pickSystemPrompt(classification.docClass);
-          if (systemPrompt === null) {
-            console.log(`[ingest] doc=${file.id} -> skipping (non-dollar-bearing)`);
-            driveResults.push({ documentId: file.id, docClass: classification.docClass, skipped: true, skipReason: "non-dollar-bearing document class" });
-            processedFiles.push({ name: file.name, doc_type: classification.docClass, status: 'skipped' });
-            continue;
-          }
-          downloadedFiles.push({ file, base64, mimeType: downloadMime, classification });
-        } catch (err) {
-          const message = err instanceof Error ? err.message : String(err);
-          console.error(`[ingest] Download error ${file.name}: ${message}`);
-          errors.push({ name: file.name, error: message });
-          processedFiles.push({ name: file.name, doc_type: 'unknown', status: 'error' });
-        }
-      }
-
-      // Phase 2: Parse in parallel batches of 4 via Gemini Flash
-      const BATCH_SIZE = 4;
-      for (let i = 0; i < downloadedFiles.length; i += BATCH_SIZE) {
-        const batch = downloadedFiles.slice(i, i + BATCH_SIZE);
-        console.log(`[ingest] Gemini batch ${Math.floor(i / BATCH_SIZE) + 1}/${Math.ceil(downloadedFiles.length / BATCH_SIZE)}: ${batch.map(b => b.file.name).join(", ")}`);
-
-        const batchResults = await Promise.allSettled(
-          batch.map(async ({ file, base64, mimeType, classification }) => {
-            const extracted = await analyzeDocumentWithGemini(base64, file.name, mimeType);
-            return { file, extracted, classification };
-          })
+    // Default (no mode): cannot run full Drive ingest in one invocation (Supabase ~2s CPU cap). Callers with client_id must
+    // use mode=list → process_single (per file) → aggregate as separate HTTP requests. Without client_id, behave like list.
+    if (!m) {
+      if (
+        typeof client_id === 'string' &&
+        client_id.length > 10 &&
+        client_id !== 'unknown'
+      ) {
+        return new Response(
+          JSON.stringify({
+            error:
+              'Drive ingestion must be split across invocations. Send mode=list, then one mode=process_single per file, then mode=aggregate. (Supabase edge CPU limit.)',
+            modes: ['list', 'process_single', 'aggregate'],
+          }),
+          { status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' } },
         );
-
-        for (let bi = 0; bi < batchResults.length; bi++) {
-          const settled = batchResults[bi];
-          if (settled.status === "fulfilled") {
-            const { file, extracted, classification } = settled.value;
-            allExtracted.push(extracted);
-            driveResults.push({ documentId: file.id, docClass: classification.docClass, extracted });
-            await writeToTaxSupabase('documents', {
-              tax_year: yearNum,
-              file_name: file.name,
-              type: extracted.doc_type || classification.docClass || 'other',
-              source_reference: file.id,
-            });
-            const transactions: Record<string, unknown>[] = [];
-            for (const income of extracted.extracted_data.income_items) {
-              transactions.push({
-                tax_year: yearNum,
-                description: `${income.type}: ${income.source}`,
-                source: income.payer_name || income.source,
-                amount: income.amount,
-                date: income.date || new Date().toISOString().split('T')[0],
-              });
-            }
-            for (const expense of extracted.extracted_data.expense_items) {
-              transactions.push({
-                tax_year: yearNum,
-                description: `${expense.category}: ${expense.description}`,
-                source: expense.payee || expense.description,
-                amount: -Math.abs(expense.amount),
-                date: expense.date || new Date().toISOString().split('T')[0],
-              });
-            }
-            if (transactions.length > 0) await writeToTaxSupabase('transactions', transactions);
-            processedFiles.push({ name: file.name, doc_type: extracted.doc_type, status: 'success' });
-            console.log(`[ingest] Done: ${file.name} -> ${extracted.doc_type} (${extracted.extracted_data.income_items.length} income, ${extracted.extracted_data.expense_items.length} expense items)`);
-          } else {
-            const err = settled.reason instanceof Error ? settled.reason.message : String(settled.reason);
-            const batchFile = batch[bi]?.file;
-            console.error(`[ingest] Gemini error ${batchFile?.name}: ${err}`);
-            errors.push({ name: batchFile?.name || 'unknown', error: err });
-            processedFiles.push({ name: batchFile?.name || 'unknown', doc_type: 'unknown', status: 'error' });
-          }
-        }
       }
-    } else {
-      // Fallback: original sequential Claude-based processing
-      for (const file of files) {
-      try {
-        console.log(`[ingest-tax-documents] Processing: ${file.name} (${file.mimeType})`);
-
-        const { base64, downloadMime } = await downloadFile(file.id, file.mimeType);
-        console.log(`[ingest-tax-documents] Downloaded ${file.name}, mime: ${downloadMime}, base64 length: ${base64.length}`);
-
-        // Change 2: classify before the Claude call
-        const classification: DocClassification = classifyDocument({
-          filename: file.name ?? "",
-          mimeType: downloadMime,
-          textSample: "",
-        });
-        console.log(
-          `[ingest] doc=${file.id} class=${classification.docClass} confidence=${classification.confidence} reasons=${classification.reasons.join("|")}`
-        );
-
-        const systemPrompt = pickSystemPrompt(classification.docClass);
-        if (systemPrompt === null) {
-          console.log(`[ingest] doc=${file.id} class=${classification.docClass} → skipping LLM pass, recording as filed-only`);
-          driveResults.push({
-            documentId: file.id,
-            docClass: classification.docClass,
-            skipped: true,
-            skipReason: "non-dollar-bearing document class",
-          });
-          processedFiles.push({ name: file.name, doc_type: classification.docClass, status: 'skipped' });
-          continue;
-        }
-
-        const extracted = await analyzeDocumentWithClaude(base64, file.name, downloadMime, systemPrompt);
-        allExtracted.push(extracted);
-        driveResults.push({ documentId: file.id, docClass: classification.docClass, extracted });
-
-        await writeToTaxSupabase('documents', {
-          tax_year: yearNum,
-          file_name: file.name,
-          type: extracted.doc_type || classification.docClass || 'other',
-          source_reference: file.id,
-        });
-
-        const transactions: Record<string, unknown>[] = [];
-
-        for (const income of extracted.extracted_data.income_items) {
-          transactions.push({
-            tax_year: yearNum,
-            description: `${income.type}: ${income.source}`,
-            source: income.payer_name || income.source,
-            amount: income.amount,
-            date: income.date || new Date().toISOString().split('T')[0],
-          });
-        }
-
-        for (const expense of extracted.extracted_data.expense_items) {
-          transactions.push({
-            tax_year: yearNum,
-            description: `${expense.category}: ${expense.description}`,
-            source: expense.payee || expense.description,
-            amount: -Math.abs(expense.amount),
-            date: expense.date || new Date().toISOString().split('T')[0],
-          });
-        }
-
-        if (transactions.length > 0) {
-          await writeToTaxSupabase('transactions', transactions);
-        }
-
-        processedFiles.push({
-          name: file.name,
-          doc_type: extracted.doc_type,
-          status: 'success',
-        });
-
-        console.log(`[ingest-tax-documents] Done: ${file.name} -> ${extracted.doc_type} (${extracted.extracted_data.income_items.length} income, ${extracted.extracted_data.expense_items.length} expense items)`);
-      } catch (err) {
-        const message = err instanceof Error ? err.message : String(err);
-        console.error(`[ingest-tax-documents] Error processing ${file.name}: ${message}`);
-        errors.push({ name: file.name, error: message });
-        processedFiles.push({
-          name: file.name,
-          doc_type: 'unknown',
-          status: 'error',
-        });
-      }
+      return await handleDriveList(client_name, yearNum, null, undefined);
     }
 
-    // Change 3: Cross-document dedup — financial statements never contribute income.
-    // Bug 2 fix — previously 1099 income and the matching bank deposit were both summed.
-
-    }
-
-    const driveIncomeSources = driveResults.filter(
-      (r) => r.docClass === "income_1099" || r.docClass === "income_w2"
-    );
-    const driveFinancialStatements = driveResults.filter((r) => r.docClass === "financial_statement");
-
-    for (const stmt of driveFinancialStatements) {
-      if (stmt.extracted && "reported_income" in stmt.extracted) {
-        if ((stmt.extracted as Record<string, unknown>)["reported_income"] != null) {
-          console.warn(
-            `[ingest] financial_statement doc=${stmt.documentId} reported non-null income despite prompt — forcing to null`
-          );
-          (stmt.extracted as Record<string, unknown>)["reported_income"] = null;
-          (stmt.extracted as Record<string, unknown>)["reported_income_reason"] = "clobbered by dedup pass (prompt rule violated)";
-        }
-      }
-    }
-
-    console.log(
-      `[ingest] dedup summary: ${driveIncomeSources.length} authoritative income docs, ${driveFinancialStatements.length} financial statements (contributing $0 income), ${driveResults.length - driveIncomeSources.length - driveFinancialStatements.length} other docs`
-    );
-
-    const plSummary = aggregatePL(allExtracted);
-    console.log(
-      `[ingest-tax-documents] P&L: Income=${plSummary.total_income}, Expenses=${plSummary.total_expenses}, Net=${plSummary.net_income}`
-    );
-
-    await writeToTaxSupabase('pl_reports', {
-      tax_year: yearNum,
-      period: `${yearNum} Annual`,
-      gross_income: plSummary.total_income,
-      total_expenses: plSummary.total_expenses,
-      net_profit: plSummary.net_income,
-      category_breakdown: {
-        income_by_category: plSummary.income_by_category,
-        expenses_by_category: plSummary.expenses_by_category,
-      },
-      generated_at: new Date().toISOString(),
-    });
-
-    const aggregated_data = {
-      total_income: plSummary.total_income,
-      total_expenses: plSummary.total_expenses,
-      net_profit: plSummary.net_income,
-    };
-
-    const summary = {
-      success: true,
-      client_name,
-      tax_year: yearNum,
-      folder_id: folderId,
-      folder_name: folderName,
-      files_processed: processedFiles.length,
-      files_with_errors: errors.length,
-      processed_files: processedFiles,
-      errors: errors.length > 0 ? errors : undefined,
-      pl_summary: plSummary,
-      aggregated_data,
-    };
-
-    if (
-      hubUrl &&
-      hubKey &&
-      typeof client_id === 'string' &&
-      client_id.length > 10 &&
-      client_id !== 'unknown'
-    ) {
-      try {
-        const hub = createClient(hubUrl, hubKey);
-        await upsertTaxReturn(hub, {
-          client_id,
-          client_name,
-          tax_year: yearNum,
-          status: 'in_progress',
-          analyzed_data: {
-            pl_summary: plSummary,
-            aggregated_data,
-            processed_files: processedFiles,
-            source: 'drive_ingest',
-            folder_id: folderId,
-            folder_name: folderName,
-            updated_at: new Date().toISOString(),
-          },
-          created_by: 'ingest-tax-documents',
-        });
-        console.log(`[ingest-tax-documents] upsert tax_returns analyzed_data for client_id=${client_id} year=${yearNum}`);
-      } catch (e) {
-        console.warn('[ingest-tax-documents] tax_returns upsert failed (non-fatal):', e);
-      }
-    }
-
-    console.log(`[ingest-tax-documents] Complete. ${processedFiles.length} files processed.`);
-
-    return new Response(JSON.stringify(summary), {
+    return new Response(JSON.stringify({ error: `Unknown mode: ${mode}` }), {
+      status: 400,
       headers: { ...corsHeaders, 'Content-Type': 'application/json' },
     });
   } catch (err) {

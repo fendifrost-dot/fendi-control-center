@@ -418,24 +418,85 @@ async function runIngestion(
   clientId: string,
   year: number
 ): Promise<any> {
+  const ingestUrl = `${SUPABASE_URL}/functions/v1/ingest-tax-documents`;
+  const headers = {
+    "Content-Type": "application/json",
+    Authorization: `Bearer ${SUPABASE_SERVICE_ROLE_KEY}`,
+  };
+  const baseBody = {
+    client_name: clientName,
+    client_id: clientId,
+    tax_year: year,
+  };
+
   try {
-    console.log(`[generate] Running ingestion for ${clientName} (${clientId}) year ${year}...`);
-    const r = await fetch(
-      `${SUPABASE_URL}/functions/v1/ingest-tax-documents`,
-      {
+    console.log(`[generate] Running chunked Drive ingestion for ${clientName} (${clientId}) year ${year}...`);
+
+    const listRes = await fetch(ingestUrl, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ ...baseBody, mode: "list" }),
+    });
+    const listJson = await listRes.json();
+    if (!listRes.ok || listJson.error) {
+      console.warn(`[generate] ingest list failed:`, listJson?.error ?? listRes.status);
+      return listJson;
+    }
+
+    const folderId = listJson.folder_id as string;
+    const folderName = listJson.folder_name as string;
+    const files = (listJson.files ?? []) as Array<{
+      id: string;
+      name: string;
+      mimeType: string;
+  }>;
+
+    const chunkErrors: Array<{ name: string; error: string }> = [];
+    for (const f of files) {
+      const pr = await fetch(ingestUrl, {
         method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: `Bearer ${SUPABASE_SERVICE_ROLE_KEY}`,
-        },
+        headers,
         body: JSON.stringify({
-          client_name: clientName,
-          client_id: clientId,
-          tax_year: year,
+          ...baseBody,
+          mode: "process_single",
+          file_id: f.id,
+          file_name: f.name,
+          file_mime: f.mimeType,
+          folder_id: folderId,
+          folder_name: folderName,
         }),
+      });
+      const pj = await pr.json();
+      if (!pr.ok || pj.success === false) {
+        chunkErrors.push({
+          name: f.name,
+          error: (pj.error as string) || `HTTP ${pr.status}`,
+        });
       }
-    );
-    const result = await r.json();
+    }
+
+    const aggRes = await fetch(ingestUrl, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({
+        ...baseBody,
+        mode: "aggregate",
+        folder_id: folderId,
+        folder_name: folderName,
+      }),
+    });
+    const result = await aggRes.json();
+    if (!aggRes.ok) {
+      console.warn(`[generate] ingest aggregate failed:`, result?.error ?? aggRes.status);
+      return {
+        ...result,
+        ingest_chunk_errors: chunkErrors.length ? chunkErrors : undefined,
+      };
+    }
+
+    if (chunkErrors.length > 0) {
+      result.ingest_chunk_errors = chunkErrors;
+    }
     console.log(`[generate] Ingestion result for ${clientName} ${year}:`, JSON.stringify(result).slice(0, 500));
     return result;
   } catch (e) {

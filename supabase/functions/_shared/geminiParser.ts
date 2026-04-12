@@ -1,12 +1,9 @@
 /**
- * Gemini Flash document parser — fast, cheap bank statement extraction.
+ * Gemini Flash document parser for tax ingest (same contract as analyzeDocumentWithClaude).
  * Uses Google AI Studio API (generativelanguage.googleapis.com).
- *
- * Cost: ~$0.01 per 12 statements vs ~$0.40 with Claude Sonnet.
- * Speed: ~1-3s per statement vs ~5-15s with Sonnet.
  */
 
-const GEMINI_MODEL = "gemini-2.0-flash";
+const GEMINI_MODEL = Deno.env.get("GEMINI_TAX_MODEL") ?? "gemini-2.5-flash";
 const GEMINI_API_BASE = "https://generativelanguage.googleapis.com/v1beta";
 
 interface IncomeItem {
@@ -26,7 +23,7 @@ interface ExpenseItem {
   date?: string;
 }
 
-interface ExtractedData {
+export interface ExtractedData {
   doc_type: string;
   classification: string;
   extracted_data: {
@@ -55,7 +52,7 @@ Do NOT double-count transfers between accounts.`;
 
 /**
  * Analyze a single document using Gemini Flash.
- * Accepts the same inputs/outputs as the old analyzeDocumentWithClaude.
+ * When customPrompt is set (from pickSystemPrompt), it is used as the system instruction.
  */
 export async function analyzeDocumentWithGemini(
   base64Content: string,
@@ -70,33 +67,58 @@ export async function analyzeDocumentWithGemini(
 
   const parts: Array<Record<string, unknown>> = [];
 
-  const isTextPlain = mimeType.startsWith("text/") || mimeType === "application/json";
+  const isImage = mimeType.startsWith("image/");
+  const isPdf = mimeType === "application/pdf";
+  const isTextPlain =
+    mimeType.startsWith("text/") || mimeType === "application/json" || mimeType === "text/csv";
+
   if (isTextPlain) {
     let decoded: string;
-    try { decoded = atob(base64Content); } catch { decoded = base64Content; }
-    parts.push({ text: `Analyze this tax document (${fileName}). Content:\n\n${decoded}\n\nExtract all financial data.` });
-  } else {
+    try {
+      decoded = atob(base64Content);
+    } catch {
+      decoded = base64Content;
+    }
     parts.push({
-      inline_data: {
-        mime_type: mimeType,
-        data: base64Content,
-      },
+      text: `Analyze this tax document (${fileName}). Content:\n\n${decoded}\n\nExtract all financial data.`,
+    });
+  } else if (isPdf) {
+    parts.push({
+      inline_data: { mime_type: "application/pdf", data: base64Content },
     });
     parts.push({
       text: `Analyze this tax document (${fileName}). Extract all financial data including dollar amounts, payer names, EINs, and dates.`,
     });
+  } else if (isImage) {
+    parts.push({
+      inline_data: { mime_type: mimeType, data: base64Content },
+    });
+    parts.push({
+      text: `Analyze this tax document (${fileName}). Extract all financial data including dollar amounts, payer names, EINs, and dates.`,
+    });
+  } else {
+    let decodedText: string;
+    try {
+      decodedText = atob(base64Content);
+    } catch {
+      decodedText = base64Content;
+    }
+    parts.push({
+      text: `Analyze this tax document (${fileName}). Content:\n\n${decodedText}\n\nExtract all financial data.`,
+    });
   }
 
   const body = {
-    system_instruction: { parts: [{ text: systemPrompt }] },
-    contents: [{ parts }],
+    systemInstruction: { parts: [{ text: systemPrompt }] },
+    contents: [{ role: "user", parts }],
     generationConfig: {
-      response_mime_type: "application/json",
       temperature: 0.1,
+      maxOutputTokens: 8192,
+      responseMimeType: "application/json",
     },
   };
 
-  const url = `${GEMINI_API_BASE}/models/${GEMINI_MODEL}:generateContent?key=${apiKey}`;
+  const url = `${GEMINI_API_BASE}/models/${GEMINI_MODEL}:generateContent?key=${encodeURIComponent(apiKey)}`;
 
   const response = await fetch(url, {
     method: "POST",
@@ -106,12 +128,11 @@ export async function analyzeDocumentWithGemini(
 
   if (!response.ok) {
     const errText = await response.text();
-    throw new Error(`Gemini API error: ${response.status} - ${errText}`);
+    throw new Error(`Gemini API error: ${response.status} - ${errText.slice(0, 2000)}`);
   }
 
   const result = await response.json();
-
-  const textContent = result.candidates?.[0]?.content?.parts?.[0]?.text;
+  const textContent = result.candidates?.[0]?.content?.parts?.[0]?.text as string | undefined;
   if (!textContent) throw new Error("No text response from Gemini");
 
   let parsed: Partial<ExtractedData>;
@@ -135,8 +156,7 @@ export async function analyzeDocumentWithGemini(
 }
 
 /**
- * Process multiple documents in parallel batches.
- * Avoids memory spikes by limiting concurrency.
+ * Process multiple documents in parallel batches (legacy helper; chunked ingest prefers one file per invocation).
  */
 export async function analyzeDocumentsBatch(
   files: Array<{ base64: string; fileName: string; mimeType: string; fileId: string }>,
@@ -147,7 +167,9 @@ export async function analyzeDocumentsBatch(
 
   for (let i = 0; i < files.length; i += concurrency) {
     const batch = files.slice(i, i + concurrency);
-    console.log(`[gemini] Processing batch ${Math.floor(i / concurrency) + 1}: ${batch.map(f => f.fileName).join(", ")}`);
+    console.log(
+      `[gemini] Processing batch ${Math.floor(i / concurrency) + 1}: ${batch.map((f) => f.fileName).join(", ")}`,
+    );
 
     const batchResults = await Promise.allSettled(
       batch.map(async (file) => {
@@ -156,13 +178,13 @@ export async function analyzeDocumentsBatch(
       }),
     );
 
-    for (const settled of batchResults) {
+    for (let bi = 0; bi < batchResults.length; bi++) {
+      const settled = batchResults[bi];
       if (settled.status === "fulfilled") {
         results.push(settled.value);
       } else {
         const err = settled.reason instanceof Error ? settled.reason.message : String(settled.reason);
-        const idx = batchResults.indexOf(settled);
-        const file = batch[idx];
+        const file = batch[bi];
         console.error(`[gemini] Error processing ${file?.fileName}: ${err}`);
         results.push({ fileId: file?.fileId ?? "unknown", fileName: file?.fileName ?? "unknown", error: err });
       }
