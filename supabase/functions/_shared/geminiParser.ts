@@ -63,8 +63,8 @@ export async function analyzeDocumentWithGemini(
   mimeType: string,
   customPrompt?: string,
 ): Promise<ExtractedData> {
-  const apiKey = Deno.env.get("GEMINI_API_KEY");
-  if (!apiKey) throw new Error("GEMINI_API_KEY not set");
+  const apiKey = Deno.env.get("Frost_Gemini");
+  if (!apiKey) throw new Error("Frost_Gemini not set");
 
   const systemPrompt = customPrompt ?? EXTRACTION_PROMPT;
 
