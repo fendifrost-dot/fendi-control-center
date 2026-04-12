@@ -2,8 +2,13 @@ import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.49.1";
 import { fetchCreditGuardian } from "../_shared/creditGuardian.ts";
 import { callClaudeJSON } from "../_shared/claude.ts";
+import {
+  ensureBroadModePrimaryAnchor,
+  extractCaseStateFromDetailDocs,
+  formatTriggersForRetrievalQuery,
+  retrieveKnowledge,
+} from "../_shared/creditKnowledgeRetrieval.ts";
 import { assembleCreditAnalysisUserPrompt, buildRetrievalIntentSummary, inferRetrievalTaskFromDocs } from "../_shared/creditPromptComposer.ts";
-import { retrieveRelevantKnowledge } from "../_shared/retrieveRelevantKnowledge.ts";
 import { fuzzyClientSearch } from "../_shared/fuzzyClientSearch.ts";
 
 const corsHeaders = {
@@ -16,7 +21,7 @@ const SUPABASE_SERVICE_ROLE_KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
 const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
 
 const SYSTEM_PROMPT = `You are a credit repair analyst operating under FCRA, FDCPA, and CFPB guidelines.
-The user message is structured as: client state summary, optional retrieved prior-case knowledge, full client JSON, then the task line. Use retrieved patterns only when consistent with the client data; never invent facts.
+SYSTEM RULES: follow FCRA/FDCPA; never fabricate facts. The user message is structured as: CLIENT STATE, optional RELEVANT KNOWLEDGE (typed prior-case snippets), client JSON, then TASK. Use RELEVANT KNOWLEDGE only when consistent with the client data; never invent facts.
 Analyze the client's credit timeline events and generate a prioritized dispute strategy.
 
 You MUST return valid JSON with exactly these top-level keys:
@@ -259,12 +264,27 @@ serve(async (req) => {
     const docsObj = docs as Record<string, unknown>;
 
     const retrievalTask = inferRetrievalTaskFromDocs(docsObj);
-    const intentSummary = buildRetrievalIntentSummary(retrievalTask, detailObj, docsObj);
-    const retrieved = await retrieveRelevantKnowledge({
+    const caseState = extractCaseStateFromDetailDocs(detailObj, docsObj);
+    const intentSummary =
+      buildRetrievalIntentSummary(retrievalTask, detailObj, docsObj) + formatTriggersForRetrievalQuery(caseState);
+    const intentLabel =
+      retrievalTask === "response_analysis"
+        ? "review bureau response rebuttal verification"
+        : "analyze credit dispute strategy FCRA";
+    let retrieved = await retrieveKnowledge(
+      supabase,
+      caseState,
+      { intentLabel, task: retrievalTask },
+      {
+        task: retrievalTask,
+        intentSummary,
+        caseStateSummary: intentSummary.slice(0, 800),
+        maxItems: 8,
+      },
+    );
+    retrieved = await ensureBroadModePrimaryAnchor(supabase, retrieved, caseState, 8, {
+      intentLabel,
       task: retrievalTask,
-      intentSummary,
-      caseStateSummary: intentSummary.slice(0, 800),
-      maxItems: 8,
     });
 
     const userPrompt = assembleCreditAnalysisUserPrompt({

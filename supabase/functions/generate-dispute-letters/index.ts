@@ -1,9 +1,23 @@
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.49.1";
+import { assembleDispute, buildDisputeAssemblyClientState } from "../_shared/assembleDispute.ts";
+import {
+  applyEscalationConfidenceGate,
+  applyPersistedUncertaintyEscalationBias,
+  buildEscalationCaseState,
+  determineEscalationLevel,
+} from "../_shared/disputeEscalation.ts";
+import { nextActionFor, shouldBlockDisputeGeneration } from "../_shared/disputeGenerationGate.ts";
 import { fetchCreditGuardian } from "../_shared/creditGuardian.ts";
-import { callClaudeJSON } from "../_shared/claude.ts";
-import { assembleDisputeLetterUserPrompt } from "../_shared/creditPromptComposer.ts";
-import { retrieveRelevantKnowledge } from "../_shared/retrieveRelevantKnowledge.ts";
+import {
+  ensureBroadModePrimaryAnchor,
+  extractCaseStateFromDetailDocs,
+  formatTriggersForRetrievalQuery,
+  mergeWarningFlagsForPersistence,
+  retrieveKnowledge,
+  type RetrievalCompositionOptions,
+} from "../_shared/creditKnowledgeRetrieval.ts";
+import { validateDisputeStrategy } from "../_shared/validateDisputeStrategy.ts";
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
@@ -13,9 +27,6 @@ const corsHeaders = {
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
 const SUPABASE_SERVICE_ROLE_KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
 const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
-
-const SYSTEM_PROMPT =
-  "You are a compliance-aware credit dispute specialist. The user message includes: a short context line, optional retrieved prior-case dispute examples and violation logic, then client JSON and the dispute item. Use retrieval only when it matches the facts; do not fabricate legal outcomes. Draft concise, formal dispute letters referencing applicable FCRA sections.";
 
 serve(async (req) => {
   if (req.method === "OPTIONS") return new Response(null, { headers: corsHeaders });
@@ -47,29 +58,125 @@ serve(async (req) => {
     const detail = await detailResp.json();
     const detailObj = detail as Record<string, unknown>;
 
+    const caseState = extractCaseStateFromDetailDocs(detailObj, {});
     const intentSummary = [
       `task=dispute_generation`,
       `bureau=${String(disputeItem.bureau ?? "unknown")}`,
       `account=${String(disputeItem.account_name ?? disputeItem.account ?? "")}`.slice(0, 400),
-    ].join("; ");
+    ].join("; ") + formatTriggersForRetrievalQuery(caseState);
+    const intentLabel = [
+      "generate dispute letter",
+      String(disputeItem.bureau ?? ""),
+      String(disputeItem.account_name ?? disputeItem.account ?? ""),
+    ]
+      .filter(Boolean)
+      .join(" ")
+      .slice(0, 500);
 
-    const retrieved = await retrieveRelevantKnowledge({
-      task: "dispute_generation",
-      intentSummary,
-      caseStateSummary: intentSummary.slice(0, 800),
-      maxItems: 8,
-    });
+    const triggers = caseState.triggers?.length
+      ? caseState.triggers
+      : caseState.trigger
+      ? [caseState.trigger]
+      : [];
 
-    const userPrompt = assembleDisputeLetterUserPrompt({
-      detail: detailObj,
-      disputeItem,
+    const escalationInput = buildEscalationCaseState(detailObj, triggers);
+    const escalation = applyPersistedUncertaintyEscalationBias(
+      applyEscalationConfidenceGate(
+        determineEscalationLevel(escalationInput),
+        caseState.triggerConfidence,
+      ),
+      caseState.warningFlags,
+    );
+
+    const composition: RetrievalCompositionOptions = { escalationLevel: escalation.level };
+
+    let retrieved = await retrieveKnowledge(
+      supabase,
+      caseState,
+      { intentLabel, task: "dispute_generation" },
+      {
+        task: "dispute_generation",
+        intentSummary,
+        caseStateSummary: intentSummary.slice(0, 800),
+        maxItems: 8,
+      },
+      composition,
+    );
+
+    const retrievalCap = 8;
+    if (shouldBlockDisputeGeneration(caseState, retrieved)) {
+      const vs = validateDisputeStrategy({
+        primaryTrigger: caseState.primaryTrigger ?? caseState.trigger ?? null,
+        escalationLevel: escalation.level,
+        secondaryTriggers: caseState.secondaryTriggers ?? [],
+        triggerConfidence: caseState.triggerConfidence,
+        triggerEvidence: caseState.triggerEvidence,
+      });
+      const routing = nextActionFor(caseState.primaryTrigger ?? caseState.trigger);
+      return new Response(
+        JSON.stringify({
+          ok: true,
+          blocked: true,
+          reason: "insufficient_verified_data",
+          message:
+            "Insufficient verified data to generate a strong dispute. Additional documentation recommended.",
+          next_action: routing.next_action,
+          recommended_inputs: [...routing.recommended_inputs],
+          case_state_patch: {
+            warning_flags: mergeWarningFlagsForPersistence(caseState.warningFlags, vs.warningCodes, {
+              triggerConfidence: caseState.triggerConfidence,
+            }),
+          },
+        }),
+        {
+          headers: { ...corsHeaders, "Content-Type": "application/json" },
+        },
+      );
+    }
+
+    retrieved = await ensureBroadModePrimaryAnchor(
+      supabase,
       retrieved,
-      taskInstruction: "Return JSON with keys: subject, letter_body, bureau, legal_citations (array), confidence.",
+      caseState,
+      retrievalCap,
+      { intentLabel, task: "dispute_generation" },
+    );
+
+    const assembled = assembleDispute({
+      clientState: buildDisputeAssemblyClientState(detailObj, disputeItem),
+      triggers,
+      primaryTrigger: caseState.primaryTrigger ?? caseState.trigger,
+      secondaryTriggers: caseState.secondaryTriggers,
+      triggerReasoning: caseState.triggerReasoning,
+      triggerConfidence: caseState.triggerConfidence,
+      triggerEvidence: caseState.triggerEvidence,
+      retrievedKnowledge: retrieved,
+      escalation,
     });
 
-    const draft = await callClaudeJSON<Record<string, unknown>>(SYSTEM_PROMPT, userPrompt, {
-      required: ["subject", "letter_body", "bureau"],
-    });
+    const draft: Record<string, unknown> = {
+      subject: assembled.subject,
+      letter_body: assembled.letterBody,
+      bureau: assembled.bureau,
+      legal_citations: assembled.legalCitations,
+      confidence: assembled.retrievalSparse ? 0.65 : 0.88,
+      assembly_mode: "structured",
+      escalation_level: escalation.level,
+      escalation_strategy: escalation.strategy,
+      primary_trigger: assembled.primaryTrigger,
+      secondary_triggers: assembled.secondaryTriggers,
+      trigger_reasoning: assembled.triggerReasoning,
+      trigger_confidence: assembled.triggerConfidence,
+      trigger_evidence: caseState.triggerEvidence ?? null,
+      strategy_warnings: assembled.strategyWarnings,
+      warning_codes: assembled.warningCodes,
+      /** Merge into client `case_state.warning_flags` so the next run biases retrieval + escalation. */
+      case_state_patch: {
+        warning_flags: mergeWarningFlagsForPersistence(caseState.warningFlags, assembled.warningCodes, {
+          triggerConfidence: assembled.triggerConfidence,
+        }),
+      },
+    };
 
     const { data: row, error } = await supabase
       .from("dispute_letters")

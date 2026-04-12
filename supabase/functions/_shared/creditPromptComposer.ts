@@ -39,29 +39,20 @@ export function buildRetrievalIntentSummary(
 }
 
 export function formatRetrievedKnowledgeSection(k: RetrievedKnowledge): string {
-  const has =
-    k.disputeExamples.length + k.analysisPatterns.length + k.violationLogic.length > 0;
-  if (!has) return "";
-
-  const lines: string[] = [
-    "### Retrieved knowledge (prior patterns — use for consistency; ground every claim in client JSON below)",
-  ];
-  if (k.disputeExamples.length) {
-    lines.push("Dispute examples:");
-    k.disputeExamples.forEach((x, i) => lines.push(`${i + 1}. ${x}`));
-  }
-  if (k.analysisPatterns.length) {
-    lines.push("Analysis patterns:");
-    k.analysisPatterns.forEach((x, i) => lines.push(`${i + 1}. ${x}`));
-  }
-  if (k.violationLogic.length) {
-    lines.push("Violation / statutory logic:");
-    k.violationLogic.forEach((x, i) => lines.push(`${i + 1}. ${x}`));
-  }
-  return lines.join("\n");
+  const lines: string[] = [];
+  const pushTyped = (type: string, arr: string[]) => {
+    for (const x of arr) {
+      lines.push(`- [type: ${type}] ${x}`);
+    }
+  };
+  pushTyped("dispute_example", k.disputeExamples);
+  pushTyped("analysis_pattern", k.analysisPatterns);
+  pushTyped("violation_logic", k.violationLogic);
+  if (lines.length === 0) return "";
+  return ["RELEVANT KNOWLEDGE:", ...lines].join("\n");
 }
 
-/** User prompt sections in required order: state summary → retrieved → payload → task. */
+/** User prompt sections: CLIENT STATE → RELEVANT KNOWLEDGE (if any) → JSON payloads → TASK. */
 export function assembleCreditAnalysisUserPrompt(opts: {
   detail: Record<string, unknown>;
   docs: Record<string, unknown>;
@@ -73,21 +64,21 @@ export function assembleCreditAnalysisUserPrompt(opts: {
   const detailJson = JSON.stringify(opts.detail).slice(0, 80_000);
   const docsJson = JSON.stringify(opts.docs).slice(0, 30_000);
 
-  return [
-    summaryLine,
-    "",
-    retrievedBlock,
-    "",
+  const parts: string[] = ["CLIENT STATE:", summaryLine, ""];
+  if (retrievedBlock) {
+    parts.push(retrievedBlock, "");
+  }
+  parts.push(
     "Client detail JSON:",
     detailJson,
     "",
     "Client documents JSON:",
     docsJson,
     "",
+    "TASK:",
     opts.taskInstruction,
-  ]
-    .filter((s) => s !== "")
-    .join("\n");
+  );
+  return parts.join("\n");
 }
 
 export function assembleDisputeLetterUserPrompt(opts: {
@@ -96,21 +87,21 @@ export function assembleDisputeLetterUserPrompt(opts: {
   retrieved: RetrievedKnowledge;
   taskInstruction: string;
 }): string {
-  const summaryLine = `Dispute context summary: bureau=${String(opts.disputeItem.bureau ?? "unknown")}; client_detail_present=true.`;
+  const summaryLine = `bureau=${String(opts.disputeItem.bureau ?? "unknown")}; account=${String(opts.disputeItem.account_name ?? opts.disputeItem.account ?? "")}; client_detail_present=true.`;
   const retrievedBlock = formatRetrievedKnowledgeSection(opts.retrieved);
-  return [
-    summaryLine,
-    "",
-    retrievedBlock,
-    "",
+  const parts: string[] = ["CLIENT STATE:", summaryLine, ""];
+  if (retrievedBlock) {
+    parts.push(retrievedBlock, "");
+  }
+  parts.push(
     "Client detail JSON:",
     JSON.stringify(opts.detail).slice(0, 60_000),
     "",
     "Dispute item JSON:",
     JSON.stringify(opts.disputeItem),
     "",
+    "TASK:",
     opts.taskInstruction,
-  ]
-    .filter((s) => s !== "")
-    .join("\n");
+  );
+  return parts.join("\n");
 }

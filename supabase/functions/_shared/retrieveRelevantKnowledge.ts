@@ -22,22 +22,81 @@ export interface RetrievedKnowledge {
   disputeExamples: string[];
   analysisPatterns: string[];
   violationLogic: string[];
+  /**
+   * Optional KB row `trigger` per `violationLogic[i]` (same length when present).
+   * Strength ranking prefers this over text inference when set.
+   */
+  violationTriggers?: (string | undefined)[];
 }
 
 const MAX_CAP = 10;
 
+export function emptyRetrievedKnowledge(): RetrievedKnowledge {
+  return { disputeExamples: [], analysisPatterns: [], violationLogic: [], violationTriggers: undefined };
+}
+
 function empty(): RetrievedKnowledge {
-  return { disputeExamples: [], analysisPatterns: [], violationLogic: [] };
+  return emptyRetrievedKnowledge();
+}
+
+/** Merge two retrieval results; total items across all buckets capped at totalMax (default 8). */
+export function mergeRetrievedCapped(
+  a: RetrievedKnowledge,
+  b: RetrievedKnowledge,
+  totalMax = 8,
+): RetrievedKnowledge {
+  const flat: Array<{ k: "d" | "p" | "v"; c: string; vTrig?: string }> = [
+    ...a.disputeExamples.map((c) => ({ k: "d" as const, c })),
+    ...a.analysisPatterns.map((c) => ({ k: "p" as const, c })),
+    ...a.violationLogic.map((c, i) => ({
+      k: "v" as const,
+      c,
+      vTrig: a.violationTriggers?.[i],
+    })),
+    ...b.disputeExamples.map((c) => ({ k: "d" as const, c })),
+    ...b.analysisPatterns.map((c) => ({ k: "p" as const, c })),
+    ...b.violationLogic.map((c, i) => ({
+      k: "v" as const,
+      c,
+      vTrig: b.violationTriggers?.[i],
+    })),
+  ].slice(0, totalMax);
+
+  const out: RetrievedKnowledge = {
+    disputeExamples: [],
+    analysisPatterns: [],
+    violationLogic: [],
+    violationTriggers: [],
+  };
+  for (const x of flat) {
+    if (x.k === "d") out.disputeExamples.push(x.c);
+    else if (x.k === "p") out.analysisPatterns.push(x.c);
+    else {
+      out.violationLogic.push(x.c);
+      out.violationTriggers!.push(x.vTrig);
+    }
+  }
+  if (out.violationTriggers!.length === 0) delete out.violationTriggers;
+  return out;
 }
 
 function clampArrays(k: Partial<RetrievedKnowledge>, maxPerArray: number): RetrievedKnowledge {
   const take = (arr: unknown, n: number): string[] =>
     Array.isArray(arr) ? arr.map((x) => String(x)).filter(Boolean).slice(0, n) : [];
-  return {
+  const v = take(k.violationLogic, maxPerArray);
+  const ext = k as Record<string, unknown>;
+  const vtRaw = k.violationTriggers ?? ext.violation_triggers;
+  const vt = Array.isArray(vtRaw)
+    ? vtRaw.slice(0, v.length).map((x) => (x == null ? undefined : String(x)))
+    : undefined;
+  const out: RetrievedKnowledge = {
     disputeExamples: take(k.disputeExamples, maxPerArray),
     analysisPatterns: take(k.analysisPatterns, maxPerArray),
-    violationLogic: take(k.violationLogic, maxPerArray),
+    violationLogic: v,
+    violationTriggers: vt && vt.length === v.length ? vt : undefined,
   };
+  if (!out.violationTriggers?.length) delete out.violationTriggers;
+  return out;
 }
 
 function normalizePayload(j: Record<string, unknown>, maxItems: number): RetrievedKnowledge {
@@ -48,6 +107,7 @@ function normalizePayload(j: Record<string, unknown>, maxItems: number): Retriev
       disputeExamples: (j.disputeExamples ?? j.dispute_examples) as string[] | undefined,
       analysisPatterns: (j.analysisPatterns ?? j.analysis_patterns) as string[] | undefined,
       violationLogic: (j.violationLogic ?? j.violation_logic) as string[] | undefined,
+      violationTriggers: j.violationTriggers ?? j.violation_triggers,
     },
     n,
   );
