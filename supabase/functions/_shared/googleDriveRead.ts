@@ -140,10 +140,13 @@ export interface DriveFile {
   modifiedTime?: string;
 }
 
+/** Shared Drive params appended to every files.list / files.get call. */
+const SHARED_DRIVE_PARAMS = "&supportsAllDrives=true&includeItemsFromAllDrives=true";
+
 /** Search for folders matching a name pattern. */
 export async function searchFolders(nameQuery: string): Promise<DriveFile[]> {
   const q = `name contains '${nameQuery.replace(/'/g, "\\'")}' and mimeType = 'application/vnd.google-apps.folder' and trashed = false`;
-  const url = DRIVE_API + "/files?q=" + encodeURIComponent(q) + "&fields=files(id,name,mimeType,modifiedTime)&pageSize=20";
+  const url = DRIVE_API + "/files?q=" + encodeURIComponent(q) + "&fields=files(id,name,mimeType,modifiedTime)&pageSize=20" + SHARED_DRIVE_PARAMS;
   const resp = await driveApiFetch(url);
   if (!resp.ok) throw new Error("Drive folder search failed: " + resp.status);
   const data = await resp.json();
@@ -153,7 +156,7 @@ export async function searchFolders(nameQuery: string): Promise<DriveFile[]> {
 /** Find a specific folder by exact name within a parent folder. */
 export async function findFolderInParent(parentId: string, folderName: string): Promise<string | null> {
   const q = `'${parentId}' in parents and name = '${folderName.replace(/'/g, "\\'")}' and mimeType = 'application/vnd.google-apps.folder' and trashed = false`;
-  const url = DRIVE_API + "/files?q=" + encodeURIComponent(q) + "&fields=files(id,name)";
+  const url = DRIVE_API + "/files?q=" + encodeURIComponent(q) + "&fields=files(id,name)" + SHARED_DRIVE_PARAMS;
   const resp = await driveApiFetch(url);
   if (!resp.ok) throw new Error("Drive search failed: " + resp.status);
   const data = await resp.json();
@@ -163,7 +166,7 @@ export async function findFolderInParent(parentId: string, folderName: string): 
 /** List all subfolders in a parent. */
 export async function listSubfolders(parentId: string): Promise<DriveFile[]> {
   const q = `'${parentId}' in parents and mimeType = 'application/vnd.google-apps.folder' and trashed = false`;
-  const url = DRIVE_API + "/files?q=" + encodeURIComponent(q) + "&fields=files(id,name,mimeType,modifiedTime)&pageSize=100";
+  const url = DRIVE_API + "/files?q=" + encodeURIComponent(q) + "&fields=files(id,name,mimeType,modifiedTime)&pageSize=100" + SHARED_DRIVE_PARAMS;
   const resp = await driveApiFetch(url);
   if (!resp.ok) throw new Error("Drive list subfolders failed: " + resp.status);
   const data = await resp.json();
@@ -178,7 +181,7 @@ export async function listFilesInFolder(folderId: string): Promise<DriveFile[]> 
   do {
     const q = `'${folderId}' in parents and mimeType != 'application/vnd.google-apps.folder' and trashed = false`;
     let url = DRIVE_API + "/files?q=" + encodeURIComponent(q) +
-      "&fields=nextPageToken,files(id,name,mimeType,size,modifiedTime)&pageSize=100";
+      "&fields=nextPageToken,files(id,name,mimeType,size,modifiedTime)&pageSize=100" + SHARED_DRIVE_PARAMS;
     if (pageToken) url += "&pageToken=" + pageToken;
 
     const resp = await driveApiFetch(url);
