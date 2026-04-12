@@ -790,7 +790,7 @@ ${taxDataPayload}${priorYearBlock}`;
       console.log(
         `[generate] SE base: netSEIncome=${netSEIncome} (from canonical summary; see netSelfEmploymentIncomeFromCanonical)`,
       );
-      const seBase = netSEIncome * 0.9235;
+      const seBase = Math.max(0, netSEIncome * 0.9235);  // clamp: no SE tax on net losses
       const ssWageBase2022 = 147000;
       const ssTax = Math.min(seBase, ssWageBase2022) * 0.124;
       const medicareTax = seBase * 0.029;
