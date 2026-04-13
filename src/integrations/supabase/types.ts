@@ -1433,10 +1433,6 @@ export type Database = {
       }
     }
     Functions: {
-      delete_client_and_related_data: {
-        Args: { p_client_id: string }
-        Returns: undefined
-      },
       claim_outbox_rows: {
         Args: { p_chat_id: string; p_limit: number; p_now: string }
         Returns: {
