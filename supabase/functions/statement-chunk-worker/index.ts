@@ -4,7 +4,7 @@ import { chunkPages } from "../_shared/chunker.ts";
 import { ocrPage } from "../_shared/ocr.ts";
 import { extractStatementChunk } from "../_shared/geminiParser.ts";
 import { mergeChunkResults, type StatementTx } from "../_shared/statementMerger.ts";
-import { downloadFile } from "../_shared/googleDriveRead.ts";
+import { downloadFileRaw } from "../_shared/googleDriveRead.ts";
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
@@ -101,11 +101,9 @@ Deno.serve(async (req: Request) => {
       if (dlErr || !blob) throw new Error(`storage download failed: ${dlErr?.message ?? "no data"}`);
       pdfBytes = new Uint8Array(await blob.arrayBuffer());
     } else {
-      // Download from Google Drive
-      const driveResult = await downloadFile(job.file_id, "application/pdf");
-      const raw = atob(driveResult.content);
-      pdfBytes = new Uint8Array(raw.length);
-      for (let i = 0; i < raw.length; i++) pdfBytes[i] = raw.charCodeAt(i);
+      // Download from Google Drive (raw bytes, no base64 — avoids CPU limit)
+      const driveResult = await downloadFileRaw(job.file_id, "application/pdf");
+      pdfBytes = driveResult.bytes;
     }
 
     console.log(`[chunk-worker] downloaded ${pdfBytes.length} bytes for job=${jobId}`);
