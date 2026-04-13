@@ -32,7 +32,8 @@ const corsHeaders = {
   'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type',
   'Access-Control-Allow-Methods': 'POST, OPTIONS',
 };
-const INGEST_VERSION = "async-chunk-v2";
+const INGEST_VERSION = "async-chunk-v3";
+const EDGE_SAFE_BYTE_LIMIT = 80_000_000;
 
 /** Persisted between process_single calls; aggregate reads this from tax_returns.analyzed_data */
 const DRIVE_INGEST_SESSION_KEY = 'drive_ingest_session';
