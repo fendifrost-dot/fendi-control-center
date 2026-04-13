@@ -50,6 +50,17 @@ export const MANUAL_CATEGORY_MAP: Record<string, ScheduleCCategoryKey> = {
   taxes_licenses: "taxes_licenses",
   depreciation: "depreciation",
   wages: "wages",
+  advertising: "advertising",
+  repairs: "repairs_maintenance",
+  rent: "rent_other",
+  office_expense: "office_expense",
+  rent_lease_business: "rent_other",
+  car_truck_expenses: "car_truck",
+  insurance_business: "insurance",
+  interest_mortgage_business: "interest_mortgage",
+  interest_other_business: "interest_other",
+  other_business_expense: "other_expenses",
+  home_office: "other_expenses",
 };
 
 /** Bucket for expenses not yet adjudicated to a Schedule C line */
@@ -91,6 +102,9 @@ export function mapManualUiCategoryToScheduleC(
 ): ScheduleCCategoryKey | typeof UNCLASSIFIED_SCHEDULE_C {
   const k = MANUAL_UI_TO_SCHEDULE_C[uiCategory];
   if (k !== undefined) return k;
+  const m = MANUAL_CATEGORY_MAP[uiCategory];
+  if (m !== undefined) return m;
+  if (uiCategory in SCHEDULE_C_CATEGORIES) return uiCategory as ScheduleCCategoryKey;
   return UNCLASSIFIED_SCHEDULE_C;
 }
 
