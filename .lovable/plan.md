@@ -1,41 +1,16 @@
 
 
-## Plan: Sync and Deploy Edge Functions from Commit 8d201e9
+## Plan: Create `delete_client_and_related_data` Database Function
 
-### Steps
+### Single Step — Database Migration
 
-1. **Verify GitHub sync** — Check that commit 8d201e9 is reflected in the workspace by inspecting `supabase/functions/ingest-tax-documents/index.ts` for `normalizeToExtractedData` and `supabase/functions/_shared/geminiParser.ts` for the `...parsed` spread.
+Run the user-provided SQL as a migration to create the `delete_client_and_related_data(uuid)` function with `SECURITY DEFINER`, plus `REVOKE ALL` / `GRANT EXECUTE` to `authenticated` and `service_role`, and the `COMMENT`.
 
-2. **Deploy all edge functions** — Deploy every edge function listed in `supabase/config.toml` plus any others present in `supabase/functions/`:
-   - `analyze-credit-strategy`
-   - `backfill-embeddings`
-   - `credit-knowledge-retrieval`
-   - `drive-sync`
-   - `export-txf`
-   - `fill-tax-forms`
-   - `generate-dispute-letters`
-   - `generate-pitch-email`
-   - `generate-tax-documents`
-   - `import-prior-return`
-   - `ingest-drive-clients`
-   - `ingest-tax-documents`
-   - `instagram-messaging`
-   - `meta-token-validate`
-   - `notify-telegram`
-   - `parse-financial-statement`
-   - `playlist-research`
-   - `process-document`
-   - `regenerate-tax-pdfs`
-   - `setup-telegram-webhook`
-   - `tax-returns`
-   - `telegram-outbox-flush`
-   - `telegram-webhook`
-   - `upload-irs-forms`
+The SQL will be used exactly as provided. No application code changes.
 
-3. **Verify deployment** — Confirm `normalizeToExtractedData` exists in the deployed `ingest-tax-documents` source, report deployed function names and timestamp.
+### Technical Details
 
-### Constraints
-- No source files modified
-- No `verify_jwt` changes
-- Deploy-only operation
+The migration creates a PL/pgSQL function that deletes rows in dependency order across: `telegram_approval_queue`, `audit_logs` (nullify FK), `documents` (clear self-ref), `extracted_pages`, `observations`, `ingestion_jobs`, `conflicts`, `documents`, `drive_sync_events`, `tax_returns`, `marketing_spend`, `dispute_letters`, `credit_analyses`, and finally `clients`.
+
+Access is restricted to `authenticated` and `service_role` roles only.
 
