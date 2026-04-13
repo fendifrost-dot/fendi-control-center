@@ -1,0 +1,1 @@
+ALTER TABLE public.workflow_runs ADD COLUMN IF NOT EXISTS last_error text;

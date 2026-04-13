@@ -1441,6 +1441,7 @@ export type Database = {
           error: Json | null
           id: string
           intent: string
+          last_error: string | null
           locked_state: Json | null
           result_payload: Json | null
           statement_job_ids: Json | null
@@ -1456,6 +1457,7 @@ export type Database = {
           error?: Json | null
           id?: string
           intent: string
+          last_error?: string | null
           locked_state?: Json | null
           result_payload?: Json | null
           statement_job_ids?: Json | null
@@ -1471,6 +1473,7 @@ export type Database = {
           error?: Json | null
           id?: string
           intent?: string
+          last_error?: string | null
           locked_state?: Json | null
           result_payload?: Json | null
           statement_job_ids?: Json | null
