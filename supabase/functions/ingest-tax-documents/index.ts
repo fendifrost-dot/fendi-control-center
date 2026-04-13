@@ -32,7 +32,7 @@ const corsHeaders = {
   'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type',
   'Access-Control-Allow-Methods': 'POST, OPTIONS',
 };
-const INGEST_VERSION = "async-chunk-v1";
+const INGEST_VERSION = "async-chunk-v2";
 
 /** Persisted between process_single calls; aggregate reads this from tax_returns.analyzed_data */
 const DRIVE_INGEST_SESSION_KEY = 'drive_ingest_session';
@@ -1162,6 +1162,9 @@ async function createStatementChunkJob(
     chunk_count: estimatedChunkCount,
     pages_total: estimatedPages,
     status: 'requires_async_processing',
+    // Phase 2: pre-stage fields
+    source_drive_file_id: sourceType === 'drive' ? input.file_id : null,
+    prep_status: 'pending',
   });
   if (insertErr) {
     console.error(`[ingest] Failed to insert statement_chunk_jobs row: ${insertErr.message}`);

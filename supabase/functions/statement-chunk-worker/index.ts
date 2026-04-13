@@ -16,7 +16,11 @@ const TERMINAL_STATUSES = new Set([
   "completed",
   "partial_success",
   "dead_letter",
+  "chunk_processing_failed",
 ]);
+
+/** Max bytes we'll attempt to parse in-memory with pdf-lib (~80MB safety margin) */
+const EDGE_SAFE_BYTE_LIMIT = 80_000_000;
 
 Deno.serve(async (req: Request) => {
   if (req.method === "OPTIONS") {
@@ -90,23 +94,72 @@ Deno.serve(async (req: Request) => {
   const reasonCodes: string[] = [];
   const warningFlags: string[] = [];
 
+  // PRE-DOWNLOAD SIZE-CAP: check known size before attempting download
+  const knownBytes = job.source_bytes ?? job.file_size_bytes ?? 0;
+  if (knownBytes > EDGE_SAFE_BYTE_LIMIT) {
+    const msg = `file ${knownBytes} bytes exceeds edge-safe limit ${EDGE_SAFE_BYTE_LIMIT} — rejected before download`;
+    console.error(`[chunk-worker] ${msg}`);
+
+    await hub.from("statement_chunk_jobs").update({
+      status: "chunk_processing_failed",
+      last_error: msg,
+      reason_codes: ["too_large_for_edge_processing"],
+      completed_at: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
+    }).eq("id", jobId);
+
+    return new Response(
+      JSON.stringify({ ok: false, job_id: jobId, status: "chunk_processing_failed", error: msg }),
+      { status: 422, headers: { ...corsHeaders, "Content-Type": "application/json" } },
+    );
+  }
+
   try {
-    // Download source file
+    // Download source file — prefer staged storage, fallback to drive
     let pdfBytes: Uint8Array;
-    if (job.source_type === "storage") {
-      // Download from Supabase Storage
+
+    if (job.source_storage_bucket && job.source_storage_path) {
+      // Download from Supabase Storage (pre-staged)
+      console.log(`[chunk-worker] downloading from storage: ${job.source_storage_bucket}/${job.source_storage_path}`);
+      const { data: blob, error: dlErr } = await hub.storage
+        .from(job.source_storage_bucket)
+        .download(job.source_storage_path);
+      if (dlErr || !blob) throw new Error(`storage download failed: ${dlErr?.message ?? "no data"}`);
+      pdfBytes = new Uint8Array(await blob.arrayBuffer());
+    } else if (job.source_type === "storage") {
+      // Legacy storage mode
       const { data: blob, error: dlErr } = await hub.storage
         .from("tax-source-documents")
         .download(job.file_id);
       if (dlErr || !blob) throw new Error(`storage download failed: ${dlErr?.message ?? "no data"}`);
       pdfBytes = new Uint8Array(await blob.arrayBuffer());
     } else {
-      // Download from Google Drive (raw bytes, no base64 — avoids CPU limit)
-      const driveResult = await downloadFileRaw(job.file_id, "application/pdf");
+      // Download from Google Drive (raw bytes)
+      const driveResult = await downloadFileRaw(job.source_drive_file_id || job.file_id, "application/pdf");
       pdfBytes = driveResult.bytes;
     }
 
     console.log(`[chunk-worker] downloaded ${pdfBytes.length} bytes for job=${jobId}`);
+
+    // POST-DOWNLOAD SIZE-CAP: double-check actual size
+    if (pdfBytes.length > EDGE_SAFE_BYTE_LIMIT) {
+      const msg = `file ${pdfBytes.length} bytes exceeds edge-safe limit ${EDGE_SAFE_BYTE_LIMIT}`;
+      console.error(`[chunk-worker] ${msg}`);
+      reasonCodes.push("too_large_for_edge_processing");
+
+      await hub.from("statement_chunk_jobs").update({
+        status: "chunk_processing_failed",
+        last_error: msg,
+        reason_codes: [...reasonCodes],
+        completed_at: new Date().toISOString(),
+        updated_at: new Date().toISOString(),
+      }).eq("id", jobId);
+
+      return new Response(
+        JSON.stringify({ ok: false, job_id: jobId, status: "chunk_processing_failed", error: msg }),
+        { status: 422, headers: { ...corsHeaders, "Content-Type": "application/json" } },
+      );
+    }
 
     // Split into pages
     const pages = await splitPdfIntoPages(pdfBytes);
@@ -249,6 +302,12 @@ Deno.serve(async (req: Request) => {
     const msg = e instanceof Error ? e.message : String(e);
     console.error(`[chunk-worker] fatal error job=${jobId}: ${msg}`);
 
+    // Check for memory-related errors
+    const isMemoryError = msg.includes("memory") || msg.includes("Memory") || msg.includes("heap");
+    if (isMemoryError) {
+      reasonCodes.push("memory_limit_exceeded");
+    }
+
     let finalStatus = "chunk_processing_failed";
     if ((job.attempts ?? 0) >= 3) finalStatus = "dead_letter";
 
@@ -266,5 +325,27 @@ Deno.serve(async (req: Request) => {
       JSON.stringify({ ok: false, job_id: jobId, status: finalStatus, error: msg.slice(0, 1000) }),
       { status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" } },
     );
+  } finally {
+    // FINAL GUARD: ensure job is never stuck in processing_chunked
+    try {
+      const { data: check } = await hub
+        .from("statement_chunk_jobs")
+        .select("status")
+        .eq("id", jobId)
+        .maybeSingle();
+
+      if (check && check.status === "processing_chunked") {
+        console.error(`[chunk-worker] FINAL GUARD: job=${jobId} still processing_chunked, forcing terminal`);
+        await hub.from("statement_chunk_jobs").update({
+          status: "chunk_processing_failed",
+          last_error: "final_guard:still_processing_after_handler",
+          reason_codes: [...reasonCodes, "final_guard_triggered"],
+          completed_at: new Date().toISOString(),
+          updated_at: new Date().toISOString(),
+        }).eq("id", jobId);
+      }
+    } catch (guardErr) {
+      console.error(`[chunk-worker] final guard check failed: ${guardErr}`);
+    }
   }
 });

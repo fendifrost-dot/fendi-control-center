@@ -60,3 +60,6 @@ verify_jwt = false
 
 [functions.statement-chunk-worker]
 verify_jwt = false
+
+[functions.statement-source-prep]
+verify_jwt = false
