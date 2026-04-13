@@ -850,6 +850,90 @@ export type Database = {
         }
         Relationships: []
       }
+      statement_chunk_jobs: {
+        Row: {
+          attempts: number | null
+          chunk_count: number | null
+          chunk_size_pages: number
+          claimed_at: string | null
+          client_id: string
+          completed_at: string | null
+          created_at: string | null
+          extracted_payload: Json | null
+          file_id: string
+          file_name: string
+          file_size_bytes: number | null
+          id: string
+          last_error: string | null
+          pages_failed: number | null
+          pages_processed: number | null
+          pages_total: number | null
+          reason_codes: Json | null
+          relative_path: string | null
+          source_type: string
+          started_at: string | null
+          status: string
+          tax_year: number
+          transactions_extracted: number | null
+          updated_at: string | null
+          warning_flags: Json | null
+        }
+        Insert: {
+          attempts?: number | null
+          chunk_count?: number | null
+          chunk_size_pages?: number
+          claimed_at?: string | null
+          client_id: string
+          completed_at?: string | null
+          created_at?: string | null
+          extracted_payload?: Json | null
+          file_id: string
+          file_name: string
+          file_size_bytes?: number | null
+          id?: string
+          last_error?: string | null
+          pages_failed?: number | null
+          pages_processed?: number | null
+          pages_total?: number | null
+          reason_codes?: Json | null
+          relative_path?: string | null
+          source_type?: string
+          started_at?: string | null
+          status?: string
+          tax_year: number
+          transactions_extracted?: number | null
+          updated_at?: string | null
+          warning_flags?: Json | null
+        }
+        Update: {
+          attempts?: number | null
+          chunk_count?: number | null
+          chunk_size_pages?: number
+          claimed_at?: string | null
+          client_id?: string
+          completed_at?: string | null
+          created_at?: string | null
+          extracted_payload?: Json | null
+          file_id?: string
+          file_name?: string
+          file_size_bytes?: number | null
+          id?: string
+          last_error?: string | null
+          pages_failed?: number | null
+          pages_processed?: number | null
+          pages_total?: number | null
+          reason_codes?: Json | null
+          relative_path?: string | null
+          source_type?: string
+          started_at?: string | null
+          status?: string
+          tax_year?: number
+          transactions_extracted?: number | null
+          updated_at?: string | null
+          warning_flags?: Json | null
+        }
+        Relationships: []
+      }
       tasks: {
         Row: {
           created_at: string

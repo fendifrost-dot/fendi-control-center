@@ -1128,8 +1128,9 @@ async function createStatementChunkJob(
   const estimatedPages = Math.max(1, Math.min(150, Math.ceil(input.file_size_bytes / 1_000_000)));
   const estimatedChunkCount = Math.max(1, Math.ceil(estimatedPages / 5));
   const now = new Date().toISOString();
+  const jobId = crypto.randomUUID();
   const job: StatementChunkJob = {
-    job_id: crypto.randomUUID(),
+    job_id: jobId,
     client_id: clientId,
     tax_year: taxYear,
     file_id: input.file_id,
@@ -1143,6 +1144,31 @@ async function createStatementChunkJob(
     created_at: now,
     updated_at: now,
   };
+
+  // Determine source_type: if file_id looks like a storage path (contains '/'), it's storage
+  const sourceType = input.file_id.includes('/') ? 'storage' : 'drive';
+
+  // Persist durable job record in statement_chunk_jobs table
+  const { error: insertErr } = await hub.from('statement_chunk_jobs').insert({
+    id: jobId,
+    client_id: clientId,
+    tax_year: taxYear,
+    file_id: input.file_id,
+    file_name: input.file_name,
+    relative_path: input.relative_path,
+    source_type: sourceType,
+    file_size_bytes: input.file_size_bytes,
+    chunk_size_pages: 5,
+    chunk_count: estimatedChunkCount,
+    pages_total: estimatedPages,
+    status: 'requires_async_processing',
+  });
+  if (insertErr) {
+    console.error(`[ingest] Failed to insert statement_chunk_jobs row: ${insertErr.message}`);
+    // Non-fatal: continue with analyzed_data blob write as fallback
+  } else {
+    console.log(`[ingest] Durable chunk job created: id=${jobId} source_type=${sourceType}`);
+  }
 
   const existing = await getTaxReturn(hub, clientId, taxYear);
   const prev = (existing?.analyzed_data as Record<string, unknown> | null) || {};
@@ -1630,6 +1656,8 @@ async function handleDriveProcessSingle(
   folderNameIn: string | undefined,
   /** From mode=list: e.g. CHASE 2022/2022.pdf — required for generic filenames */
   relativePathIn?: string,
+  /** From mode=list: file size in bytes — enables pre-download async routing */
+  fileSizeHint?: number,
 ): Promise<Response> {
   let folderId = folderIdIn ?? '';
   let folderName = folderNameIn ?? '';
@@ -1649,6 +1677,76 @@ async function handleDriveProcessSingle(
   }
 
   const mimeHint = fileMime && fileMime.length > 0 ? fileMime : 'application/pdf';
+
+  // Pre-download size check: if caller provided file_size from list and it's >50MB + PDF,
+  // route to async chunk processing WITHOUT downloading (avoids WORKER_LIMIT).
+  if (fileSizeHint && fileSizeHint > 50_000_000 && mimeHint === 'application/pdf') {
+    const classification: DocClassification = classifyDocument({
+      filename: fileName ?? "",
+      mimeType: mimeHint,
+      textSample: "",
+      relativePath: relativePathIn,
+    });
+    if (classification.docClass === 'financial_statement') {
+      console.log(`[ingest] pre-download async route: ${fileName} (${Math.round(fileSizeHint / 1e6)}MB)`);
+      try {
+        const job = await createStatementChunkJob(hub, clientId, clientName, taxYear, {
+          file_id: fileId,
+          file_name: fileName,
+          relative_path: relativePathIn ?? null,
+          file_size_bytes: fileSizeHint,
+        });
+        const reason = 'requires_async_processing';
+        const rec: DriveIngestFileRecord = {
+          file_id: fileId,
+          file_name: fileName,
+          file_mime: mimeHint,
+          docClass: classification.docClass,
+          skipped: true,
+          skipReason: reason,
+          status: 'skipped',
+          ingest_status: 'requires_async_processing',
+          relative_path: relativePathIn,
+          file_size_bytes: fileSizeHint,
+          reason_codes: [reason],
+        };
+        await mergeDriveIngestSession(hub, clientId, clientName, taxYear, folderId, folderName, rec);
+        return new Response(
+          JSON.stringify({
+            success: true,
+            mode: 'process_single',
+            document_id: fileId,
+            doc_class: classification.docClass,
+            relative_path: relativePathIn,
+            file_size_bytes: fileSizeHint,
+            ingest_status: 'requires_async_processing',
+            status: 'requires_async_processing',
+            skip_reason: reason,
+            chunk_job_id: job.job_id,
+            chunk_count: job.chunk_count,
+            pages_total: job.pages_total,
+            meta: { version: INGEST_VERSION },
+          }),
+          { headers: { ...corsHeaders, 'Content-Type': 'application/json' } },
+        );
+      } catch (e) {
+        const reason = 'job_creation_failed';
+        const message = e instanceof Error ? e.message : String(e);
+        return new Response(
+          JSON.stringify({
+            success: false,
+            mode: 'process_single',
+            status: 'chunk_processing_failed',
+            ingest_status: 'chunk_processing_failed',
+            reason,
+            error: message,
+            meta: { version: INGEST_VERSION },
+          }),
+          { status: 500, headers: { ...corsHeaders, 'Content-Type': 'application/json' } },
+        );
+      }
+    }
+  }
 
   try {
     const { base64, downloadMime, bytes } = await downloadFile(fileId, mimeHint);
@@ -2141,6 +2239,7 @@ serve(async (req: Request) => {
       folder_id: body_folder_id,
       folder_name: body_folder_name,
       relative_path,
+      file_size,
     } = body as {
       client_name?: string;
       client_id?: string;
@@ -2152,8 +2251,8 @@ serve(async (req: Request) => {
       file_mime?: string;
       folder_id?: string;
       folder_name?: string;
-      /** From mode=list file entry — e.g. CHASE 2022/2022.pdf */
       relative_path?: string;
+      file_size?: number;
     };
     const hubUrl = Deno.env.get('SUPABASE_URL');
     const hubKey = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY');
@@ -2245,6 +2344,7 @@ serve(async (req: Request) => {
         typeof body_folder_id === 'string' ? body_folder_id : undefined,
         typeof body_folder_name === 'string' ? body_folder_name : undefined,
         typeof relative_path === 'string' && relative_path.length > 0 ? relative_path : undefined,
+        typeof file_size === 'number' ? file_size : undefined,
       );
     }
 

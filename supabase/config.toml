@@ -54,3 +54,9 @@ verify_jwt = false
 
 [functions.upload-irs-forms]
 verify_jwt = false
+
+[functions.statement-chunk-dispatch]
+verify_jwt = false
+
+[functions.statement-chunk-worker]
+verify_jwt = false
