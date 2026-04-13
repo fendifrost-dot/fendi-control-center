@@ -1122,6 +1122,8 @@ async function createStatementChunkJob(
     file_name: string;
     relative_path: string | null;
     file_size_bytes: number;
+    source_type?: 'drive' | 'storage';
+    source_ref?: string;
   },
 ): Promise<StatementChunkJob> {
   // Lightweight enqueue only (do NOT split/ocr in request path; avoids worker limits).
@@ -1129,12 +1131,13 @@ async function createStatementChunkJob(
   const estimatedPages = Math.max(1, Math.min(150, Math.ceil(input.file_size_bytes / 1_000_000)));
   const estimatedChunkCount = Math.max(1, Math.ceil(estimatedPages / 5));
   const now = new Date().toISOString();
-  const jobId = crypto.randomUUID();
+  const tempJobId: string = crypto.randomUUID();
   const job: StatementChunkJob = {
-    job_id: jobId,
+    job_id: tempJobId,
+  
     client_id: clientId,
     tax_year: taxYear,
-    file_id: input.file_id,
+    file_id: input.source_ref ?? input.file_id,
     file_name: input.file_name,
     relative_path: input.relative_path,
     file_size_bytes: input.file_size_bytes,
@@ -1146,38 +1149,62 @@ async function createStatementChunkJob(
     updated_at: now,
   };
 
-  // Determine source_type: if file_id looks like a storage path (contains '/'), it's storage
-  const sourceType = input.file_id.includes('/') ? 'storage' : 'drive';
-
-  // Persist durable job record in statement_chunk_jobs table
-  const { error: insertErr } = await hub.from('statement_chunk_jobs').insert({
-    id: jobId,
-    client_id: clientId,
-    tax_year: taxYear,
-    file_id: input.file_id,
-    file_name: input.file_name,
-    relative_path: input.relative_path,
-    source_type: sourceType,
-    file_size_bytes: input.file_size_bytes,
-    chunk_size_pages: 5,
-    chunk_count: estimatedChunkCount,
-    pages_total: estimatedPages,
-    status: 'requires_async_processing',
-    // Phase 2: pre-stage fields
-    source_drive_file_id: sourceType === 'drive' ? input.file_id : null,
-    prep_status: 'pending',
-  });
-  if (insertErr) {
-    console.error(`[ingest] Failed to insert statement_chunk_jobs row: ${insertErr.message}`);
-    // Non-fatal: continue with analyzed_data blob write as fallback
-  } else {
-    console.log(`[ingest] Durable chunk job created: id=${jobId} source_type=${sourceType}`);
+  // Durable DB job row (source of truth for dispatch/worker).
+  let canonicalJobId: string = tempJobId;
+  try {
+    const insertPayload: Record<string, unknown> = {
+      id: tempJobId,
+      client_id: clientId,
+      tax_year: taxYear,
+      file_id: input.source_ref ?? input.file_id,
+      file_name: input.file_name,
+      relative_path: input.relative_path,
+      source_type: input.source_type ?? 'drive',
+      source_drive_file_id: (input.source_type ?? 'drive') === 'drive' ? input.file_id : null,
+      file_size_bytes: input.file_size_bytes,
+      source_bytes: input.file_size_bytes,
+      chunk_size_pages: 5,
+      chunk_count: estimatedChunkCount,
+      pages_total: estimatedPages,
+      status: 'requires_async_processing',
+      processing_mode: 'edge',
+      prep_status: 'pending',
+      created_at: now,
+      updated_at: now,
+    };
+    const { data: ins, error: insErr } = await hub
+      .from('statement_chunk_jobs')
+      .insert(insertPayload)
+      .select('id')
+      .single();
+    if (insErr) {
+      // likely unique active-row conflict; re-use existing active job for same file/year
+      const { data: existingRow, error: exErr } = await hub
+        .from('statement_chunk_jobs')
+        .select('id')
+        .eq('client_id', clientId)
+        .eq('tax_year', taxYear)
+        .eq('file_id', input.source_ref ?? input.file_id)
+        .in('status', ['requires_async_processing', 'processing_chunked'])
+        .order('created_at', { ascending: false })
+        .limit(1)
+        .maybeSingle();
+      if (exErr || !existingRow?.id) {
+        throw insErr;
+      }
+      canonicalJobId = String(existingRow.id);
+    } else if (ins?.id) {
+      canonicalJobId = String(ins.id);
+    }
+  } catch (e) {
+    const message = e instanceof Error ? e.message : String(e);
+    throw new Error(`statement_chunk_jobs insert failed: ${message}`);
   }
 
   const existing = await getTaxReturn(hub, clientId, taxYear);
   const prev = (existing?.analyzed_data as Record<string, unknown> | null) || {};
   const jobs = Array.isArray(prev[STATEMENT_CHUNK_JOBS_KEY]) ? (prev[STATEMENT_CHUNK_JOBS_KEY] as StatementChunkJob[]) : [];
-  jobs.push(job);
+  jobs.push({ ...job, job_id: canonicalJobId });
   await upsertTaxReturn(hub, {
     client_id: clientId,
     client_name: clientName,
@@ -1190,7 +1217,7 @@ async function createStatementChunkJob(
     },
     created_by: 'ingest-tax-documents',
   });
-  return job;
+  return { ...job, job_id: canonicalJobId };
 }
 
 /** Analyze documents uploaded to Supabase Storage (dashboard tax workflow). */
@@ -1295,6 +1322,8 @@ async function ingestFromUploadedDocuments(
             file_name: row.file_name,
             relative_path: row.storage_object_path?.replace(/^\/+/, "") ?? null,
             file_size_bytes: byteLen,
+          source_type: 'storage',
+          source_ref: row.storage_object_path?.replace(/^\/+/, "") ?? row.id,
           });
           skippedDocs.push({
             docId: row.id,
@@ -1811,6 +1840,8 @@ async function handleDriveProcessSingle(
           file_name: fileName,
           relative_path: relativePathIn ?? null,
           file_size_bytes: largeFileBytes,
+          source_type: 'drive',
+          source_ref: fileId,
         });
         const reason = 'requires_async_processing';
         const rec: DriveIngestFileRecord = {
