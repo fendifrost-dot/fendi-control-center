@@ -13,6 +13,10 @@ import {
   UNCLASSIFIED_SCHEDULE_C,
   type ScheduleCCategoryKey,
 } from "../_shared/categories.ts";
+import {
+  buildManualEntriesFromFinancialInputs,
+  type FinancialInputs,
+} from "../_shared/workflowUserInputParse.ts";
 
 function escapeIlike(s: string): string {
   return s.replace(/\\/g, "\\\\").replace(/%/g, "\\%").replace(/_/g, "\\_");
@@ -653,6 +657,11 @@ serve(async (req) => {
     const requestClientId = typeof body.client_id === "string" ? body.client_id : "";
     const resolvedClientLabel = effectiveClientName || requestClientName || requestClientId || "unknown";
 
+    const skipDriveIngestion = body.skip_drive_ingestion === true;
+    const workflowFinancialInputs = body.financial_inputs;
+    const workflowIngestSummary = body.ingest_summary;
+    const workflowIngestResult = body.ingest_result;
+
     if (effectiveClientId !== "unknown") {
       await persistWorkflowIntentState(supabaseAdmin, {
         client_id: effectiveClientId,
@@ -665,80 +674,89 @@ serve(async (req) => {
     }
 
     if (body.client_name || body.client_id) {
-      const ingestionPromises = taxYears.map(async (y) => {
-        const result = await runIngestion(
-          resolvedClientLabel,
-          effectiveClientId,
-          y,
-          (body.drive_folder_mapping as Record<string, unknown> | undefined),
-        );
-        return { year: String(y), result };
-      });
-      const ingestionDone = await Promise.all(ingestionPromises);
-      for (const { year, result } of ingestionDone) {
-        ingestionResults[year] = result;
-      }
-
-      for (const y of taxYears) {
-        const key = String(y);
-        const ing = (ingestionResults[key] || null) as Record<string, unknown> | null;
-        const asyncJobIds = collectAsyncJobIds(ing);
-        if (asyncJobIds.length > 0 && effectiveClientId !== "unknown") {
-          const dispatch = await dispatchExternalStatements(10);
-          await persistWorkflowIntentState(supabaseAdmin, {
-            client_id: effectiveClientId,
-            client_name: effectiveClientName,
-            tax_year: y,
-            workflow: "generate_tax_return",
-            statement_processing: "in_progress",
-            statement_job_ids: asyncJobIds,
-          });
-          ingestionResults[key] = {
-            ...(ingestionResults[key] || {}),
-            statement_processing: "in_progress",
-            statement_job_ids: asyncJobIds,
-            external_dispatch: dispatch,
-          };
+      if (skipDriveIngestion && workflowIngestResult && typeof workflowIngestResult === "object") {
+        for (const y of taxYears) {
+          ingestionResults[String(y)] = workflowIngestResult as Record<string, unknown>;
         }
-      }
-      console.log(`[generate] Ingestion took ${Date.now() - t_start}ms for ${taxYears.join(", ")}.`);
+        console.log(`[generate] skip_drive_ingestion: using workflow ingest_result (${Date.now() - t_start}ms)`);
+      } else if (!skipDriveIngestion) {
+        const ingestionPromises = taxYears.map(async (y) => {
+          const result = await runIngestion(
+            resolvedClientLabel,
+            effectiveClientId,
+            y,
+            (body.drive_folder_mapping as Record<string, unknown> | undefined),
+          );
+          return { year: String(y), result };
+        });
+        const ingestionDone = await Promise.all(ingestionPromises);
+        for (const { year, result } of ingestionDone) {
+          ingestionResults[year] = result;
+        }
 
-    // Cache fallback: if ingestion failed, try reading previously stored analyzed_data
-    for (const y of taxYears) {
-      const key = String(y);
-      const ingResult = ingestionResults[key];
-      const isFailed = !ingResult || ingResult.code === "WORKER_LIMIT" || ingResult.error;
-
-      if (isFailed && effectiveClientId !== "unknown") {
-        console.log(`[generate] Ingestion failed for ${key} (${ingResult?.code || ingResult?.error || "null"}) — checking cached analyzed_data`);
-        const { data: cached } = await supabaseAdmin
-          .from("tax_returns")
-          .select("analyzed_data")
-          .eq("client_id", effectiveClientId)
-          .eq("tax_year", y)
-          .maybeSingle();
-
-        if (cached?.analyzed_data && typeof cached.analyzed_data === "object") {
-          const ad = cached.analyzed_data as Record<string, unknown>;
-          if (ad.pl_summary || ad.aggregated_data || ad.processed_files) {
-            console.log(`[generate] Using cached analyzed_data for ${key} (source: ${ad.source || "unknown"}, updated: ${ad.updated_at || "?"})`);
+        for (const y of taxYears) {
+          const key = String(y);
+          const ing = (ingestionResults[key] || null) as Record<string, unknown> | null;
+          const asyncJobIds = collectAsyncJobIds(ing);
+          if (asyncJobIds.length > 0 && effectiveClientId !== "unknown") {
+            const dispatch = await dispatchExternalStatements(10);
+            await persistWorkflowIntentState(supabaseAdmin, {
+              client_id: effectiveClientId,
+              client_name: effectiveClientName,
+              tax_year: y,
+              workflow: "generate_tax_return",
+              statement_processing: "in_progress",
+              statement_job_ids: asyncJobIds,
+            });
             ingestionResults[key] = {
-              success: true,
-              source: "cache_fallback",
-              pl_summary: ad.pl_summary,
-              aggregated_data: ad.aggregated_data || ad.pl_summary,
-              processed_files: ad.processed_files,
-              documents: ad.documents,
-              files_processed: Array.isArray(ad.processed_files) ? (ad.processed_files as unknown[]).length : 0,
+              ...(ingestionResults[key] || {}),
+              statement_processing: "in_progress",
+              statement_job_ids: asyncJobIds,
+              external_dispatch: dispatch,
             };
           }
         }
+        console.log(`[generate] Ingestion took ${Date.now() - t_start}ms for ${taxYears.join(", ")}.`);
 
-        if (!ingestionResults[key] || ingestionResults[key].code === "WORKER_LIMIT") {
-          console.warn(`[generate] No cached data available for ${key} — proceeding with manual data only`);
+        // Cache fallback: if ingestion failed, try reading previously stored analyzed_data
+        for (const y of taxYears) {
+          const key = String(y);
+          const ingResult = ingestionResults[key];
+          const isFailed = !ingResult || ingResult.code === "WORKER_LIMIT" || ingResult.error;
+
+          if (isFailed && effectiveClientId !== "unknown") {
+            console.log(`[generate] Ingestion failed for ${key} (${ingResult?.code || ingResult?.error || "null"}) — checking cached analyzed_data`);
+            const { data: cached } = await supabaseAdmin
+              .from("tax_returns")
+              .select("analyzed_data")
+              .eq("client_id", effectiveClientId)
+              .eq("tax_year", y)
+              .maybeSingle();
+
+            if (cached?.analyzed_data && typeof cached.analyzed_data === "object") {
+              const ad = cached.analyzed_data as Record<string, unknown>;
+              if (ad.pl_summary || ad.aggregated_data || ad.processed_files) {
+                console.log(`[generate] Using cached analyzed_data for ${key} (source: ${ad.source || "unknown"}, updated: ${ad.updated_at || "?"})`);
+                ingestionResults[key] = {
+                  success: true,
+                  source: "cache_fallback",
+                  pl_summary: ad.pl_summary,
+                  aggregated_data: ad.aggregated_data || ad.pl_summary,
+                  processed_files: ad.processed_files,
+                  documents: ad.documents,
+                  files_processed: Array.isArray(ad.processed_files) ? (ad.processed_files as unknown[]).length : 0,
+                };
+              }
+            }
+
+            if (!ingestionResults[key] || ingestionResults[key].code === "WORKER_LIMIT") {
+              console.warn(`[generate] No cached data available for ${key} — proceeding with manual data only`);
+            }
+          }
         }
+      } else {
+        console.warn("[generate] skip_drive_ingestion set but no ingest_result — continuing with empty ingestion");
       }
-    }
     } else {
       console.warn("[generate] No client_name or client_id — skipping ingestion step");
     }
@@ -791,6 +809,8 @@ serve(async (req) => {
         reconciliations,
         discrepancies,
         pl_report: plReport,
+        workflow_financial_inputs: workflowFinancialInputs ?? null,
+        workflow_ingest_summary: workflowIngestSummary ?? null,
         // CRITICAL: Verified income from analyzed documents — use as AGI if CC Tax data is empty
         ingestion_income: ingestionIncome,
         // Ingestion results from actual Drive documents (1099s, W-2s, receipts)
@@ -852,7 +872,9 @@ Use this to:
 3. Carry forward any applicable items (depreciation, NOL, etc.)
 4. Note significant changes in income for estimated tax planning`;
         }
+      }
 
+      if (effectiveClientId !== "unknown" && (!intent.isGenerateTaxReturn || workflowFinancialInputs)) {
         const { data: existingYearReturn } = await supabaseAdmin
           .from("tax_returns")
           .select("json_summary")
@@ -866,7 +888,16 @@ Use this to:
         if (Array.isArray(mi)) manualIncomeEntries = mi as Array<Record<string, unknown>>;
         if (Array.isArray(md)) manualDeductionEntries = md as Array<Record<string, unknown>>;
         console.log(
-          `[generate] year=${year} loaded ${manualIncomeEntries.length} manual_income entries, ${manualDeductionEntries.length} manual_deduction entries (NOT passed to Claude)`,
+          `[generate] year=${year} loaded ${manualIncomeEntries.length} manual_income entries, ${manualDeductionEntries.length} manual_deduction entries from DB (NOT passed to Claude)`,
+        );
+      }
+
+      if (workflowFinancialInputs && typeof workflowFinancialInputs === "object") {
+        const built = buildManualEntriesFromFinancialInputs(workflowFinancialInputs as FinancialInputs);
+        manualIncomeEntries = [...manualIncomeEntries, ...built.manual_income];
+        manualDeductionEntries = [...manualDeductionEntries, ...built.manual_deductions];
+        console.log(
+          `[generate] year=${year} merged workflow_financial_inputs: +${built.manual_income.length} income, +${built.manual_deductions.length} deductions`,
         );
       }
 

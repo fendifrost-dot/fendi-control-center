@@ -50,6 +50,8 @@ function formatWorkflowUserPayload(
   snap: Record<string, unknown>,
 ): Record<string, unknown> {
   const rp = (run.result_payload || {}) as Record<string, unknown>;
+  const val = (rp.validation || {}) as Record<string, unknown>;
+  const ls = (run.locked_state || {}) as Record<string, unknown>;
   const ingest = (rp.ingest || {}) as Record<string, unknown>;
   const ingestSummary = (rp.ingest_summary || {}) as Record<string, unknown>;
   const processed = Array.isArray(ingest.processed_files)
@@ -58,17 +60,23 @@ function formatWorkflowUserPayload(
   const documents_found = Number(
     ingestSummary.documents_found ?? ingest.files_processed ?? processed.length ?? 0,
   );
+  const snapStatus = typeof snap.status === "string" ? snap.status : undefined;
+  const runStatus = typeof run.status === "string" ? run.status : undefined;
   return {
+    ok: snap.ok !== false,
     run_id: run.id,
     current_stage: run.current_stage,
-    status: run.status ?? snap.status,
+    status: snapStatus ?? runStatus,
+    missing_items: (snap.missing_items as unknown[]) ?? val.missing_items ?? rp.missing_items ?? null,
     summary: {
       income: rp.income_summary ?? null,
       expenses: rp.expense_summary ?? null,
+      financial_inputs: ls.financial_inputs ?? null,
       documents_found,
       statements_detected: ingestSummary.statements_detected ?? null,
       requires_async_processing: ingestSummary.requires_async_processing ?? null,
       readiness_status: rp.readiness_status ?? null,
+      validation: rp.validation ?? null,
     },
   };
 }
@@ -4909,13 +4917,19 @@ serve(async (req) => {
         const body = snap as Record<string, unknown>;
         const runRow = body.run as Record<string, unknown> | undefined;
         const payload = formatWorkflowUserPayload(runRow ?? run, body);
+        const pipelineIncomplete = body.ok === false && body.status === "incomplete";
         await sendMessage(
           chatId,
           JSON.stringify(payload, null, 2).slice(0, 3900),
           {},
           `task:${taskId}:workflow-runner`,
         );
-        await sendMessage(chatId, `✅ Done: \`${taskId}\``, {}, `task:${taskId}:done`);
+        await sendMessage(
+          chatId,
+          pipelineIncomplete ? `⚠️ Incomplete: \`${taskId}\`` : `✅ Done: \`${taskId}\``,
+          {},
+          `task:${taskId}:done`,
+        );
         _currentTaskId = null;
         return new Response("ok");
       } catch (e) {

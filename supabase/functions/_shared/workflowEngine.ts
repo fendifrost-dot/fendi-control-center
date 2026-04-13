@@ -85,6 +85,47 @@ type WorkflowRunRow = {
   locked_state: Record<string, unknown> | null;
 };
 
+async function patchLockedStateMessage(
+  supabase: SupabaseClient,
+  row: WorkflowRunRow,
+  intentResult: IntentResult,
+): Promise<WorkflowRunRow> {
+  const ls = (row.locked_state || {}) as Record<string, unknown>;
+  const merged = { ...ls, message: intentResult.message };
+  const { data, error } = await supabase
+    .from("workflow_runs")
+    .update({ locked_state: merged, updated_at: new Date().toISOString() })
+    .eq("id", row.id)
+    .select("id,status,current_stage,locked_state")
+    .single();
+  if (error || !data) return row;
+  return data as WorkflowRunRow;
+}
+
+/** Re-run deterministic parse → ingest → merge when user sends new numbers on an active run. */
+async function rewindToParseUserInputs(
+  supabase: SupabaseClient,
+  row: WorkflowRunRow,
+  intentResult: IntentResult,
+): Promise<WorkflowRunRow> {
+  if (intentResult.intent !== "add_manual_inputs" && intentResult.intent !== "generate_tax_return") {
+    return row;
+  }
+  if (row.status === "waiting_async") return row;
+  const { data, error } = await supabase
+    .from("workflow_runs")
+    .update({
+      current_stage: "parse_user_inputs",
+      status: "running",
+      updated_at: new Date().toISOString(),
+    })
+    .eq("id", row.id)
+    .select("id,status,current_stage,locked_state")
+    .single();
+  if (error || !data) return row;
+  return data as WorkflowRunRow;
+}
+
 const ACTIVE_STATUSES = ["running", "waiting_async"] as const;
 
 export type WorkflowRunOptions = {
@@ -143,7 +184,10 @@ export async function createOrResumeWorkflowRun(
       .maybeSingle();
 
     if (byClient) {
-      return await maybeRewindForCheckDrive(supabase, byClient as WorkflowRunRow, intentResult, options);
+      let row = byClient as WorkflowRunRow;
+      row = await patchLockedStateMessage(supabase, row, intentResult);
+      row = await rewindToParseUserInputs(supabase, row, intentResult);
+      return await maybeRewindForCheckDrive(supabase, row, intentResult, options);
     }
   }
 
@@ -159,7 +203,10 @@ export async function createOrResumeWorkflowRun(
       .maybeSingle();
 
     if (byChat) {
-      return await maybeRewindForCheckDrive(supabase, byChat as WorkflowRunRow, intentResult, options);
+      let row = byChat as WorkflowRunRow;
+      row = await patchLockedStateMessage(supabase, row, intentResult);
+      row = await rewindToParseUserInputs(supabase, row, intentResult);
+      return await maybeRewindForCheckDrive(supabase, row, intentResult, options);
     }
   }
 
