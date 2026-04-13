@@ -94,23 +94,31 @@ Deno.serve(async (req: Request) => {
   const reasonCodes: string[] = [];
   const warningFlags: string[] = [];
 
-  // PRE-DOWNLOAD SIZE-CAP: check known size before attempting download
+  // PRE-DOWNLOAD SIZE-CAP: route oversized jobs to external processor
   const knownBytes = job.source_bytes ?? job.file_size_bytes ?? 0;
   if (knownBytes > EDGE_SAFE_BYTE_LIMIT) {
-    const msg = `file ${knownBytes} bytes exceeds edge-safe limit ${EDGE_SAFE_BYTE_LIMIT} — rejected before download`;
-    console.error(`[chunk-worker] ${msg}`);
+    const msg = `file ${knownBytes} bytes exceeds edge-safe limit ${EDGE_SAFE_BYTE_LIMIT} — routing to external processor`;
+    console.log(`[chunk-worker] ${msg}`);
 
+    // Route back to requires_async_processing with external marker
+    // External dispatcher will pick this up
     await hub.from("statement_chunk_jobs").update({
-      status: "chunk_processing_failed",
-      last_error: msg,
-      reason_codes: ["too_large_for_edge_processing"],
-      completed_at: new Date().toISOString(),
+      status: "requires_async_processing",
+      processing_mode: "external",
+      last_error: null,
+      reason_codes: ["too_large_for_edge_processing", "route_external_processor"],
       updated_at: new Date().toISOString(),
     }).eq("id", jobId);
 
     return new Response(
-      JSON.stringify({ ok: false, job_id: jobId, status: "chunk_processing_failed", error: msg }),
-      { status: 422, headers: { ...corsHeaders, "Content-Type": "application/json" } },
+      JSON.stringify({
+        ok: true,
+        job_id: jobId,
+        status: "requires_async_processing",
+        processing_mode: "external",
+        reason: "routed_to_external_processor",
+      }),
+      { headers: { ...corsHeaders, "Content-Type": "application/json" } },
     );
   }
 
