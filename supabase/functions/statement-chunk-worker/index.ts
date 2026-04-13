@@ -94,6 +94,26 @@ Deno.serve(async (req: Request) => {
   const reasonCodes: string[] = [];
   const warningFlags: string[] = [];
 
+  // PRE-DOWNLOAD SIZE-CAP: check known size before attempting download
+  const knownBytes = job.source_bytes ?? job.file_size_bytes ?? 0;
+  if (knownBytes > EDGE_SAFE_BYTE_LIMIT) {
+    const msg = `file ${knownBytes} bytes exceeds edge-safe limit ${EDGE_SAFE_BYTE_LIMIT} — rejected before download`;
+    console.error(`[chunk-worker] ${msg}`);
+
+    await hub.from("statement_chunk_jobs").update({
+      status: "chunk_processing_failed",
+      last_error: msg,
+      reason_codes: ["too_large_for_edge_processing"],
+      completed_at: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
+    }).eq("id", jobId);
+
+    return new Response(
+      JSON.stringify({ ok: false, job_id: jobId, status: "chunk_processing_failed", error: msg }),
+      { status: 422, headers: { ...corsHeaders, "Content-Type": "application/json" } },
+    );
+  }
+
   try {
     // Download source file — prefer staged storage, fallback to drive
     let pdfBytes: Uint8Array;
@@ -121,7 +141,7 @@ Deno.serve(async (req: Request) => {
 
     console.log(`[chunk-worker] downloaded ${pdfBytes.length} bytes for job=${jobId}`);
 
-    // SIZE-CAP SAFETY: reject files too large for edge pdf-lib parsing
+    // POST-DOWNLOAD SIZE-CAP: double-check actual size
     if (pdfBytes.length > EDGE_SAFE_BYTE_LIMIT) {
       const msg = `file ${pdfBytes.length} bytes exceeds edge-safe limit ${EDGE_SAFE_BYTE_LIMIT}`;
       console.error(`[chunk-worker] ${msg}`);
