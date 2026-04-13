@@ -94,9 +94,9 @@ Deno.serve(async (req: Request) => {
       continue;
     }
 
-    // 4. Invoke worker (fire-and-forget)
+    // 4. Invoke worker (true fire-and-forget: don't await response)
     try {
-      const resp = await fetch(workerUrl, {
+      fetch(workerUrl, {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
@@ -107,16 +107,13 @@ Deno.serve(async (req: Request) => {
           client_id: job.client_id,
           tax_year: job.tax_year,
         }),
+      }).catch((e) => {
+        console.error(`[dispatch] background fetch failed job=${job.id}: ${e}`);
       });
-
-      if (!resp.ok) {
-        const errText = await resp.text().catch(() => "unknown");
-        throw new Error(`worker returned ${resp.status}: ${errText.slice(0, 500)}`);
-      }
 
       started++;
       jobIds.push(job.id);
-      console.log(`[dispatch] started worker for job=${job.id}`);
+      console.log(`[dispatch] fired worker for job=${job.id}`);
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
       console.error(`[dispatch] invoke failed job=${job.id}: ${msg}`);
