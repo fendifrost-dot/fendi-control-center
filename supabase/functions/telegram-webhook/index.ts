@@ -17,6 +17,7 @@ import {
   tryParseManualDeductionMessage,
   tryParseManualIncomeMessage,
 } from "../_shared/taxTelegramParse.ts";
+import { createWorkflowRun, resolveIntent } from "../_shared/workflowEngine.ts";
 import {
   extractCreditGuardianClientNameForIngest,
   inferCreditWorkflowKey,
@@ -4845,6 +4846,48 @@ serve(async (req) => {
 
     // Send queued confirmation with task_id
     await sendMessage(chatId, `ð Queued: \`${taskId}\``, {}, `task:${taskId}:queued`);
+
+    // Intent-driven workflow engine: create/resume workflow_run, then execute workflow-runner.
+    const wfIntent = resolveIntent(text);
+    if (
+      wfIntent.confidence >= 0.8 &&
+      (wfIntent.intent === "generate_tax_return" || wfIntent.intent === "check_drive" || wfIntent.intent === "add_manual_inputs")
+    ) {
+      try {
+        const run = await createWorkflowRun(supabase, wfIntent);
+        const runner = await fetch(`${SUPABASE_URL}/functions/v1/workflow-runner`, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: `Bearer ${SUPABASE_SERVICE_ROLE_KEY}`,
+          },
+          body: JSON.stringify({ run_id: run.id }),
+        });
+        const snap = await runner.json().catch(() => ({}));
+        await supabase.from("tasks").update({
+          status: "succeeded",
+          selected_workflow: "workflow-runner",
+          result_json: {
+            execution_lane: "workflow_engine",
+            workflow_run_id: run.id,
+            workflow_intent: wfIntent.intent,
+            workflow_snapshot: snap,
+          },
+        }).eq("id", taskId);
+        const runStatus = String((snap as Record<string, unknown>)?.run?.status ?? run.status);
+        await sendMessage(
+          chatId,
+          `Workflow run started.\n• Run ID: \`${run.id}\`\n• Intent: \`${wfIntent.intent}\`\n• Status: \`${runStatus}\``,
+          {},
+          `task:${taskId}:workflow-runner`,
+        );
+        await sendMessage(chatId, `✅ Done: \`${taskId}\``, {}, `task:${taskId}:done`);
+        _currentTaskId = null;
+        return new Response("ok");
+      } catch (e) {
+        console.error("[workflow-engine] fallback to legacy path:", String(e));
+      }
+    }
 
     const modelPitch = (session.active_model === "grok" ? "grok" : "gemini") as "grok" | "gemini";
 

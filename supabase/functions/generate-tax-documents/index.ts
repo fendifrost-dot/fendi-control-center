@@ -1,5 +1,6 @@
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
 import { callClaudeJSON } from "../_shared/claude.ts";
+import { callGPTJSON } from "../_shared/openai.ts";
 import { createClient, type SupabaseClient } from "https://esm.sh/@supabase/supabase-js@2.49.1";
 import { upsertTaxReturn, logAudit } from "../_shared/taxReturns.ts";
 import { crossCheckReturn } from "../_shared/crossCheckReturn.ts";
@@ -52,6 +53,16 @@ const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
 const SUPABASE_SERVICE_ROLE_KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
 
 const FREE_FILE_AGI_HINT = 85000;
+const MILEAGE_RATE_2022 = 0.585;
+
+type WorkflowIntentState = {
+  client_id: string;
+  client_name: string;
+  tax_year: number;
+  workflow: "generate_tax_return";
+  statement_processing?: "in_progress" | "idle";
+  statement_job_ids?: string[];
+};
 
 const VALID_FILING_STATUSES = [
   "single",
@@ -423,7 +434,8 @@ async function runTxfExport(
 async function runIngestion(
   clientName: string,
   clientId: string,
-  year: number
+  year: number,
+  driveFolderMapping?: Record<string, unknown>,
 ): Promise<any> {
   const ingestUrl = `${SUPABASE_URL}/functions/v1/ingest-tax-documents`;
   const headers = {
@@ -434,6 +446,9 @@ async function runIngestion(
     client_name: clientName,
     client_id: clientId,
     tax_year: year,
+    ...(driveFolderMapping && typeof driveFolderMapping === "object"
+      ? { drive_folder_mapping: driveFolderMapping }
+      : {}),
   };
 
   try {
@@ -512,15 +527,106 @@ async function runIngestion(
   }
 }
 
+function parseGenerateIntentLock(body: Record<string, unknown>): {
+  taxYear?: number;
+  clientName?: string;
+  isGenerateTaxReturn: boolean;
+  isCheckDrive: boolean;
+} {
+  const raw = String(
+    body.command ?? body.message ?? body.text ?? body.user_input ?? body.prompt ?? "",
+  ).trim();
+  if (!raw) {
+    return { isGenerateTaxReturn: false, isCheckDrive: false };
+  }
+  const lower = raw.toLowerCase();
+  const gen = /generate\s+(\d{4})\s+tax\s+return\s+for\s+(.+)/i.exec(raw);
+  return {
+    taxYear: gen ? Number(gen[1]) : undefined,
+    clientName: gen?.[2]?.trim(),
+    isGenerateTaxReturn: /\bgenerate\b.*\btax return\b/i.test(lower),
+    isCheckDrive: /\bcheck\s+drive\b/i.test(lower),
+  };
+}
+
+async function dispatchExternalStatements(limit = 10): Promise<Record<string, unknown>> {
+  try {
+    const r = await fetch(`${SUPABASE_URL}/functions/v1/statement-external-dispatch`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${SUPABASE_SERVICE_ROLE_KEY}`,
+      },
+      body: JSON.stringify({ limit }),
+    });
+    return await r.json();
+  } catch (e) {
+    return { ok: false, error: e instanceof Error ? e.message : String(e) };
+  }
+}
+
+function collectAsyncJobIds(ingestionResult: Record<string, unknown> | null): string[] {
+  if (!ingestionResult) return [];
+  const out = new Set<string>();
+  const files = Array.isArray(ingestionResult.processed_files)
+    ? ingestionResult.processed_files as Array<Record<string, unknown>>
+    : [];
+  for (const f of files) {
+    const status = String(f.status ?? "");
+    const jid = f.chunk_job_id ?? f.job_id;
+    if ((status === "requires_async_processing" || status === "processing_chunked") && typeof jid === "string") {
+      out.add(jid);
+    }
+  }
+  const jobs = Array.isArray(ingestionResult.statement_chunk_jobs)
+    ? ingestionResult.statement_chunk_jobs as Array<Record<string, unknown>>
+    : [];
+  for (const j of jobs) {
+    const jid = j.job_id ?? j.id;
+    if (typeof jid === "string") out.add(jid);
+  }
+  return Array.from(out);
+}
+
+async function persistWorkflowIntentState(
+  supabase: SupabaseClient,
+  state: WorkflowIntentState,
+): Promise<void> {
+  const { data: existing } = await supabase
+    .from("tax_returns")
+    .select("json_summary")
+    .eq("client_id", state.client_id)
+    .eq("tax_year", state.tax_year)
+    .maybeSingle();
+
+  const js = ((existing?.json_summary ?? {}) as Record<string, unknown>);
+  await upsertTaxReturn(supabase, {
+    client_id: state.client_id,
+    client_name: state.client_name,
+    tax_year: state.tax_year,
+    status: "in_progress",
+    json_summary: {
+      ...js,
+      workflow_intent_lock: state,
+    },
+    created_by: "generate-tax-documents",
+  });
+}
+
 serve(async (req) => {
   if (req.method === "OPTIONS") {
     return new Response(null, { headers: corsHeaders });
   }
 
   try {
-    const body = await req.json();
-    const taxYears: number[] =
-      body.tax_years ?? [body.tax_year ?? new Date().getFullYear()];
+    const body = await req.json() as Record<string, unknown>;
+    const intent = parseGenerateIntentLock(body);
+    let taxYears: number[] = Array.isArray(body.tax_years)
+      ? (body.tax_years as number[])
+      : [Number(body.tax_year ?? new Date().getFullYear())];
+    if (intent.taxYear && Number.isFinite(intent.taxYear)) {
+      taxYears = [intent.taxYear];
+    }
     if (!Array.isArray(taxYears) || taxYears.length === 0) {
       return new Response(
         JSON.stringify({
@@ -534,25 +640,66 @@ serve(async (req) => {
       );
     }
 
-    // Run ingestion for all years in parallel (always fresh — no json_summary cache)
+    // Intent lock: run only against the locked year to prevent year drift.
+    taxYears = [taxYears[0]];
+
+    // Run ingestion for locked year (fresh, no "no documents" shortcut).
     const t_start = Date.now();
     const ingestionResults: Record<string, any> = {};
     const supabaseAdmin = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
     const { client_id: effectiveClientId, client_name: effectiveClientName } =
       await resolveClientIdForGenerate(supabaseAdmin, body);
+    const requestClientName = typeof body.client_name === "string" ? body.client_name : "";
+    const requestClientId = typeof body.client_id === "string" ? body.client_id : "";
+    const resolvedClientLabel = effectiveClientName || requestClientName || requestClientId || "unknown";
+
+    if (effectiveClientId !== "unknown") {
+      await persistWorkflowIntentState(supabaseAdmin, {
+        client_id: effectiveClientId,
+        client_name: effectiveClientName,
+        tax_year: taxYears[0],
+        workflow: "generate_tax_return",
+        statement_processing: "idle",
+        statement_job_ids: [],
+      });
+    }
 
     if (body.client_name || body.client_id) {
       const ingestionPromises = taxYears.map(async (y) => {
         const result = await runIngestion(
-          effectiveClientName || body.client_name || body.client_id || "unknown",
+          resolvedClientLabel,
           effectiveClientId,
           y,
+          (body.drive_folder_mapping as Record<string, unknown> | undefined),
         );
         return { year: String(y), result };
       });
       const ingestionDone = await Promise.all(ingestionPromises);
       for (const { year, result } of ingestionDone) {
         ingestionResults[year] = result;
+      }
+
+      for (const y of taxYears) {
+        const key = String(y);
+        const ing = (ingestionResults[key] || null) as Record<string, unknown> | null;
+        const asyncJobIds = collectAsyncJobIds(ing);
+        if (asyncJobIds.length > 0 && effectiveClientId !== "unknown") {
+          const dispatch = await dispatchExternalStatements(10);
+          await persistWorkflowIntentState(supabaseAdmin, {
+            client_id: effectiveClientId,
+            client_name: effectiveClientName,
+            tax_year: y,
+            workflow: "generate_tax_return",
+            statement_processing: "in_progress",
+            statement_job_ids: asyncJobIds,
+          });
+          ingestionResults[key] = {
+            ...(ingestionResults[key] || {}),
+            statement_processing: "in_progress",
+            statement_job_ids: asyncJobIds,
+            external_dispatch: dispatch,
+          };
+        }
       }
       console.log(`[generate] Ingestion took ${Date.now() - t_start}ms for ${taxYears.join(", ")}.`);
 
@@ -596,7 +743,8 @@ serve(async (req) => {
       console.warn("[generate] No client_name or client_id — skipping ingestion step");
     }
 
-    async function processYear(year: number) {
+    async function runTaxReturnPipeline(state: WorkflowIntentState) {
+      const year = state.tax_year;
       console.log(`Processing tax year ${year}...`);
       console.log(`[generate] year=${year} entry: client_id=${effectiveClientId}`);
       let manualIncomeEntries: Array<Record<string, unknown>> = [];
@@ -679,9 +827,9 @@ serve(async (req) => {
 
       const taxDataPayload = JSON.stringify(taxDataPayloadObj);
 
-      const priorYear = year - 1;
       let priorYearBlock = "";
-      if (effectiveClientId !== "unknown") {
+      if (effectiveClientId !== "unknown" && !intent.isGenerateTaxReturn) {
+        const priorYear = year - 1;
         const { data: priorReturn } = await supabaseAdmin
           .from("tax_returns")
           .select("json_summary, filing_status, agi, total_income, client_name")
@@ -739,15 +887,71 @@ ${taxDataPayload}${priorYearBlock}`;
       // Only require json_summary and worksheet — filing_recommendation is optional
       console.log(`[generate] CC Tax fetches took ${Date.now() - t0}ms`);
       const t_claude = Date.now();
-      const generated = await callClaudeJSON<{
+      const { data: existingForFallback } = await supabaseAdmin
+        .from("tax_returns")
+        .select("json_summary, worksheet, filing_recommendation")
+        .eq("client_id", effectiveClientId)
+        .eq("tax_year", year)
+        .maybeSingle();
+      const fallbackSummary = (existingForFallback?.json_summary && typeof existingForFallback.json_summary === "object")
+        ? existingForFallback.json_summary as Record<string, unknown>
+        : { form_1040: {}, schedule_c: {}, schedule_se: {}, filing_readiness: {} };
+      const fallbackWorksheet = typeof existingForFallback?.worksheet === "string"
+        ? existingForFallback.worksheet
+        : `Tax prep worksheet fallback for ${year} (model unavailable).`;
+
+      let generated: {
         json_summary: Record<string, unknown>;
         worksheet: string;
         filing_recommendation?: Record<string, unknown>;
-      }>(
-        TAX_SYSTEM_PROMPT,
-        userPrompt,
-        { required: ["json_summary", "worksheet"] }, 4096);
-      console.log(`[generate] Claude analysis took ${Date.now() - t_claude}ms for year ${year}`);
+      } = {
+        json_summary: fallbackSummary,
+        worksheet: fallbackWorksheet,
+        filing_recommendation: (existingForFallback?.filing_recommendation &&
+            typeof existingForFallback.filing_recommendation === "object")
+          ? existingForFallback.filing_recommendation as Record<string, unknown>
+          : undefined,
+      };
+      let llmUsed = "state_fallback";
+      let llmError: string | undefined;
+      for (let attempt = 0; attempt < 2; attempt++) {
+        try {
+          generated = await callClaudeJSON<{
+            json_summary: Record<string, unknown>;
+            worksheet: string;
+            filing_recommendation?: Record<string, unknown>;
+          }>(
+            TAX_SYSTEM_PROMPT,
+            userPrompt,
+            { required: ["json_summary", "worksheet"] },
+            4096,
+          );
+          llmUsed = "claude";
+          llmError = undefined;
+          break;
+        } catch (e) {
+          llmError = e instanceof Error ? e.message : String(e);
+        }
+      }
+      if (llmUsed !== "claude") {
+        try {
+          generated = await callGPTJSON<{
+            json_summary: Record<string, unknown>;
+            worksheet: string;
+            filing_recommendation?: Record<string, unknown>;
+          }>(
+            TAX_SYSTEM_PROMPT,
+            userPrompt,
+            { required: ["json_summary", "worksheet"] },
+            4096,
+          );
+          llmUsed = "gpt-4o-mini";
+          llmError = undefined;
+        } catch (e) {
+          llmError = e instanceof Error ? e.message : String(e);
+        }
+      }
+      console.log(`[generate] model step took ${Date.now() - t_claude}ms for year ${year} via ${llmUsed}`);
 
       normalizeTaxGenerationOutput(generated, taxDataPayloadObj);
 
@@ -776,6 +980,11 @@ ${taxDataPayload}${priorYearBlock}`;
         const n = Number((entry as Record<string, unknown>).amount);
         return Number.isFinite(n) ? sum + n : sum;
       }, 0);
+      const mileageMiles = manualDeductionEntries.reduce((sum, entry) => {
+        const n = Number((entry as Record<string, unknown>).miles);
+        return Number.isFinite(n) && n > 0 ? sum + n : sum;
+      }, 0);
+      const mileageDeduction = Math.round(mileageMiles * MILEAGE_RATE_2022 * 100) / 100;
       const manualDeductionTotal = manualDeductionEntries.reduce((sum, entry) => {
         const n = Number((entry as Record<string, unknown>).amount);
         return Number.isFinite(n) ? sum + n : sum;
@@ -820,6 +1029,11 @@ ${taxDataPayload}${priorYearBlock}`;
         scheduleC.net_profit_or_loss = netProfit;
         scheduleC.line_31 = netProfit;
         summary.schedule_c = scheduleC;
+        summary.mileage_calculation = {
+          rate: MILEAGE_RATE_2022,
+          miles: mileageMiles,
+          amount: mileageDeduction,
+        };
 
         const wages = Number(form1040.wages) || 0;
         form1040.total_income = Math.round((netProfit + wages) * 100) / 100;
@@ -959,7 +1173,7 @@ ${taxDataPayload}${priorYearBlock}`;
 
       const { id: taxReturnId } = await upsertTaxReturn(supabase, {
         client_id: effectiveClientId,
-        client_name: effectiveClientName || body.client_name || body.client_id || "unknown",
+        client_name: resolvedClientLabel,
         tax_year: year,
         status: "draft",
         filing_status: form1040.filing_status || "unknown",
@@ -972,7 +1186,7 @@ ${taxDataPayload}${priorYearBlock}`;
         amount_owed_or_refund: form1040.amount_owed_or_refund,
         filing_readiness_score: readiness.score,
         filing_method: recommendation?.method,
-        model: "claude",
+        model: llmUsed,
         created_by: "generate-tax-documents",
       });
 
@@ -1036,7 +1250,7 @@ ${taxDataPayload}${priorYearBlock}`;
           runPdfFill(),
           runTxfExport(
             taxReturnId,
-            effectiveClientName || body.client_name || body.client_id || "unknown",
+            resolvedClientLabel,
             year
           ),
         ]);
@@ -1053,6 +1267,32 @@ ${taxDataPayload}${priorYearBlock}`;
       return {
         year: String(year),
         data: {
+          income_summary: {
+            total_income: Number(form1040.total_income) || 0,
+            adjusted_gross_income: Number(form1040.adjusted_gross_income) || 0,
+            ingestion_income: ingestionIncome,
+          },
+          expense_summary: {
+            total_expenses: Number((summary.schedule_c as Record<string, unknown> | undefined)?.total_expenses) || 0,
+            net_profit: Number((summary.schedule_c as Record<string, unknown> | undefined)?.net_profit) || 0,
+            manual_deductions_total: manualDeductionTotal,
+          },
+          mileage_calculation: (summary.mileage_calculation && typeof summary.mileage_calculation === "object")
+            ? summary.mileage_calculation
+            : {
+              rate: MILEAGE_RATE_2022,
+              miles: 0,
+              amount: 0,
+            },
+          missing_items: [
+            ...(Number(form1040.total_income) > 0 ? [] : ["income"]),
+            ...(Number((summary.schedule_c as Record<string, unknown> | undefined)?.total_expenses) > 0 ? [] : ["expenses"]),
+            ...(Number(form1040.filing_status ? 1 : 0) > 0 ? [] : ["filing_status"]),
+          ],
+          readiness_status: {
+            status: Number(readiness.score) >= 80 ? "ready" : "needs_review",
+            score: Number(readiness.score) || 0,
+          },
           json_summary: generated.json_summary,
           worksheet: generated.worksheet,
           filing_recommendation: recommendation,
@@ -1064,11 +1304,22 @@ ${taxDataPayload}${priorYearBlock}`;
           agi,
           output_strategy: "pdf_and_txf_always",
           accuracy_warnings: accuracyWarnings,
+          llm_model_used: llmUsed,
+          llm_error: llmError,
         },
       };
     }
 
-    const yearResults = await Promise.all(taxYears.map((y) => processYear(y)));
+    const yearResults = await Promise.all(
+      taxYears.map((y) =>
+        runTaxReturnPipeline({
+          client_id: effectiveClientId,
+          client_name: resolvedClientLabel,
+          tax_year: y,
+          workflow: "generate_tax_return",
+        })
+      ),
+    );
 
     const results: Record<string, any> = {};
     for (const r of yearResults) {
