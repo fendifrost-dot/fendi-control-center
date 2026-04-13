@@ -105,6 +105,16 @@ export default function ClientsPage() {
     void load();
   }
 
+  async function deleteClient(id: string, name: string) {
+    const { error } = await supabase.rpc("delete_client_and_related_data", { p_client_id: id });
+    if (error) {
+      toast({ title: `Could not delete ${name}`, description: error.message, variant: "destructive" });
+      return;
+    }
+    toast({ title: `Deleted ${name}` });
+    void load();
+  }
+
   const filtered = useMemo(() => {
     const q = search.trim().toLowerCase();
     if (!q) return clients;
