@@ -11,10 +11,21 @@ import {
   DialogTitle,
   DialogTrigger,
 } from "@/components/ui/dialog";
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+  AlertDialogTrigger,
+} from "@/components/ui/alert-dialog";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Separator } from "@/components/ui/separator";
-import { Plus, User, ChevronRight, FileSpreadsheet, Users, FolderOpen } from "lucide-react";
+import { Plus, User, ChevronRight, FileSpreadsheet, Users, FolderOpen, Trash2 } from "lucide-react";
 import { useToast } from "@/hooks/use-toast";
 
 type ClientRow = {
@@ -91,6 +102,16 @@ export default function ClientsPage() {
     toast({ title: "Client added" });
     setForm({ name: "", email: "", phone: "", business_type: "" });
     setOpen(false);
+    void load();
+  }
+
+  async function deleteClient(id: string, name: string) {
+    const { error } = await supabase.rpc("delete_client_and_related_data", { p_client_id: id });
+    if (error) {
+      toast({ title: `Could not delete ${name}`, description: error.message, variant: "destructive" });
+      return;
+    }
+    toast({ title: `Deleted ${name}` });
     void load();
   }
 
@@ -260,33 +281,64 @@ export default function ClientsPage() {
         ) : (
           <div className="grid gap-4 sm:grid-cols-2">
             {filtered.map((c) => (
-              <Link key={c.id} to={`/clients/${c.id}`} className="group block">
-                <Card className="h-full border-border/80 transition-all hover:border-primary/35 hover:shadow-md">
-                  <CardHeader className="flex flex-row items-start gap-4 space-y-0 pb-2">
-                    <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-full bg-primary/10 text-primary">
-                      <User className="h-5 w-5" />
-                    </div>
-                    <div className="min-w-0 flex-1">
-                      <div className="flex items-start justify-between gap-2">
-                        <CardTitle className="text-lg leading-tight">{c.name}</CardTitle>
-                        <ChevronRight className="h-5 w-5 shrink-0 text-muted-foreground opacity-0 transition-opacity group-hover:opacity-100" />
+              <div key={c.id} className="group relative">
+                <Link to={`/clients/${c.id}`} className="block">
+                  <Card className="h-full border-border/80 transition-all hover:border-primary/35 hover:shadow-md">
+                    <CardHeader className="flex flex-row items-start gap-4 space-y-0 pb-2">
+                      <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-full bg-primary/10 text-primary">
+                        <User className="h-5 w-5" />
                       </div>
-                      {c.email && (
-                        <p className="mt-1 truncate text-sm text-muted-foreground">{c.email}</p>
-                      )}
-                    </div>
-                  </CardHeader>
-                  <CardContent className="space-y-1 text-sm text-muted-foreground">
-                    <p>
-                      <span className="text-foreground/80">Tax returns on file:</span> {returnCount[c.id] ?? 0}
-                    </p>
-                    <p>
-                      <span className="text-foreground/80">Last activity:</span>{" "}
-                      {lastActivity[c.id] ? new Date(lastActivity[c.id]).toLocaleString() : "—"}
-                    </p>
-                  </CardContent>
-                </Card>
-              </Link>
+                      <div className="min-w-0 flex-1">
+                        <div className="flex items-start justify-between gap-2">
+                          <CardTitle className="text-lg leading-tight">{c.name}</CardTitle>
+                          <ChevronRight className="h-5 w-5 shrink-0 text-muted-foreground opacity-0 transition-opacity group-hover:opacity-100" />
+                        </div>
+                        {c.email && (
+                          <p className="mt-1 truncate text-sm text-muted-foreground">{c.email}</p>
+                        )}
+                      </div>
+                    </CardHeader>
+                    <CardContent className="space-y-1 text-sm text-muted-foreground">
+                      <p>
+                        <span className="text-foreground/80">Tax returns on file:</span> {returnCount[c.id] ?? 0}
+                      </p>
+                      <p>
+                        <span className="text-foreground/80">Last activity:</span>{" "}
+                        {lastActivity[c.id] ? new Date(lastActivity[c.id]).toLocaleString() : "—"}
+                      </p>
+                    </CardContent>
+                  </Card>
+                </Link>
+                <AlertDialog>
+                  <AlertDialogTrigger asChild>
+                    <Button
+                      variant="ghost"
+                      size="icon"
+                      className="absolute right-2 top-2 h-8 w-8 opacity-0 transition-opacity group-hover:opacity-100 hover:bg-destructive/10 hover:text-destructive"
+                      onClick={(e) => e.stopPropagation()}
+                    >
+                      <Trash2 className="h-4 w-4" />
+                    </Button>
+                  </AlertDialogTrigger>
+                  <AlertDialogContent>
+                    <AlertDialogHeader>
+                      <AlertDialogTitle>Delete {c.name}?</AlertDialogTitle>
+                      <AlertDialogDescription>
+                        This permanently removes the client and all related data — tax returns, documents, observations, credit analyses, and dispute letters. This cannot be undone.
+                      </AlertDialogDescription>
+                    </AlertDialogHeader>
+                    <AlertDialogFooter>
+                      <AlertDialogCancel>Cancel</AlertDialogCancel>
+                      <AlertDialogAction
+                        className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
+                        onClick={() => deleteClient(c.id, c.name)}
+                      >
+                        Delete permanently
+                      </AlertDialogAction>
+                    </AlertDialogFooter>
+                  </AlertDialogContent>
+                </AlertDialog>
+              </div>
             ))}
           </div>
         )}
