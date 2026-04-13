@@ -1729,6 +1729,8 @@ async function handleDriveProcessSingle(
             chunk_job_id: job.job_id,
             chunk_count: job.chunk_count,
             pages_total: job.pages_total,
+            processing_mode: (fileSizeHint ?? 0) > EDGE_SAFE_BYTE_LIMIT ? 'edge_or_external' : 'edge',
+            edge_safe_limit_bytes: EDGE_SAFE_BYTE_LIMIT,
             meta: { version: INGEST_VERSION },
           }),
           { headers: { ...corsHeaders, 'Content-Type': 'application/json' } },
