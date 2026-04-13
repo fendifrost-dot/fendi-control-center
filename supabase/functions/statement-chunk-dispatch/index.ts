@@ -47,8 +47,9 @@ Deno.serve(async (req: Request) => {
   // 2. Select oldest claimable jobs
   const { data: pending, error: selErr } = await hub
     .from("statement_chunk_jobs")
-    .select("id, client_id, tax_year, attempts, prep_status, source_storage_bucket, source_storage_path")
+    .select("id, client_id, tax_year, attempts, prep_status, source_storage_bucket, source_storage_path, processing_mode, source_bytes, file_size_bytes")
     .eq("status", "requires_async_processing")
+    .eq("processing_mode", "edge")
     .lt("attempts", 3)
     .order("created_at", { ascending: true })
     .limit(limit);
