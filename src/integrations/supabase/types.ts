@@ -868,8 +868,16 @@ export type Database = {
           pages_failed: number | null
           pages_processed: number | null
           pages_total: number | null
+          prep_completed_at: string | null
+          prep_error: string | null
+          prep_started_at: string | null
+          prep_status: string
           reason_codes: Json | null
           relative_path: string | null
+          source_bytes: number | null
+          source_drive_file_id: string | null
+          source_storage_bucket: string | null
+          source_storage_path: string | null
           source_type: string
           started_at: string | null
           status: string
@@ -895,8 +903,16 @@ export type Database = {
           pages_failed?: number | null
           pages_processed?: number | null
           pages_total?: number | null
+          prep_completed_at?: string | null
+          prep_error?: string | null
+          prep_started_at?: string | null
+          prep_status?: string
           reason_codes?: Json | null
           relative_path?: string | null
+          source_bytes?: number | null
+          source_drive_file_id?: string | null
+          source_storage_bucket?: string | null
+          source_storage_path?: string | null
           source_type?: string
           started_at?: string | null
           status?: string
@@ -922,8 +938,16 @@ export type Database = {
           pages_failed?: number | null
           pages_processed?: number | null
           pages_total?: number | null
+          prep_completed_at?: string | null
+          prep_error?: string | null
+          prep_started_at?: string | null
+          prep_status?: string
           reason_codes?: Json | null
           relative_path?: string | null
+          source_bytes?: number | null
+          source_drive_file_id?: string | null
+          source_storage_bucket?: string | null
+          source_storage_path?: string | null
           source_type?: string
           started_at?: string | null
           status?: string
