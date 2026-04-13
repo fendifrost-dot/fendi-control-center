@@ -4,7 +4,7 @@ import { chunkPages } from "../_shared/chunker.ts";
 import { ocrPage } from "../_shared/ocr.ts";
 import { extractStatementChunk } from "../_shared/geminiParser.ts";
 import { mergeChunkResults, type StatementTx } from "../_shared/statementMerger.ts";
-import { downloadFile } from "../_shared/googleDriveRead.ts";
+import { downloadFileRaw } from "../_shared/googleDriveRead.ts";
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
