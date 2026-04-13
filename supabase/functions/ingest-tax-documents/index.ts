@@ -1656,6 +1656,8 @@ async function handleDriveProcessSingle(
   folderNameIn: string | undefined,
   /** From mode=list: e.g. CHASE 2022/2022.pdf — required for generic filenames */
   relativePathIn?: string,
+  /** From mode=list: file size in bytes — enables pre-download async routing */
+  fileSizeHint?: number,
 ): Promise<Response> {
   let folderId = folderIdIn ?? '';
   let folderName = folderNameIn ?? '';
@@ -1675,6 +1677,76 @@ async function handleDriveProcessSingle(
   }
 
   const mimeHint = fileMime && fileMime.length > 0 ? fileMime : 'application/pdf';
+
+  // Pre-download size check: if caller provided file_size from list and it's >50MB + PDF,
+  // route to async chunk processing WITHOUT downloading (avoids WORKER_LIMIT).
+  if (fileSizeHint && fileSizeHint > 50_000_000 && mimeHint === 'application/pdf') {
+    const classification: DocClassification = classifyDocument({
+      filename: fileName ?? "",
+      mimeType: mimeHint,
+      textSample: "",
+      relativePath: relativePathIn,
+    });
+    if (classification.docClass === 'financial_statement') {
+      console.log(`[ingest] pre-download async route: ${fileName} (${Math.round(fileSizeHint / 1e6)}MB)`);
+      try {
+        const job = await createStatementChunkJob(hub, clientId, clientName, taxYear, {
+          file_id: fileId,
+          file_name: fileName,
+          relative_path: relativePathIn ?? null,
+          file_size_bytes: fileSizeHint,
+        });
+        const reason = 'requires_async_processing';
+        const rec: DriveIngestFileRecord = {
+          file_id: fileId,
+          file_name: fileName,
+          file_mime: mimeHint,
+          docClass: classification.docClass,
+          skipped: true,
+          skipReason: reason,
+          status: 'skipped',
+          ingest_status: 'requires_async_processing',
+          relative_path: relativePathIn,
+          file_size_bytes: fileSizeHint,
+          reason_codes: [reason],
+        };
+        await mergeDriveIngestSession(hub, clientId, clientName, taxYear, folderId, folderName, rec);
+        return new Response(
+          JSON.stringify({
+            success: true,
+            mode: 'process_single',
+            document_id: fileId,
+            doc_class: classification.docClass,
+            relative_path: relativePathIn,
+            file_size_bytes: fileSizeHint,
+            ingest_status: 'requires_async_processing',
+            status: 'requires_async_processing',
+            skip_reason: reason,
+            chunk_job_id: job.job_id,
+            chunk_count: job.chunk_count,
+            pages_total: job.pages_total,
+            meta: { version: INGEST_VERSION },
+          }),
+          { headers: { ...corsHeaders, 'Content-Type': 'application/json' } },
+        );
+      } catch (e) {
+        const reason = 'job_creation_failed';
+        const message = e instanceof Error ? e.message : String(e);
+        return new Response(
+          JSON.stringify({
+            success: false,
+            mode: 'process_single',
+            status: 'chunk_processing_failed',
+            ingest_status: 'chunk_processing_failed',
+            reason,
+            error: message,
+            meta: { version: INGEST_VERSION },
+          }),
+          { status: 500, headers: { ...corsHeaders, 'Content-Type': 'application/json' } },
+        );
+      }
+    }
+  }
 
   try {
     const { base64, downloadMime, bytes } = await downloadFile(fileId, mimeHint);
