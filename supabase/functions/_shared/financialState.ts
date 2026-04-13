@@ -5,12 +5,21 @@
 
 export type IngestStatus =
   | "ingested" // successfully extracted transactions
+  | "processed" // alias for downstream systems expecting processed
   | "classified_only" // classified but not yet processed (policy skip)
   | "deferred_large_pdf" // classified, too large for single LLM call, needs chunking
   | "requires_chunking" // queued for chunked processing
   | "requires_review" // could not be classified or processed automatically
   | "skipped_duplicate" // identified as duplicate of another document
-  | "image_not_processed"; // image file detected, vision processing not yet implemented
+  | "image_not_processed" // image file detected, vision processing not yet implemented
+  | "processing_chunked"
+  | "chunk_failed"
+  | "partial_success"
+  | "requires_async_processing"
+  | "chunk_processing_failed"
+  | "failed_extraction"
+  | "duplicate_exact"
+  | "duplicate_probable";
 
 export type ReviewReason =
   | "image_file_not_processed"

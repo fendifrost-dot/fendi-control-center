@@ -5,6 +5,11 @@ import { upsertTaxReturn, getTaxReturn } from '../_shared/taxReturns.ts';
 import { classifyDocument, type DocClass, type DocClassification } from '../_shared/docClassifier.ts';
 import { pickSystemPrompt } from '../_shared/ingestPrompts.ts';
 import { analyzeDocumentWithGemini } from '../_shared/geminiParser.ts';
+import { extractStatementChunk, type StatementChunkTx } from '../_shared/geminiParser.ts';
+import { splitPdfIntoPages, isScannedPage } from '../_shared/pdfSplitter.ts';
+import { chunkPages } from '../_shared/chunker.ts';
+import { ocrPage } from '../_shared/ocr.ts';
+import { mergeChunkResults } from '../_shared/statementMerger.ts';
 import {
   SCHEDULE_C_CATEGORIES,
   UNCLASSIFIED_SCHEDULE_C,
@@ -27,9 +32,11 @@ const corsHeaders = {
   'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type',
   'Access-Control-Allow-Methods': 'POST, OPTIONS',
 };
+const INGEST_VERSION = "async-chunk-v1";
 
 /** Persisted between process_single calls; aggregate reads this from tax_returns.analyzed_data */
 const DRIVE_INGEST_SESSION_KEY = 'drive_ingest_session';
+const STATEMENT_CHUNK_JOBS_KEY = 'statement_chunk_jobs';
 
 interface IncomeItem {
   source: string;
@@ -97,6 +104,11 @@ interface DriveIngestFileRecord {
   /** From mode=list / classify — e.g. CHASE 2022/2022.pdf */
   relative_path?: string;
   file_size_bytes?: number;
+  ingest_status?: IngestStatus | LineageStatus;
+  duplicate_status?: 'none' | 'duplicate_exact' | 'duplicate_probable';
+  canonical_file_id?: string;
+  warning_flags?: string[];
+  reason_codes?: string[];
 }
 
 interface DriveIngestSession {
@@ -107,6 +119,58 @@ interface DriveIngestSession {
   files: Record<string, DriveIngestFileRecord>;
   started_at?: string;
 }
+
+type LineageStatus =
+  | 'processed'
+  | 'processing_chunked'
+  | 'requires_async_processing'
+  | 'chunk_processing_failed'
+  | 'chunk_failed'
+  | 'partial_success'
+  | 'requires_review'
+  | 'requires_chunking'
+  | 'failed_extraction'
+  | 'duplicate_exact'
+  | 'duplicate_probable'
+  | 'year_mismatch';
+
+type IngestFileLineage = {
+  file_id: string;
+  file_name: string;
+  relative_path: string | null;
+  doc_class: DocClass;
+  status: LineageStatus;
+  file_size: number | null;
+  duplicate_status: 'none' | 'duplicate_exact' | 'duplicate_probable';
+  canonical_file_id: string | null;
+  extracted_income_total: number;
+  extracted_expense_total: number;
+  income_item_count: number;
+  expense_item_count: number;
+  warning_flags: string[];
+  reason_codes: string[];
+  chunk_count?: number;
+  pages_total?: number;
+  pages_processed?: number;
+  pages_failed?: number;
+  transactions_extracted?: number;
+};
+
+type StatementChunkJob = {
+  job_id: string;
+  client_id: string;
+  tax_year: number;
+  file_id: string;
+  file_name: string;
+  relative_path: string | null;
+  file_size_bytes: number;
+  chunk_size_pages: number;
+  chunk_count: number;
+  pages_total: number;
+  status: 'requires_async_processing' | 'processing_chunked' | 'completed' | 'chunk_processing_failed';
+  created_at: string;
+  updated_at: string;
+};
 
 function useGeminiForTax(): boolean {
   const k = Deno.env.get('Frost_Gemini');
@@ -452,6 +516,202 @@ function expenseBucket(item: ExpenseItem): ScheduleCCategoryKey | typeof UNCLASS
   return UNCLASSIFIED_SCHEDULE_C;
 }
 
+function toLowerSafe(v: unknown): string {
+  return String(v ?? '').toLowerCase();
+}
+
+function normalizedNameForDedup(name: string): string {
+  return name
+    .toLowerCase()
+    .replace(/\.[a-z0-9]+$/i, '')
+    .replace(/\(\s*\d+\s*\)/g, '')
+    .replace(/\bcopy\b/g, '')
+    .replace(/[_\-\s]+/g, ' ')
+    .trim();
+}
+
+function statementLike(docClass: DocClass, fileName: string, relativePath: string | null, extracted?: ExtractedData): boolean {
+  if (docClass === 'financial_statement') return true;
+  const hay = `${toLowerSafe(fileName)} ${toLowerSafe(relativePath)} ${toLowerSafe(extracted?.doc_type)}`;
+  if (/(statement|sttmnt|stmt|chase|chime|checking|account)/.test(hay)) return true;
+  const md = extracted?.extracted_data?.metadata ?? {};
+  if ('account_type' in md || 'institution' in md || 'statement_period' in md) return true;
+  return false;
+}
+
+function enforceStatementIncomeHardBlock(
+  extracted: ExtractedData,
+  docClass: DocClass,
+  fileName: string,
+  relativePath: string | null,
+): { blocked: boolean; reason?: string } {
+  if (!statementLike(docClass, fileName, relativePath, extracted)) return { blocked: false };
+  if (extracted.extracted_data.income_items.length === 0) return { blocked: false };
+  extracted.extracted_data.income_items = [];
+  return { blocked: true, reason: 'statement_income_hard_block' };
+}
+
+function extractYearHint(fileName: string, relativePath: string | null, extracted?: ExtractedData): number | null {
+  const hay = `${fileName} ${relativePath ?? ''}`;
+  const m = hay.match(/\b(20\d{2})\b/);
+  if (m) return Number(m[1]);
+  const period = extracted?.extracted_data?.metadata?.statement_period;
+  const periodMatch = String(period ?? '').match(/\b(20\d{2})\b/);
+  return periodMatch ? Number(periodMatch[1]) : null;
+}
+
+function summarizeExtracted(extracted?: ExtractedData): {
+  incomeTotal: number;
+  expenseTotal: number;
+  incomeCount: number;
+  expenseCount: number;
+} {
+  if (!extracted) return { incomeTotal: 0, expenseTotal: 0, incomeCount: 0, expenseCount: 0 };
+  const incomeTotal = extracted.extracted_data.income_items.reduce((s, i) => s + (Number(i.amount) || 0), 0);
+  const expenseTotal = extracted.extracted_data.expense_items.reduce((s, i) => s + Math.abs(Number(i.amount) || 0), 0);
+  return {
+    incomeTotal: Math.round(incomeTotal * 100) / 100,
+    expenseTotal: Math.round(expenseTotal * 100) / 100,
+    incomeCount: extracted.extracted_data.income_items.length,
+    expenseCount: extracted.extracted_data.expense_items.length,
+  };
+}
+
+function buildCoverage(lineage: IngestFileLineage[]): Record<string, number> {
+  const statements = lineage.filter((l) => l.doc_class === 'financial_statement');
+  const incomeDocs = lineage.filter((l) => l.doc_class === 'income_1099' || l.doc_class === 'income_w2');
+  return {
+    statements_detected: statements.length,
+    statements_processed: statements.filter((l) => l.status === 'processed' || l.status === 'partial_success').length,
+    statements_requires_chunking: statements.filter((l) => l.status === 'requires_chunking').length,
+    statements_failed: statements.filter((l) =>
+      l.status === 'failed_extraction' ||
+      l.status === 'chunk_processing_failed' ||
+      l.status === 'requires_async_processing'
+    ).length,
+    income_docs_detected: incomeDocs.length,
+    income_docs_processed: incomeDocs.filter((l) => l.status === 'processed').length,
+  };
+}
+
+function isErrorLikeStatus(status: string): boolean {
+  return status === 'error' ||
+    status === 'failed_extraction' ||
+    status === 'chunk_processing_failed' ||
+    status === 'requires_async_processing' ||
+    status === 'requires_chunking';
+}
+
+async function processChunkedStatement(
+  bytes: Uint8Array,
+  fileName: string,
+  maxPages = 150,
+): Promise<{
+  extracted: ExtractedData | null;
+  status: LineageStatus;
+  chunk_count: number;
+  pages_total: number;
+  pages_processed: number;
+  pages_failed: number;
+  transactions_extracted: number;
+  reason_codes: string[];
+}> {
+  const pages = await splitPdfIntoPages(bytes);
+  const bounded = pages.slice(0, maxPages);
+  const chunks = chunkPages(bounded, 5);
+  const chunkResults: StatementChunkTx[][] = [];
+  let pagesProcessed = 0;
+  let pagesFailed = 0;
+  const reason_codes: string[] = [];
+
+  for (const chunk of chunks) {
+    let chunkText = '';
+    for (const page of chunk.pages) {
+      let t = page.text ?? '';
+      if (isScannedPage(page)) {
+        t = await ocrPage(page);
+      }
+      if (t.trim().length === 0) {
+        pagesFailed += 1;
+      } else {
+        pagesProcessed += 1;
+      }
+      chunkText += `\n--- PAGE ${page.pageNumber} ---\n${t}`;
+    }
+
+    let ok = false;
+    for (let attempt = 0; attempt < 2; attempt++) {
+      try {
+        const extracted = await extractStatementChunk(chunkText);
+        chunkResults.push(extracted.transactions);
+        ok = true;
+        break;
+      } catch (e) {
+        if (attempt === 1) {
+          reason_codes.push(`chunk_failed:${chunk.index}:${e instanceof Error ? e.message : String(e)}`);
+        }
+      }
+    }
+    if (!ok) {
+      pagesFailed += chunk.pages.length;
+    }
+  }
+
+  const merged = mergeChunkResults(chunkResults);
+  const expense_items: ExpenseItem[] = merged.map((t) => ({
+    category: 'withdrawal',
+    raw_category: 'statement_chunk_extract',
+    description: t.description,
+    amount: Math.abs(Number(t.amount) || 0),
+    date: t.date,
+    schedule_c_category: null,
+    confidence: 0.55,
+    flags: ['chunk_extract', 'needs_review'],
+    needs_review: true,
+  }));
+
+  if (merged.length === 0) {
+    return {
+      extracted: null,
+      status: reason_codes.length > 0 ? 'failed_extraction' : 'requires_chunking',
+      chunk_count: chunks.length,
+      pages_total: bounded.length,
+      pages_processed: pagesProcessed,
+      pages_failed: pagesFailed,
+      transactions_extracted: 0,
+      reason_codes: reason_codes.length > 0 ? reason_codes : ['no_transactions_extracted'],
+    };
+  }
+
+  const extracted: ExtractedData = {
+    doc_type: 'bank_statement',
+    classification: 'expense',
+    extracted_data: {
+      income_items: [],
+      expense_items,
+      payer_info: { name: '', ein: '', address: '' },
+      metadata: {
+        chunk_count: chunks.length,
+        pages_total: bounded.length,
+        pages_processed: pagesProcessed,
+        pages_failed: pagesFailed,
+      },
+    },
+  };
+
+  const partial = pagesFailed > 0 || reason_codes.some((r) => r.startsWith('chunk_failed:'));
+  return {
+    extracted,
+    status: partial ? 'partial_success' : 'processed',
+    chunk_count: chunks.length,
+    pages_total: bounded.length,
+    pages_processed: pagesProcessed,
+    pages_failed: pagesFailed,
+    transactions_extracted: merged.length,
+    reason_codes,
+  };
+}
+
 function aggregatePL(allExtracted: ExtractedData[]): PLSummary {
   const incomeByCategory: Record<string, number> = {
     'W-2 Wages': 0,
@@ -467,7 +727,14 @@ function aggregatePL(allExtracted: ExtractedData[]): PLSummary {
   const expensesByCategory = emptyScheduleCExpenseTotals() as unknown as Record<string, number>;
 
   for (const doc of allExtracted) {
+    const md = doc.extracted_data.metadata ?? {};
+    const docTypeLower = toLowerSafe(doc.doc_type);
+    const statementDoc =
+      docTypeLower.includes('statement') ||
+      docTypeLower.includes('bank') ||
+      ('account_type' in md || 'institution' in md || 'statement_period' in md);
     for (const item of doc.extracted_data.income_items) {
+      if (statementDoc) continue;
       const amount = Number(item.amount) || 0;
       switch (doc.doc_type) {
         case 'W-2':
@@ -541,9 +808,144 @@ type SkippedIngestDoc = {
   kind: 'policy_skip' | 'error';
 };
 
+function dedupeAndBuildLineage(
+  taxYear: number,
+  staged: StagedIngestDoc[],
+  skippedDocs: SkippedIngestDoc[],
+): { canonical: StagedIngestDoc[]; lineage: IngestFileLineage[]; suppressed: SkippedIngestDoc[] } {
+  const canonical: StagedIngestDoc[] = [];
+  const lineage: IngestFileLineage[] = [];
+  const suppressed: SkippedIngestDoc[] = [];
+  const seenStrong = new Map<string, StagedIngestDoc>();
+  const seenProbable = new Map<string, StagedIngestDoc>();
+
+  for (const s of staged) {
+    const norm = normalizedNameForDedup(s.fileName);
+    const sz = s.fileSizeBytes ?? 0;
+    const strongKey = `${norm}|${sz}`;
+    const idSig = (() => {
+      const z = summarizeExtracted(s.extracted);
+      const payer = toLowerSafe(s.extracted.extracted_data.payer_info?.name);
+      const yr = extractYearHint(s.fileName, s.relativePath, s.extracted) ?? 0;
+      return `${s.docClass}|${payer}|${yr}|${z.incomeTotal}|${z.expenseTotal}`;
+    })();
+
+    const existingStrong = seenStrong.get(strongKey);
+    const existingProbable = seenProbable.get(idSig);
+    const dupeOf = existingStrong ?? existingProbable;
+    const yearHint = extractYearHint(s.fileName, s.relativePath, s.extracted);
+    const crossYear = yearHint != null && yearHint !== taxYear;
+    const z = summarizeExtracted(s.extracted);
+    const md = (s.extracted.extracted_data.metadata ?? {}) as Record<string, unknown>;
+    const chunk_count = Number(md.chunk_count) || undefined;
+    const pages_total = Number(md.pages_total) || undefined;
+    const pages_processed = Number(md.pages_processed) || undefined;
+    const pages_failed = Number(md.pages_failed) || undefined;
+    const flags: string[] = [];
+    const reasons: string[] = [];
+    let status: LineageStatus = 'processed';
+    let duplicate_status: IngestFileLineage['duplicate_status'] = 'none';
+    let canonical_file_id: string | null = null;
+
+    if (dupeOf) {
+      canonical_file_id = dupeOf.docId;
+      if (existingStrong) {
+        status = 'duplicate_exact';
+        duplicate_status = 'duplicate_exact';
+      } else {
+        status = 'duplicate_probable';
+        duplicate_status = 'duplicate_probable';
+      }
+      flags.push('duplicate_candidate');
+      reasons.push('duplicate_suppressed_from_totals');
+      suppressed.push({
+        docId: s.docId,
+        fileName: s.fileName,
+        docClass: s.docClass,
+        skipReason: existingStrong ? 'duplicate_exact' : 'duplicate_probable',
+        relativePath: s.relativePath,
+        fileSizeBytes: s.fileSizeBytes,
+        kind: 'policy_skip',
+      });
+    } else if (crossYear) {
+      status = 'year_mismatch';
+      flags.push('cross_year_candidate');
+      reasons.push(`year_mismatch:${yearHint}->${taxYear}`);
+      suppressed.push({
+        docId: s.docId,
+        fileName: s.fileName,
+        docClass: s.docClass,
+        skipReason: `cross_year_mismatch:${yearHint}->${taxYear}`,
+        relativePath: s.relativePath,
+        fileSizeBytes: s.fileSizeBytes,
+        kind: 'policy_skip',
+      });
+    } else {
+      canonical.push(s);
+      seenStrong.set(strongKey, s);
+      seenProbable.set(idSig, s);
+    }
+
+    lineage.push({
+      file_id: s.docId,
+      file_name: s.fileName,
+      relative_path: s.relativePath,
+      doc_class: s.docClass,
+      status,
+      file_size: s.fileSizeBytes,
+      duplicate_status,
+      canonical_file_id,
+      extracted_income_total: status.startsWith('duplicate') || status === 'year_mismatch' ? 0 : z.incomeTotal,
+      extracted_expense_total: status.startsWith('duplicate') || status === 'year_mismatch' ? 0 : z.expenseTotal,
+      income_item_count: status.startsWith('duplicate') || status === 'year_mismatch' ? 0 : z.incomeCount,
+      expense_item_count: status.startsWith('duplicate') || status === 'year_mismatch' ? 0 : z.expenseCount,
+      warning_flags: flags,
+      reason_codes: reasons,
+      chunk_count,
+      pages_total,
+      pages_processed,
+      pages_failed,
+      transactions_extracted: status.startsWith('duplicate') || status === 'year_mismatch' ? 0 : z.expenseCount,
+    });
+  }
+
+  for (const sk of skippedDocs) {
+    lineage.push({
+      file_id: sk.docId,
+      file_name: sk.fileName,
+      relative_path: sk.relativePath,
+      doc_class: sk.docClass,
+      status: sk.kind === 'error' ? 'failed_extraction' : 'requires_review',
+      file_size: sk.fileSizeBytes,
+      duplicate_status: 'none',
+      canonical_file_id: null,
+      extracted_income_total: 0,
+      extracted_expense_total: 0,
+      income_item_count: 0,
+      expense_item_count: 0,
+      warning_flags: ['requires_review'],
+      reason_codes: [sk.skipReason],
+    });
+  }
+
+  return { canonical, lineage, suppressed };
+}
+
 function inferPolicySkipIngestStatus(docClass: DocClass): IngestStatus {
   if (docClass === 'requires_review') return 'requires_review';
   return 'classified_only';
+}
+
+function inferIngestStatusFromSkip(skipReason: string, docClass: DocClass): IngestStatus {
+  if (skipReason.includes('requires_async_processing')) return 'requires_async_processing';
+  if (skipReason.includes('chunk_processing_failed')) return 'chunk_processing_failed';
+  if (skipReason.includes('large_pdf_requires_chunking')) return 'requires_chunking';
+  if (skipReason.includes('image_file_not_processed')) return 'image_not_processed';
+  if (skipReason.includes('duplicate_exact')) return 'duplicate_exact';
+  if (skipReason.includes('duplicate_probable')) return 'duplicate_probable';
+  if (skipReason.includes('duplicate_')) return 'skipped_duplicate';
+  if (skipReason.includes('cross_year_mismatch')) return 'requires_review';
+  return inferPolicySkipIngestStatus(docClass);
 }
 
 function buildIngestFinancialState(
@@ -556,8 +958,18 @@ function buildIngestFinancialState(
   for (const sk of skippedDocs) {
     const ingestStatus: IngestStatus = sk.kind === 'error'
       ? 'requires_review'
-      : inferPolicySkipIngestStatus(sk.docClass);
-    const wr: ReviewReason = sk.kind === 'error' ? 'parse_failure' : 'ambiguous_doc_type';
+      : inferIngestStatusFromSkip(sk.skipReason, sk.docClass);
+    const wr: ReviewReason = sk.kind === 'error'
+      ? 'parse_failure'
+      : sk.skipReason.includes('image_file_not_processed')
+      ? 'image_file_not_processed'
+      : sk.skipReason.includes('large_pdf_requires_chunking')
+      ? 'large_pdf_requires_chunking'
+      : sk.skipReason.includes('cross_year_mismatch')
+      ? 'cross_year_mismatch'
+      : sk.skipReason.includes('duplicate_')
+      ? 'duplicate_candidate'
+      : 'ambiguous_doc_type';
     state.documents.push({
       id: sk.docId,
       fileName: sk.fileName,
@@ -699,6 +1111,58 @@ async function mergeDriveIngestSession(
   });
 }
 
+async function createStatementChunkJob(
+  hub: SupabaseClient,
+  clientId: string,
+  clientName: string,
+  taxYear: number,
+  input: {
+    file_id: string;
+    file_name: string;
+    relative_path: string | null;
+    file_size_bytes: number;
+  },
+): Promise<StatementChunkJob> {
+  // Lightweight enqueue only (do NOT split/ocr in request path; avoids worker limits).
+  // Temporary estimate: ~1 chunk per 5MB, bounded to [1, 150].
+  const estimatedPages = Math.max(1, Math.min(150, Math.ceil(input.file_size_bytes / 1_000_000)));
+  const estimatedChunkCount = Math.max(1, Math.ceil(estimatedPages / 5));
+  const now = new Date().toISOString();
+  const job: StatementChunkJob = {
+    job_id: crypto.randomUUID(),
+    client_id: clientId,
+    tax_year: taxYear,
+    file_id: input.file_id,
+    file_name: input.file_name,
+    relative_path: input.relative_path,
+    file_size_bytes: input.file_size_bytes,
+    chunk_size_pages: 5,
+    chunk_count: estimatedChunkCount,
+    pages_total: estimatedPages,
+    status: 'requires_async_processing',
+    created_at: now,
+    updated_at: now,
+  };
+
+  const existing = await getTaxReturn(hub, clientId, taxYear);
+  const prev = (existing?.analyzed_data as Record<string, unknown> | null) || {};
+  const jobs = Array.isArray(prev[STATEMENT_CHUNK_JOBS_KEY]) ? (prev[STATEMENT_CHUNK_JOBS_KEY] as StatementChunkJob[]) : [];
+  jobs.push(job);
+  await upsertTaxReturn(hub, {
+    client_id: clientId,
+    client_name: clientName,
+    tax_year: taxYear,
+    status: 'in_progress',
+    analyzed_data: {
+      ...prev,
+      [STATEMENT_CHUNK_JOBS_KEY]: jobs,
+      updated_at: now,
+    },
+    created_by: 'ingest-tax-documents',
+  });
+  return job;
+}
+
 /** Analyze documents uploaded to Supabase Storage (dashboard tax workflow). */
 async function ingestFromUploadedDocuments(
   hub: SupabaseClient,
@@ -760,6 +1224,7 @@ async function ingestFromUploadedDocuments(
 
       const ab = await blob.arrayBuffer();
       const base64 = arrayBufferToBase64(ab);
+      const byteLen = ab.byteLength;
       const mime =
         row.mime_type || row.original_mime_type || 'application/pdf';
 
@@ -773,6 +1238,67 @@ async function ingestFromUploadedDocuments(
       console.log(
         `[ingest] doc=${row.id} class=${classification.docClass} confidence=${classification.confidence} reasons=${classification.reasons.join("|")}`
       );
+
+      // Explicit image policy: no silent skip, no income contribution.
+      if (mime.startsWith('image/')) {
+        const reason = 'image_file_not_processed';
+        ingestWarnings.push({ document_id: row.id, file_name: row.file_name, reason });
+        skippedDocs.push({
+          docId: row.id,
+          fileName: row.file_name,
+          docClass: 'requires_review',
+          skipReason: reason,
+          relativePath: row.storage_object_path?.replace(/^\/+/, "") ?? null,
+          fileSizeBytes: byteLen,
+          kind: 'policy_skip',
+        });
+        results.push({ documentId: row.id, docClass: 'requires_review', skipped: true, skipReason: reason });
+        processedFiles.push({ name: row.file_name, doc_type: 'requires_review', status: 'requires_review' });
+        continue;
+      }
+
+      // Large scanned statements are queued for async chunk processing.
+      if (classification.docClass === 'financial_statement' && mime === 'application/pdf' && byteLen > 50_000_000) {
+        try {
+          const job = await createStatementChunkJob(hub, clientId, client_name, taxYear, {
+            file_id: row.id,
+            file_name: row.file_name,
+            relative_path: row.storage_object_path?.replace(/^\/+/, "") ?? null,
+            file_size_bytes: byteLen,
+          });
+          skippedDocs.push({
+            docId: row.id,
+            fileName: row.file_name,
+            docClass: classification.docClass,
+            skipReason: 'requires_async_processing',
+            relativePath: row.storage_object_path?.replace(/^\/+/, "") ?? null,
+            fileSizeBytes: byteLen,
+            kind: 'policy_skip',
+          });
+          results.push({ documentId: row.id, docClass: classification.docClass, skipped: true, skipReason: 'requires_async_processing' });
+          processedFiles.push({ name: row.file_name, doc_type: classification.docClass, status: 'requires_async_processing' });
+          ingestWarnings.push({
+            document_id: row.id,
+            file_name: row.file_name,
+            reason: `requires_async_processing:job=${job.job_id}:chunks=${job.chunk_count}:pages=${job.pages_total}`,
+          });
+        } catch (e) {
+          const message = e instanceof Error ? e.message : String(e);
+          skippedDocs.push({
+            docId: row.id,
+            fileName: row.file_name,
+            docClass: classification.docClass,
+            skipReason: `job_creation_failed:${message}`,
+            relativePath: row.storage_object_path?.replace(/^\/+/, "") ?? null,
+            fileSizeBytes: byteLen,
+            kind: 'error',
+          });
+          results.push({ documentId: row.id, docClass: classification.docClass, skipped: true, skipReason: 'chunk_processing_failed' });
+          processedFiles.push({ name: row.file_name, doc_type: classification.docClass, status: 'chunk_processing_failed' });
+          errors.push({ name: row.file_name, error: message });
+        }
+        continue;
+      }
 
       const systemPrompt = pickSystemPrompt(classification.docClass);
       if (systemPrompt === null) {
@@ -799,7 +1325,15 @@ async function ingestFromUploadedDocuments(
       }
 
       const extracted = await analyzeDocumentRouter(base64, row.file_name, mime, systemPrompt);
-      const byteLen = ab.byteLength;
+      const blocked = enforceStatementIncomeHardBlock(
+        extracted,
+        classification.docClass,
+        row.file_name,
+        row.storage_object_path?.replace(/^\/+/, "") ?? null,
+      );
+      if (blocked.blocked && blocked.reason) {
+        ingestWarnings.push({ document_id: row.id, file_name: row.file_name, reason: blocked.reason });
+      }
       staged.push({
         docId: row.id,
         fileName: row.file_name,
@@ -876,8 +1410,11 @@ async function ingestFromUploadedDocuments(
     }
   }
 
-  const allExtracted = staged.map((s) => s.extracted);
-  const financialState = buildIngestFinancialState(staged, skippedDocs);
+  const { canonical: canonicalStaged, lineage, suppressed } = dedupeAndBuildLineage(taxYear, staged, skippedDocs);
+  const coverage = buildCoverage(lineage);
+  const filesWithErrors = processedFiles.filter((p) => isErrorLikeStatus(p.status)).length;
+  const allExtracted = canonicalStaged.map((s) => s.extracted);
+  const financialState = buildIngestFinancialState(canonicalStaged, [...skippedDocs, ...suppressed]);
   const taxKnowledge = retrieveTaxKnowledge({ patterns: financialState.patterns, broad: true });
 
   // Change 3: Cross-document dedup — financial statements never contribute income.
@@ -930,11 +1467,14 @@ async function ingestFromUploadedDocuments(
     analyzed_data: {
       pl_summary: plSummary,
       documents: allExtracted,
+      ingest_file_results: lineage,
+      coverage,
       financial_state: financialState,
       tax_knowledge: taxKnowledge,
       ingest_warnings: ingestWarnings.length ? ingestWarnings : undefined,
       processed_files: processedFiles,
       errors: errors.length ? errors : undefined,
+      files_with_errors: filesWithErrors,
       source: 'storage_upload',
       updated_at: new Date().toISOString(),
     },
@@ -956,12 +1496,14 @@ async function ingestFromUploadedDocuments(
     folder_name: 'Uploaded documents',
     folder_id: null,
     files_processed: processedFiles.length,
-    files_with_errors: errors.length,
+    files_with_errors: filesWithErrors,
     processed_files: processedFiles,
     errors: errors.length > 0 ? errors : undefined,
     pl_summary: plSummary,
     aggregated_data,
     documents: allExtracted,
+    ingest_file_results: lineage,
+    coverage,
     financial_state: financialState,
     tax_knowledge: taxKnowledge,
     ingest_warnings: ingestWarnings.length ? ingestWarnings : undefined,
@@ -1070,6 +1612,7 @@ async function handleDriveList(
       folder_id: folderId,
       folder_name: folderName,
       files: outFiles,
+      meta: { version: INGEST_VERSION },
     }),
     { headers: { ...corsHeaders, 'Content-Type': 'application/json' } },
   );
@@ -1125,6 +1668,116 @@ async function handleDriveProcessSingle(
       relativePath: relativePathIn,
     });
 
+    if (downloadMime.startsWith('image/')) {
+      const reason = 'image_file_not_processed';
+      const rec: DriveIngestFileRecord = {
+        file_id: fileId,
+        file_name: fileName,
+        file_mime: downloadMime,
+        docClass: 'requires_review',
+        skipped: true,
+        skipReason: reason,
+        status: 'skipped',
+        ingest_status: 'image_not_processed',
+        relative_path: relativePathIn,
+        file_size_bytes: largeFileBytes,
+        reason_codes: [reason],
+      };
+      await mergeDriveIngestSession(hub, clientId, clientName, taxYear, folderId, folderName, rec);
+      return new Response(
+        JSON.stringify({
+          success: true,
+          mode: 'process_single',
+          document_id: fileId,
+          doc_class: rec.docClass,
+          relative_path: relativePathIn,
+          file_size_bytes: largeFileBytes,
+          ingest_status: rec.ingest_status,
+          status: 'skipped',
+          skip_reason: reason,
+        }),
+        { headers: { ...corsHeaders, 'Content-Type': 'application/json' } },
+      );
+    }
+
+    if (classification.docClass === 'financial_statement' && downloadMime === 'application/pdf' && largeFileBytes > 50_000_000) {
+      try {
+        const job = await createStatementChunkJob(hub, clientId, clientName, taxYear, {
+          file_id: fileId,
+          file_name: fileName,
+          relative_path: relativePathIn ?? null,
+          file_size_bytes: largeFileBytes,
+        });
+        const reason = 'requires_async_processing';
+        const rec: DriveIngestFileRecord = {
+          file_id: fileId,
+          file_name: fileName,
+          file_mime: downloadMime,
+          docClass: classification.docClass,
+          skipped: true,
+          skipReason: reason,
+          status: 'skipped',
+          ingest_status: 'requires_async_processing',
+          relative_path: relativePathIn,
+          file_size_bytes: largeFileBytes,
+          reason_codes: [reason],
+        };
+        await mergeDriveIngestSession(hub, clientId, clientName, taxYear, folderId, folderName, rec);
+        return new Response(
+          JSON.stringify({
+            success: true,
+            mode: 'process_single',
+            document_id: fileId,
+            doc_class: classification.docClass,
+            relative_path: relativePathIn,
+            file_size_bytes: largeFileBytes,
+            ingest_status: rec.ingest_status,
+            status: 'requires_async_processing',
+            skip_reason: reason,
+            chunk_job_id: job.job_id,
+            chunk_count: job.chunk_count,
+            pages_total: job.pages_total,
+            meta: { version: INGEST_VERSION },
+          }),
+          { headers: { ...corsHeaders, 'Content-Type': 'application/json' } },
+        );
+      } catch (e) {
+        const reason = 'job_creation_failed';
+        const message = e instanceof Error ? e.message : String(e);
+        const rec: DriveIngestFileRecord = {
+          file_id: fileId,
+          file_name: fileName,
+          file_mime: downloadMime,
+          docClass: classification.docClass,
+          skipped: true,
+          skipReason: `${reason}:${message}`,
+          status: 'error',
+          ingest_status: 'chunk_processing_failed',
+          relative_path: relativePathIn,
+          file_size_bytes: largeFileBytes,
+          reason_codes: [reason],
+          error: message,
+        };
+        await mergeDriveIngestSession(hub, clientId, clientName, taxYear, folderId, folderName, rec);
+        return new Response(
+          JSON.stringify({
+            success: false,
+            mode: 'process_single',
+            document_id: fileId,
+            doc_class: classification.docClass,
+            relative_path: relativePathIn,
+            file_size_bytes: largeFileBytes,
+            ingest_status: 'chunk_processing_failed',
+            status: 'chunk_processing_failed',
+            reason,
+            error: message,
+            meta: { version: INGEST_VERSION },
+          }),
+          { status: 500, headers: { ...corsHeaders, 'Content-Type': 'application/json' } },
+        );
+      }
+    }
+
     const systemPrompt = pickSystemPrompt(classification.docClass);
     if (systemPrompt === null) {
       const rec: DriveIngestFileRecord = {
@@ -1135,6 +1788,7 @@ async function handleDriveProcessSingle(
         skipped: true,
         skipReason: `policy_skip:${classification.docClass}`,
         status: 'skipped',
+        ingest_status: inferPolicySkipIngestStatus(classification.docClass),
         relative_path: relativePathIn,
         file_size_bytes: largeFileBytes,
       };
@@ -1151,12 +1805,19 @@ async function handleDriveProcessSingle(
           file_size_bytes: largeFileBytes,
           status: 'skipped',
           skip_reason: rec.skipReason,
+          meta: { version: INGEST_VERSION },
         }),
         { headers: { ...corsHeaders, 'Content-Type': 'application/json' } },
       );
     }
 
     const extracted = await analyzeDocumentRouter(base64, fileName, downloadMime, systemPrompt);
+    const blocked = enforceStatementIncomeHardBlock(
+      extracted,
+      classification.docClass,
+      fileName,
+      relativePathIn ?? null,
+    );
 
     await writeToTaxSupabase('documents', {
       tax_year: taxYear,
@@ -1195,8 +1856,10 @@ async function handleDriveProcessSingle(
       docClass: classification.docClass,
       extracted,
       status: 'success',
+      ingest_status: 'processed',
       relative_path: relativePathIn,
       file_size_bytes: largeFileBytes,
+      reason_codes: blocked.blocked && blocked.reason ? [blocked.reason] : undefined,
     };
     await mergeDriveIngestSession(hub, clientId, clientName, taxYear, folderId, folderName, rec);
 
@@ -1209,10 +1872,11 @@ async function handleDriveProcessSingle(
         doc_class: classification.docClass,
         relative_path: relativePathIn,
         file_size_bytes: largeFileBytes,
-        ingest_status: 'ingested',
+        ingest_status: 'processed',
         large_file_warning: largeFileWarning,
         status: 'success',
         extracted_data: extracted,
+        meta: { version: INGEST_VERSION },
       }),
       { headers: { ...corsHeaders, 'Content-Type': 'application/json' } },
     );
@@ -1225,6 +1889,7 @@ async function handleDriveProcessSingle(
       file_mime: fileMime,
       docClass: 'requires_review',
       status: 'error',
+      ingest_status: 'failed_extraction',
       error: message,
       relative_path: relativePathIn,
     };
@@ -1237,6 +1902,7 @@ async function handleDriveProcessSingle(
         document_id: fileId,
         status: 'error',
         error: message,
+        meta: { version: INGEST_VERSION },
       }),
       { status: 500, headers: { ...corsHeaders, 'Content-Type': 'application/json' } },
     );
@@ -1342,8 +2008,11 @@ async function handleDriveAggregate(
     }
   }
 
-  const allExtracted = stagedDrive.map((s) => s.extracted);
-  const financialStateDrive = buildIngestFinancialState(stagedDrive, skippedDrive);
+  const { canonical: canonicalDrive, lineage: driveLineage, suppressed: suppressedDrive } = dedupeAndBuildLineage(taxYear, stagedDrive, skippedDrive);
+  const coverage = buildCoverage(driveLineage);
+  const filesWithErrors = processedFiles.filter((p) => isErrorLikeStatus(p.status)).length;
+  const allExtracted = canonicalDrive.map((s) => s.extracted);
+  const financialStateDrive = buildIngestFinancialState(canonicalDrive, [...skippedDrive, ...suppressedDrive]);
   const taxKnowledgeDrive = retrieveTaxKnowledge({ patterns: financialStateDrive.patterns, broad: true });
 
   const driveIncomeSources = driveResults.filter(
@@ -1402,10 +2071,13 @@ async function handleDriveAggregate(
       pl_summary: plSummary,
       aggregated_data,
       documents: allExtracted,
+      ingest_file_results: driveLineage,
+      coverage,
       financial_state: financialStateDrive,
       tax_knowledge: taxKnowledgeDrive,
       processed_files: processedFiles,
       errors: errors.length > 0 ? errors : undefined,
+      files_with_errors: filesWithErrors,
       source: 'drive_ingest',
       folder_id: folderId,
       folder_name: folderName,
@@ -1424,13 +2096,17 @@ async function handleDriveAggregate(
     folder_id: folderId,
     folder_name: folderName,
     files_processed: processedFiles.length,
-    files_with_errors: errors.length,
+    files_with_errors: filesWithErrors,
     processed_files: processedFiles,
     errors: errors.length > 0 ? errors : undefined,
     pl_summary: plSummary,
     aggregated_data,
     financial_state: financialStateDrive,
     tax_knowledge: taxKnowledgeDrive,
+    ingest_file_results: driveLineage,
+    coverage,
+    statements_failed: Number(coverage.statements_failed ?? 0),
+    meta: { version: INGEST_VERSION },
   };
 
   return new Response(JSON.stringify(summary), {
@@ -1439,6 +2115,7 @@ async function handleDriveAggregate(
 }
 
 serve(async (req: Request) => {
+  console.log(`INGEST VERSION: ${INGEST_VERSION}`);
   if (req.method === 'OPTIONS') {
     return new Response('ok', { headers: corsHeaders });
   }

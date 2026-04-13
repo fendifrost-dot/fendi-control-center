@@ -33,6 +33,12 @@ export interface ExtractedData {
   };
 }
 
+export type StatementChunkTx = {
+  date: string;
+  description: string;
+  amount: number;
+};
+
 const EXTRACTION_PROMPT = `You are a tax document analyzer. Extract ALL financial data from this document.
 
 Return ONLY valid JSON with this exact structure:
@@ -157,6 +163,62 @@ export async function analyzeDocumentWithGemini(
     },
     ...parsed,
   } as ExtractedData;
+}
+
+export async function extractStatementChunk(chunkText: string): Promise<{ transactions: StatementChunkTx[] }> {
+  const apiKey = Deno.env.get("Frost_Gemini");
+  if (!apiKey) throw new Error("Frost_Gemini not set");
+  const prompt = `You are extracting financial transactions from a bank statement.
+
+Return ONLY JSON:
+{
+  "transactions": [{ "date": "YYYY-MM-DD", "description": "...", "amount": 0.00 }]
+}
+
+Rules:
+- Ignore deposits/credits/inflows.
+- Only include expenses/outflows/debits.
+- Preserve order.
+- Do not summarize.`;
+  const body = {
+    systemInstruction: { parts: [{ text: prompt }] },
+    contents: [{ role: "user", parts: [{ text: chunkText.slice(0, 25000) }] }],
+    generationConfig: {
+      temperature: 0.1,
+      maxOutputTokens: 4096,
+      responseMimeType: "application/json",
+    },
+  };
+  const url = `${GEMINI_API_BASE}/models/${GEMINI_MODEL}:generateContent?key=${encodeURIComponent(apiKey)}`;
+  const response = await fetch(url, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  if (!response.ok) {
+    const errText = await response.text();
+    throw new Error(`Gemini chunk API error: ${response.status} - ${errText.slice(0, 1000)}`);
+  }
+  const result = await response.json();
+  const textContent = result.candidates?.[0]?.content?.parts?.[0]?.text as string | undefined;
+  if (!textContent) return { transactions: [] };
+  let parsed: { transactions?: StatementChunkTx[] } = {};
+  try {
+    parsed = JSON.parse(textContent);
+  } catch {
+    const jsonMatch = textContent.match(/\{[\s\S]*\}/);
+    if (jsonMatch) parsed = JSON.parse(jsonMatch[0]);
+  }
+  const tx = Array.isArray(parsed.transactions) ? parsed.transactions : [];
+  return {
+    transactions: tx
+      .map((t) => ({
+        date: String(t.date ?? ""),
+        description: String(t.description ?? ""),
+        amount: Number(t.amount) || 0,
+      }))
+      .filter((t) => t.description && Number.isFinite(t.amount) && t.amount < 0),
+  };
 }
 
 /**
