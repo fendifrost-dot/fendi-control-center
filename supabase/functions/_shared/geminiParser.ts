@@ -144,6 +144,9 @@ export async function analyzeDocumentWithGemini(
     parsed = JSON.parse(jsonMatch[0]);
   }
 
+  // Spread raw parsed JSON so that normalizeToExtractedData() in the
+  // router can detect specialized prompt response shapes (form_subtype,
+  // boxes, employer, federal, etc.) and convert them properly.
   return {
     doc_type: parsed.doc_type || "other",
     classification: parsed.classification || "mixed",
@@ -152,7 +155,8 @@ export async function analyzeDocumentWithGemini(
       expense_items: parsed.extracted_data?.expense_items || [],
       payer_info: parsed.extracted_data?.payer_info || { name: "", ein: "", address: "" },
     },
-  };
+    ...parsed,
+  } as ExtractedData;
 }
 
 /**

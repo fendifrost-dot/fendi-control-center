@@ -177,8 +177,10 @@ Return ONLY valid JSON with this exact structure:
   const jsonMatch = textContent.text.match(/\{[\s\S]*\}/);
   if (!jsonMatch) throw new Error('No JSON found in Claude response');
 
-  const parsed = JSON.parse(jsonMatch[0]) as Partial<ExtractedData>;
-  // Ensure extracted_data and its arrays always exist
+  const parsed = JSON.parse(jsonMatch[0]);
+  // Spread raw parsed JSON onto defaults so that normalizeToExtractedData()
+  // in analyzeDocumentRouter can detect the specialized prompt response shape
+  // (form_subtype, boxes, employer, federal, etc.) and convert properly.
   return {
     doc_type: parsed.doc_type || 'other',
     classification: parsed.classification || 'mixed',
@@ -186,6 +188,160 @@ Return ONLY valid JSON with this exact structure:
       income_items: parsed.extracted_data?.income_items || [],
       expense_items: parsed.extracted_data?.expense_items || [],
       payer_info: parsed.extracted_data?.payer_info || { name: '', ein: '', address: '' },
+    },
+    ...parsed,
+  } as ExtractedData;
+}
+
+/**
+ * Normalize raw LLM JSON into the canonical ExtractedData shape.
+ *
+ * The specialized prompts (INCOME_1099_PROMPT, INCOME_W2_PROMPT, etc.) return
+ * different JSON schemas than the default ExtractedData format. This function
+ * detects the response shape and converts it so that aggregatePL() always
+ * receives uniform data.
+ */
+function normalizeToExtractedData(raw: Record<string, unknown>): ExtractedData {
+  // Already in ExtractedData format (default prompt or already normalized)
+  if (
+    typeof raw.doc_type === 'string' &&
+    raw.doc_type !== 'other' &&
+    raw.extracted_data &&
+    typeof raw.extracted_data === 'object'
+  ) {
+    const ed = raw.extracted_data as Record<string, unknown>;
+    return {
+      doc_type: raw.doc_type as string,
+      classification: (raw.classification as string) || 'mixed',
+      extracted_data: {
+        income_items: (ed.income_items as IncomeItem[]) || [],
+        expense_items: (ed.expense_items as ExpenseItem[]) || [],
+        payer_info: (ed.payer_info as Record<string, string>) || { name: '', ein: '', address: '' },
+      },
+    };
+  }
+
+  // ── 1099 format (from INCOME_1099_PROMPT) ──────────────────────
+  if ('form_subtype' in raw || ('boxes' in raw && 'payer' in raw)) {
+    const subtype = String(raw.form_subtype || 'other').toUpperCase();
+    const docType = subtype === 'OTHER' ? '1099' : `1099-${subtype}`;
+    const boxes = (raw.boxes || {}) as Record<string, number>;
+    const payer = (raw.payer || {}) as Record<string, string>;
+
+    const incomeItems: IncomeItem[] = [];
+    for (const [label, amount] of Object.entries(boxes)) {
+      if (typeof amount !== 'number' || amount <= 0) continue;
+      // Skip withholding / indicator boxes — they are not income
+      if (label.includes('withheld') || label.includes('tax') || label.includes('indicator')) continue;
+      incomeItems.push({
+        source: label,
+        type: 'contractor',
+        amount,
+        payer_name: payer.name || '',
+        payer_ein: payer.tin || '',
+      });
+    }
+
+    return {
+      doc_type: docType,
+      classification: 'income',
+      extracted_data: {
+        income_items: incomeItems,
+        expense_items: [],
+        payer_info: {
+          name: payer.name || '',
+          ein: payer.tin || '',
+          address: payer.address || '',
+        },
+      },
+    };
+  }
+
+  // ── W-2 format (from INCOME_W2_PROMPT) ─────────────────────────
+  if ('employer' in raw && 'federal' in raw) {
+    const employer = (raw.employer || {}) as Record<string, string>;
+    const federal = (raw.federal || {}) as Record<string, number>;
+
+    const wages = Number(federal.box_1_wages_tips_other) || 0;
+    const incomeItems: IncomeItem[] = [];
+    if (wages > 0) {
+      incomeItems.push({
+        source: 'W-2 Wages',
+        type: 'wages',
+        amount: wages,
+        payer_name: employer.name || '',
+        payer_ein: employer.ein || '',
+      });
+    }
+
+    return {
+      doc_type: 'W-2',
+      classification: 'income',
+      extracted_data: {
+        income_items: incomeItems,
+        expense_items: [],
+        payer_info: {
+          name: employer.name || '',
+          ein: employer.ein || '',
+          address: '',
+        },
+      },
+    };
+  }
+
+  // ── Financial statement format (from FINANCIAL_STATEMENT_PROMPT) ─
+  if ('account_type' in raw && 'institution_name' in raw) {
+    // Financial statements contribute $0 income by design (dedup rule)
+    return {
+      doc_type: 'bank_statement',
+      classification: 'mixed',
+      extracted_data: {
+        income_items: [],
+        expense_items: [],
+        payer_info: {
+          name: String(raw.institution_name || ''),
+          ein: '',
+          address: '',
+        },
+      },
+    };
+  }
+
+  // ── Receipt / invoice format (from RECEIPT_OR_INVOICE_PROMPT) ───
+  if ('vendor_name' in raw && 'line_items' in raw) {
+    const lineItems = (raw.line_items || []) as Array<Record<string, unknown>>;
+    const expenseItems: ExpenseItem[] = lineItems.map((item) => ({
+      category: String(item.category || 'other'),
+      description: String(item.description || ''),
+      amount: Number(item.amount) || 0,
+      payee: String(raw.vendor_name || ''),
+      date: String(item.date || raw.date || ''),
+    }));
+
+    return {
+      doc_type: 'receipt',
+      classification: 'expense',
+      extracted_data: {
+        income_items: [],
+        expense_items: expenseItems,
+        payer_info: {
+          name: String(raw.vendor_name || ''),
+          ein: '',
+          address: '',
+        },
+      },
+    };
+  }
+
+  // ── Fallback — try to salvage whatever fields exist ─────────────
+  const fallbackEd = (raw.extracted_data || {}) as Record<string, unknown>;
+  return {
+    doc_type: String(raw.doc_type || raw.document_type || 'other'),
+    classification: String(raw.classification || 'mixed'),
+    extracted_data: {
+      income_items: (fallbackEd.income_items as IncomeItem[]) || [],
+      expense_items: (fallbackEd.expense_items as ExpenseItem[]) || [],
+      payer_info: (fallbackEd.payer_info as Record<string, string>) || { name: '', ein: '', address: '' },
     },
   };
 }
@@ -196,10 +352,18 @@ async function analyzeDocumentRouter(
   mimeType: string,
   systemPrompt: string,
 ): Promise<ExtractedData> {
+  let raw: ExtractedData;
   if (useGeminiForTax()) {
-    return await analyzeDocumentWithGemini(base64Content, fileName, mimeType, systemPrompt);
+    raw = await analyzeDocumentWithGemini(base64Content, fileName, mimeType, systemPrompt);
+  } else {
+    raw = await analyzeDocumentWithClaude(base64Content, fileName, mimeType, systemPrompt);
   }
-  return await analyzeDocumentWithClaude(base64Content, fileName, mimeType, systemPrompt);
+  // Normalize: the specialized prompts return different JSON schemas
+  // than the default ExtractedData shape. normalizeToExtractedData()
+  // detects the response format and converts it uniformly.
+  const normalized = normalizeToExtractedData(raw as unknown as Record<string, unknown>);
+  console.log(`[ingest] normalized doc_type=${normalized.doc_type} income_items=${normalized.extracted_data.income_items.length} expense_items=${normalized.extracted_data.expense_items.length}`);
+  return normalized;
 }
 
 function aggregatePL(allExtracted: ExtractedData[]): PLSummary {
