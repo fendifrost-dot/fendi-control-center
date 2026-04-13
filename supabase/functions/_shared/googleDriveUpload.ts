@@ -195,10 +195,11 @@ export async function uploadFileToDrive(
   return await response.json();
 }
 
-export async function getOrCreateClientTaxFolder(
+/** Resolve client tax folder (by token). Used by Drive helpers and overload below. */
+export async function getOrCreateClientTaxFolderWithToken(
   accessToken: string,
   clientName: string,
-  year: number | string
+  year: number | string,
 ): Promise<string> {
   const name = clientName.toUpperCase().trim();
   const yr = String(year);
@@ -236,6 +237,46 @@ export async function getOrCreateClientTaxFolder(
   const newFolderId = await createDriveFolder(accessToken, exactFolderName);
   console.log(`Created folder: "${exactFolderName}" (${newFolderId})`);
   return newFolderId;
+}
+
+/** 3-arg: existing callers (accessToken, clientName, year) → folder id. */
+export async function getOrCreateClientTaxFolder(
+  accessToken: string,
+  clientName: string,
+  year: number | string,
+): Promise<string>;
+
+/** 2-arg: Control Hub fill-tax-forms bundle — obtains token, returns id + folder URL. */
+export async function getOrCreateClientTaxFolder(
+  clientName: string,
+  year: number | string,
+): Promise<{ folderId: string; folderUrl: string }>;
+
+export async function getOrCreateClientTaxFolder(
+  arg1: string,
+  arg2: string | number,
+  arg3?: number | string,
+): Promise<string | { folderId: string; folderUrl: string }> {
+  if (arg3 !== undefined) {
+    return getOrCreateClientTaxFolderWithToken(arg1, String(arg2), arg3);
+  }
+  const accessToken = await getAccessToken();
+  const folderId = await getOrCreateClientTaxFolderWithToken(accessToken, arg1, arg2);
+  return {
+    folderId,
+    folderUrl: `https://drive.google.com/drive/folders/${folderId}`,
+  };
+}
+
+/** Control Hub fill-tax-forms: upload PDF bytes into a folder (gets token internally). */
+export async function uploadToDrive(
+  folderId: string,
+  fileName: string,
+  fileContent: Uint8Array,
+): Promise<{ fileId: string; webViewLink?: string }> {
+  const accessToken = await getAccessToken();
+  const r = await uploadFileToDrive(accessToken, fileName, fileContent, "application/pdf", folderId);
+  return { fileId: r.id, webViewLink: r.webViewLink };
 }
 
 /** OAuth access token from a raw service-account JSON string (same scopes as getAccessToken). */

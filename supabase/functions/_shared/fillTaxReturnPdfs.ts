@@ -2,7 +2,7 @@
  * Fill IRS PDFs for a tax return: Supabase Storage + optional Google Drive (service account).
  */
 import type { SupabaseClient } from "https://esm.sh/@supabase/supabase-js@2.49.1";
-import { fillPdfWithMapping, flattenFormsObject, mergeClientInfoFlat } from "./pdfFormFill.ts";
+import { fillPdfWithMapping, flattenFormsObject, mergeClientInfoFlat } from "./pdfFormFillLegacy.ts";
 import type { CoreFormType } from "./irsFormUrls.ts";
 import { getTaxReturnById, upsertTaxFormInstance } from "./taxReturns.ts";
 import {
