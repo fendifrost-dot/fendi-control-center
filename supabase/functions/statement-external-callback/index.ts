@@ -184,6 +184,33 @@ Deno.serve(async (req: Request) => {
 
   console.log(`[ext-callback] job=${jobId} finalized: status=${finalStatus} tx=${transactionsExtracted}`);
 
+  // Resume any workflow_runs waiting on this job
+  try {
+    const { data: waitingRuns } = await hub
+      .from("workflow_runs")
+      .select("id, locked_state")
+      .eq("status", "waiting_async");
+
+    for (const wr of waitingRuns ?? []) {
+      const ls = wr.locked_state as Record<string, unknown> | null;
+      const ids = (ls?.statement_job_ids ?? []) as string[];
+      if (ids.includes(jobId)) {
+        console.log(`[ext-callback] resuming workflow_run=${wr.id} after job=${jobId}`);
+        const url = `${Deno.env.get("SUPABASE_URL")}/functions/v1/workflow-runner`;
+        fetch(url, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "Authorization": `Bearer ${Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")}`,
+          },
+          body: JSON.stringify({ run_id: wr.id }),
+        }).catch((e) => console.error(`[ext-callback] resume failed for run=${wr.id}: ${e}`));
+      }
+    }
+  } catch (resumeErr) {
+    console.error(`[ext-callback] workflow resume scan failed: ${resumeErr}`);
+  }
+
   return new Response(
     JSON.stringify({
       ok: true,
