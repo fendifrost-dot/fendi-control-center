@@ -85,6 +85,13 @@ type WorkflowRunRow = {
   locked_state: Record<string, unknown> | null;
 };
 
+const ACTIVE_STATUSES = ["running", "waiting_async"] as const;
+
+export type WorkflowRunOptions = {
+  /** Telegram chat id — used to resume runs for "Check drive" without re-parsing client/year */
+  telegram_chat_id?: string;
+};
+
 async function resolveClientRow(
   supabase: SupabaseClient,
   nameRaw: string | null,
@@ -103,9 +110,14 @@ async function resolveClientRow(
   return null;
 }
 
-export async function createWorkflowRun(
+/**
+ * Find or create a workflow run. Reuses any non-terminal run for the same client+year,
+ * or (for bare "Check drive") the most recent active run for this Telegram chat.
+ */
+export async function createOrResumeWorkflowRun(
   supabase: SupabaseClient,
   intentResult: IntentResult,
+  options: WorkflowRunOptions = {},
 ): Promise<WorkflowRunRow> {
   let taxYear = intentResult.entities.tax_year ?? new Date().getFullYear();
   let clientName = intentResult.entities.client_name ?? "unknown";
@@ -118,19 +130,43 @@ export async function createWorkflowRun(
   const finalClientName = resolved?.name ?? clientName;
   const clientId = resolved?.id ?? null;
 
-  const { data: existing } = await supabase
-    .from("workflow_runs")
-    .select("id,status,current_stage,locked_state")
-    .eq("intent", intentResult.intent)
-    .eq("client_name", finalClientName)
-    .eq("tax_year", taxYear)
-    .in("status", ["running", "waiting_async"])
-    .order("updated_at", { ascending: false })
-    .limit(1)
-    .maybeSingle();
+  // 1) Reuse active run by client + year (intent-agnostic — same pipeline)
+  if (finalClientName !== "unknown") {
+    const { data: byClient } = await supabase
+      .from("workflow_runs")
+      .select("id,status,current_stage,locked_state,client_name,tax_year")
+      .eq("client_name", finalClientName)
+      .eq("tax_year", taxYear)
+      .in("status", [...ACTIVE_STATUSES])
+      .order("updated_at", { ascending: false })
+      .limit(1)
+      .maybeSingle();
 
-  if (existing) {
-    return existing as WorkflowRunRow;
+    if (byClient) {
+      return await maybeRewindForCheckDrive(supabase, byClient as WorkflowRunRow, intentResult, options);
+    }
+  }
+
+  // 2) Reuse by Telegram chat (e.g. "Check drive" with no name — continue last tax run in this chat)
+  if (options.telegram_chat_id) {
+    const { data: byChat } = await supabase
+      .from("workflow_runs")
+      .select("id,status,current_stage,locked_state,client_name,tax_year")
+      .contains("locked_state", { telegram_chat_id: String(options.telegram_chat_id) })
+      .in("status", [...ACTIVE_STATUSES])
+      .order("updated_at", { ascending: false })
+      .limit(1)
+      .maybeSingle();
+
+    if (byChat) {
+      return await maybeRewindForCheckDrive(supabase, byChat as WorkflowRunRow, intentResult, options);
+    }
+  }
+
+  if (intentResult.intent === "check_drive" && finalClientName === "unknown") {
+    throw new Error(
+      "No active tax workflow for this chat. Start with e.g. \"Generate 2025 tax return for [Client]\" or say \"Check drive for [Client] 2025\".",
+    );
   }
 
   const payload = {
@@ -145,6 +181,9 @@ export async function createWorkflowRun(
       client_id: clientId,
       intent: intentResult.intent,
       message: intentResult.message,
+      ...(options.telegram_chat_id
+        ? { telegram_chat_id: String(options.telegram_chat_id) }
+        : {}),
     },
   };
 
@@ -154,7 +193,55 @@ export async function createWorkflowRun(
     .select("id,status,current_stage,locked_state")
     .single();
   if (error || !data) {
-    throw new Error(`createWorkflowRun failed: ${error?.message || "unknown"}`);
+    throw new Error(`createOrResumeWorkflowRun failed: ${error?.message || "unknown"}`);
   }
   return data as WorkflowRunRow;
+}
+
+/** When user asks to check drive again, re-run ingest from that stage using existing locked_state. */
+async function maybeRewindForCheckDrive(
+  supabase: SupabaseClient,
+  row: WorkflowRunRow,
+  intentResult: IntentResult,
+  options: WorkflowRunOptions,
+): Promise<WorkflowRunRow> {
+  const ls = (row.locked_state || {}) as Record<string, unknown>;
+  const mergedLock = options.telegram_chat_id && !ls.telegram_chat_id
+    ? { ...ls, telegram_chat_id: String(options.telegram_chat_id) }
+    : ls;
+
+  if (intentResult.intent !== "check_drive") {
+    if (mergedLock !== ls) {
+      const { data: u } = await supabase
+        .from("workflow_runs")
+        .update({ locked_state: mergedLock, updated_at: new Date().toISOString() })
+        .eq("id", row.id)
+        .select("id,status,current_stage,locked_state")
+        .single();
+      if (u) return u as WorkflowRunRow;
+    }
+    return row;
+  }
+
+  const { data: updated, error } = await supabase
+    .from("workflow_runs")
+    .update({
+      current_stage: "ingest_drive",
+      status: "running",
+      locked_state: mergedLock,
+      updated_at: new Date().toISOString(),
+    })
+    .eq("id", row.id)
+    .select("id,status,current_stage,locked_state")
+    .single();
+  if (error || !updated) return row;
+  return updated as WorkflowRunRow;
+}
+
+/** @deprecated use createOrResumeWorkflowRun */
+export async function createWorkflowRun(
+  supabase: SupabaseClient,
+  intentResult: IntentResult,
+): Promise<WorkflowRunRow> {
+  return createOrResumeWorkflowRun(supabase, intentResult, {});
 }

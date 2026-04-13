@@ -17,7 +17,7 @@ import {
   tryParseManualDeductionMessage,
   tryParseManualIncomeMessage,
 } from "../_shared/taxTelegramParse.ts";
-import { createWorkflowRun, resolveIntent } from "../_shared/workflowEngine.ts";
+import { createOrResumeWorkflowRun, resolveIntent } from "../_shared/workflowEngine.ts";
 import {
   extractCreditGuardianClientNameForIngest,
   inferCreditWorkflowKey,
@@ -43,6 +43,35 @@ const GEMINI_KEY = Deno.env.get("Frost_Gemini")!;
 const GROK_KEY = Deno.env.get("Frost_Grok")!;
 const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
 const TELEGRAM_API = `https://api.telegram.org/bot${BOT_TOKEN}`;
+
+/** Structured workflow response for Telegram (no LLM narration). */
+function formatWorkflowUserPayload(
+  run: Record<string, unknown>,
+  snap: Record<string, unknown>,
+): Record<string, unknown> {
+  const rp = (run.result_payload || {}) as Record<string, unknown>;
+  const ingest = (rp.ingest || {}) as Record<string, unknown>;
+  const ingestSummary = (rp.ingest_summary || {}) as Record<string, unknown>;
+  const processed = Array.isArray(ingest.processed_files)
+    ? ingest.processed_files as Array<Record<string, unknown>>
+    : [];
+  const documents_found = Number(
+    ingestSummary.documents_found ?? ingest.files_processed ?? processed.length ?? 0,
+  );
+  return {
+    run_id: run.id,
+    current_stage: run.current_stage,
+    status: run.status ?? snap.status,
+    summary: {
+      income: rp.income_summary ?? null,
+      expenses: rp.expense_summary ?? null,
+      documents_found,
+      statements_detected: ingestSummary.statements_detected ?? null,
+      requires_async_processing: ingestSummary.requires_async_processing ?? null,
+      readiness_status: rp.readiness_status ?? null,
+    },
+  };
+}
 
 /** Resolve Control Center client UUID + canonical name for tax generation (Telegram). */
 async function resolveClientIdForTaxGeneration(nameRaw: string | undefined): Promise<
@@ -4847,14 +4876,17 @@ serve(async (req) => {
     // Send queued confirmation with task_id
     await sendMessage(chatId, `ð Queued: \`${taskId}\``, {}, `task:${taskId}:queued`);
 
-    // Intent-driven workflow engine: create/resume workflow_run, then execute workflow-runner.
+    // System-first tax pipeline: ONLY workflow-runner (no direct tools / no LLM narration for these intents).
     const wfIntent = resolveIntent(text);
-    if (
+    const isTaxWorkflowIntent =
       wfIntent.confidence >= 0.8 &&
-      (wfIntent.intent === "generate_tax_return" || wfIntent.intent === "check_drive" || wfIntent.intent === "add_manual_inputs")
-    ) {
+      (wfIntent.intent === "generate_tax_return" ||
+        wfIntent.intent === "check_drive" ||
+        wfIntent.intent === "add_manual_inputs");
+
+    if (isTaxWorkflowIntent) {
       try {
-        const run = await createWorkflowRun(supabase, wfIntent);
+        const run = await createOrResumeWorkflowRun(supabase, wfIntent, { telegram_chat_id: chatId });
         const runner = await fetch(`${SUPABASE_URL}/functions/v1/workflow-runner`, {
           method: "POST",
           headers: {
@@ -4874,10 +4906,12 @@ serve(async (req) => {
             workflow_snapshot: snap,
           },
         }).eq("id", taskId);
-        const runStatus = String((snap as Record<string, unknown>)?.run?.status ?? run.status);
+        const body = snap as Record<string, unknown>;
+        const runRow = body.run as Record<string, unknown> | undefined;
+        const payload = formatWorkflowUserPayload(runRow ?? run, body);
         await sendMessage(
           chatId,
-          `Workflow run started.\n• Run ID: \`${run.id}\`\n• Intent: \`${wfIntent.intent}\`\n• Status: \`${runStatus}\``,
+          JSON.stringify(payload, null, 2).slice(0, 3900),
           {},
           `task:${taskId}:workflow-runner`,
         );
@@ -4886,13 +4920,21 @@ serve(async (req) => {
         return new Response("ok");
       } catch (e) {
         const errMsg = e instanceof Error ? e.message : String(e);
-        console.error("[workflow-engine] fallback to legacy path:", errMsg);
+        console.error("[workflow-engine] failed:", errMsg);
         await sendMessage(
           chatId,
-          `⚠️ Workflow engine could not run (${errMsg.slice(0, 200)}). Falling back to manual tools / assistant.`,
+          `Workflow failed: ${errMsg.slice(0, 500)}`,
           {},
           `task:${taskId}:workflow-error`,
         );
+        await supabase.from("tasks").update({
+          status: "failed",
+          error: errMsg.slice(0, 500),
+          result_json: { execution_lane: "workflow_engine", error: errMsg.slice(0, 300) },
+        }).eq("id", taskId);
+        await sendMessage(chatId, `❌ Failed: \`${taskId}\``, {}, `task:${taskId}:done`);
+        _currentTaskId = null;
+        return new Response("ok");
       }
     }
 
