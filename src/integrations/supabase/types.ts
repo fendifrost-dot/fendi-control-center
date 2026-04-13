@@ -853,18 +853,28 @@ export type Database = {
       statement_chunk_jobs: {
         Row: {
           attempts: number | null
+          callback_received_at: string | null
+          callback_token_hash: string | null
           chunk_count: number | null
           chunk_size_pages: number
           claimed_at: string | null
           client_id: string
           completed_at: string | null
           created_at: string | null
+          external_attempts: number
+          external_endpoint: string | null
+          external_job_id: string | null
+          external_last_error: string | null
+          external_provider: string | null
+          external_status: string | null
           extracted_payload: Json | null
           file_id: string
           file_name: string
           file_size_bytes: number | null
+          finalized_by: string | null
           id: string
           last_error: string | null
+          next_retry_at: string | null
           pages_failed: number | null
           pages_processed: number | null
           pages_total: number | null
@@ -872,6 +882,8 @@ export type Database = {
           prep_error: string | null
           prep_started_at: string | null
           prep_status: string
+          processing_mode: string
+          processor_version: string | null
           reason_codes: Json | null
           relative_path: string | null
           source_bytes: number | null
@@ -888,18 +900,28 @@ export type Database = {
         }
         Insert: {
           attempts?: number | null
+          callback_received_at?: string | null
+          callback_token_hash?: string | null
           chunk_count?: number | null
           chunk_size_pages?: number
           claimed_at?: string | null
           client_id: string
           completed_at?: string | null
           created_at?: string | null
+          external_attempts?: number
+          external_endpoint?: string | null
+          external_job_id?: string | null
+          external_last_error?: string | null
+          external_provider?: string | null
+          external_status?: string | null
           extracted_payload?: Json | null
           file_id: string
           file_name: string
           file_size_bytes?: number | null
+          finalized_by?: string | null
           id?: string
           last_error?: string | null
+          next_retry_at?: string | null
           pages_failed?: number | null
           pages_processed?: number | null
           pages_total?: number | null
@@ -907,6 +929,8 @@ export type Database = {
           prep_error?: string | null
           prep_started_at?: string | null
           prep_status?: string
+          processing_mode?: string
+          processor_version?: string | null
           reason_codes?: Json | null
           relative_path?: string | null
           source_bytes?: number | null
@@ -923,18 +947,28 @@ export type Database = {
         }
         Update: {
           attempts?: number | null
+          callback_received_at?: string | null
+          callback_token_hash?: string | null
           chunk_count?: number | null
           chunk_size_pages?: number
           claimed_at?: string | null
           client_id?: string
           completed_at?: string | null
           created_at?: string | null
+          external_attempts?: number
+          external_endpoint?: string | null
+          external_job_id?: string | null
+          external_last_error?: string | null
+          external_provider?: string | null
+          external_status?: string | null
           extracted_payload?: Json | null
           file_id?: string
           file_name?: string
           file_size_bytes?: number | null
+          finalized_by?: string | null
           id?: string
           last_error?: string | null
+          next_retry_at?: string | null
           pages_failed?: number | null
           pages_processed?: number | null
           pages_total?: number | null
@@ -942,6 +976,8 @@ export type Database = {
           prep_error?: string | null
           prep_started_at?: string | null
           prep_status?: string
+          processing_mode?: string
+          processor_version?: string | null
           reason_codes?: Json | null
           relative_path?: string | null
           source_bytes?: number | null

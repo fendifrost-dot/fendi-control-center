@@ -63,3 +63,9 @@ verify_jwt = false
 
 [functions.statement-source-prep]
 verify_jwt = false
+
+[functions.statement-external-dispatch]
+verify_jwt = false
+
+[functions.statement-external-callback]
+verify_jwt = false
