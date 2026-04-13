@@ -2167,6 +2167,7 @@ serve(async (req: Request) => {
       folder_id: body_folder_id,
       folder_name: body_folder_name,
       relative_path,
+      file_size,
     } = body as {
       client_name?: string;
       client_id?: string;
@@ -2178,8 +2179,8 @@ serve(async (req: Request) => {
       file_mime?: string;
       folder_id?: string;
       folder_name?: string;
-      /** From mode=list file entry — e.g. CHASE 2022/2022.pdf */
       relative_path?: string;
+      file_size?: number;
     };
     const hubUrl = Deno.env.get('SUPABASE_URL');
     const hubKey = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY');
@@ -2271,6 +2272,7 @@ serve(async (req: Request) => {
         typeof body_folder_id === 'string' ? body_folder_id : undefined,
         typeof body_folder_name === 'string' ? body_folder_name : undefined,
         typeof relative_path === 'string' && relative_path.length > 0 ? relative_path : undefined,
+        typeof file_size === 'number' ? file_size : undefined,
       );
     }
 
