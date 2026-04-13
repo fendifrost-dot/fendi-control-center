@@ -1442,6 +1442,10 @@ export type Database = {
           payload: Json
         }[]
       }
+      delete_client_and_related_data: {
+        Args: { p_client_id: string }
+        Returns: undefined
+      }
       list_workflows: {
         Args: never
         Returns: {

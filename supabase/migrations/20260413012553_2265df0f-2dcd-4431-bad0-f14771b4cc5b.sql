@@ -1,0 +1,53 @@
+
+CREATE OR REPLACE FUNCTION public.delete_client_and_related_data(p_client_id uuid)
+RETURNS void
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public
+AS $$
+BEGIN
+  IF NOT EXISTS (SELECT 1 FROM public.clients WHERE id = p_client_id) THEN
+    RAISE EXCEPTION 'Client not found';
+  END IF;
+
+  DELETE FROM public.telegram_approval_queue WHERE client_id = p_client_id;
+
+  UPDATE public.audit_logs SET client_id = NULL WHERE client_id = p_client_id;
+
+  UPDATE public.documents d
+  SET replaced_by_document_id = NULL
+  WHERE d.replaced_by_document_id IN (SELECT id FROM public.documents WHERE client_id = p_client_id);
+
+  DELETE FROM public.extracted_pages
+  WHERE document_id IN (SELECT id FROM public.documents WHERE client_id = p_client_id);
+
+  DELETE FROM public.observations WHERE client_id = p_client_id;
+
+  DELETE FROM public.ingestion_jobs
+  WHERE client_id = p_client_id
+     OR document_id IN (SELECT id FROM public.documents WHERE client_id = p_client_id);
+
+  DELETE FROM public.conflicts WHERE client_id = p_client_id;
+
+  DELETE FROM public.documents WHERE client_id = p_client_id;
+
+  DELETE FROM public.drive_sync_events WHERE client_id = p_client_id;
+
+  DELETE FROM public.tax_returns WHERE client_id = p_client_id::text;
+
+  DELETE FROM public.marketing_spend WHERE client_id = p_client_id;
+
+  DELETE FROM public.dispute_letters WHERE client_id::text = p_client_id::text;
+
+  DELETE FROM public.credit_analyses WHERE client_id::text = p_client_id::text;
+
+  DELETE FROM public.clients WHERE id = p_client_id;
+END;
+$$;
+
+REVOKE ALL ON FUNCTION public.delete_client_and_related_data(uuid) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION public.delete_client_and_related_data(uuid) TO authenticated;
+GRANT EXECUTE ON FUNCTION public.delete_client_and_related_data(uuid) TO service_role;
+
+COMMENT ON FUNCTION public.delete_client_and_related_data(uuid) IS
+  'Removes a client and dependent rows (documents, tax returns, marketing, credit analyses).';
