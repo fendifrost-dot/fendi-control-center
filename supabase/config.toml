@@ -69,3 +69,6 @@ verify_jwt = false
 
 [functions.statement-external-callback]
 verify_jwt = false
+
+[functions.workflow-runner]
+verify_jwt = false
