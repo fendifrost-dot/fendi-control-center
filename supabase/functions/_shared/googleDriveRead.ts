@@ -243,9 +243,8 @@ export async function listFilesRecursiveWithPaths(
   return out;
 }
 
-/** Download a file's content as base64 and raw bytes. Handles Google Docs export. */
-export async function downloadFile(fileId: string, mimeType: string): Promise<{
-  base64: string;
+/** Download a file as raw bytes only (no base64). Use for large files to avoid CPU limits. */
+export async function downloadFileRaw(fileId: string, mimeType: string): Promise<{
   bytes: Uint8Array;
   downloadMime: string;
 }> {
@@ -274,7 +273,16 @@ export async function downloadFile(fileId: string, mimeType: string): Promise<{
   }
 
   const buffer = await resp.arrayBuffer();
-  const bytes = new Uint8Array(buffer);
+  return { bytes: new Uint8Array(buffer), downloadMime };
+}
+
+/** Download a file's content as base64 and raw bytes. Handles Google Docs export. */
+export async function downloadFile(fileId: string, mimeType: string): Promise<{
+  base64: string;
+  bytes: Uint8Array;
+  downloadMime: string;
+}> {
+  const { bytes, downloadMime } = await downloadFileRaw(fileId, mimeType);
   // Chunked base64 to avoid "Maximum call stack size exceeded" on large files
   let binary = "";
   const CHUNK = 8192;
