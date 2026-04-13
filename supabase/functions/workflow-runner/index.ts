@@ -258,7 +258,9 @@ Deno.serve(async (req) => {
         .from("workflow_runs")
         .update({
           status: "failed",
+          last_error: "invalid locked_state",
           error: { message: "invalid locked_state", stage: run.current_stage },
+          current_stage: run.current_stage,
         })
         .eq("id", run_id)
         .select("*")
@@ -283,6 +285,7 @@ Deno.serve(async (req) => {
         .from("workflow_runs")
         .update({
           status: "failed",
+          last_error: errMsg,
           error: { message: errMsg, stage },
           current_stage: stage,
         })
