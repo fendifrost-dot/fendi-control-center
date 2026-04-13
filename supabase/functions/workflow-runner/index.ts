@@ -99,23 +99,23 @@ async function handleIngestDrive(run: Run) {
 
 async function handleProcessAsyncStatements(run: Run, supabase: ReturnType<typeof createClient>) {
   const ls = run.locked_state as LockedState & { client_name: string; tax_year: number };
-
-  // Resolve statement jobs from DB
-  let query = supabase
-    .from("statement_chunk_jobs")
-    .select("id, status")
-    .eq("tax_year", ls.tax_year);
-
-  if (ls.client_id) {
-    query = query.eq("client_id", ls.client_id);
-  }
-
-  const { data: jobs } = await query;
-  const jobIds = (jobs ?? []).map((j: { id: string }) => j.id);
-
-  // Also include any already-tracked IDs
   const existingIds = ls.statement_job_ids ?? [];
-  const allIds = [...new Set([...jobIds, ...existingIds])];
+
+  let allIds: string[];
+
+  if (existingIds.length > 0) {
+    // Use already-captured canonical IDs
+    allIds = existingIds;
+  } else {
+    // First pass: discover from DB
+    let query = supabase
+      .from("statement_chunk_jobs")
+      .select("id, status")
+      .eq("tax_year", ls.tax_year);
+    if (ls.client_id) query = query.eq("client_id", ls.client_id);
+    const { data: jobs } = await query;
+    allIds = (jobs ?? []).map((j: { id: string }) => j.id);
+  }
 
   if (allIds.length === 0) {
     return { locked_state: { ...ls, statements_done: true, statement_job_ids: [] } };
@@ -133,15 +133,22 @@ async function handleProcessAsyncStatements(run: Run, supabase: ReturnType<typeo
 
   if (pending.length > 0) {
     // Try to dispatch any that need external processing
-    await callEdgeFunction("statement-external-dispatch", {}).catch(() => {});
+    const { data: dispatchResult, error: dispatchErr } = await callEdgeFunction("statement-external-dispatch", {}).catch((e) => ({ data: null, error: String(e) }));
+
+    const rp = (run.result_payload ?? {}) as Record<string, unknown>;
+    const patchPayload: Record<string, unknown> = { ...rp, external_dispatch: dispatchResult ?? { error: dispatchErr } };
+
+    const dispatchFailed = dispatchErr || (dispatchResult && typeof dispatchResult === "object" && ((dispatchResult as Record<string, unknown>).ok === false || ((dispatchResult as Record<string, unknown>).failed_to_start as number) > 0));
 
     return {
       status: "waiting_async",
       locked_state: { ...ls, statement_job_ids: allIds },
+      result_payload: patchPayload,
+      ...(dispatchFailed ? { error: { message: "external dispatch issue", detail: dispatchErr ?? "failed_to_start > 0", stage: "process_async_statements" } } : {}),
     };
   }
 
-  // All terminal
+  // All terminal — persist canonical IDs
   return {
     locked_state: { ...ls, statements_done: true, statement_job_ids: allIds },
   };
@@ -179,32 +186,22 @@ async function handleGenerateReturn(run: Run) {
 async function handleFinalize(run: Run) {
   const ls = run.locked_state as LockedState & { client_name: string; tax_year: number };
   const rp = (run.result_payload ?? {}) as Record<string, unknown>;
-  const generated = rp.generated as Record<string, unknown> | undefined;
+  const generated = (rp.generated ?? {}) as Record<string, unknown>;
+  const yr = String(ls.tax_year);
 
-  // Try to extract from generated.results[tax_year]
-  let yearResult: Record<string, unknown> | null = null;
-  if (generated) {
-    const results = generated.results as Record<string, unknown> | undefined;
-    if (results && results[String(ls.tax_year)]) {
-      yearResult = results[String(ls.tax_year)] as Record<string, unknown>;
-    }
-    // Also try top-level if results not nested
-    if (!yearResult && generated.json_summary) {
-      yearResult = generated as Record<string, unknown>;
-    }
-  }
-
-  const jsonSummary = yearResult?.json_summary as Record<string, unknown> | undefined;
+  // Extraction order: generated.results[yr] → generated → {}
+  const results = generated.results as Record<string, unknown> | undefined;
+  const out = (results?.[yr] ?? generated ?? {}) as Record<string, unknown>;
 
   return {
     status: "completed",
     result_payload: {
       ...rp,
-      income_summary: jsonSummary?.income_summary ?? jsonSummary?.total_income ?? {},
-      expense_summary: jsonSummary?.expense_summary ?? jsonSummary?.deductions ?? {},
-      mileage_calculation: jsonSummary?.mileage_calculation ?? {},
-      missing_items: jsonSummary?.missing_items ?? [],
-      readiness_status: yearResult?.filing_recommendation ?? {},
+      income_summary: out.income_summary ?? {},
+      expense_summary: out.expense_summary ?? {},
+      mileage_calculation: out.mileage_calculation ?? rp.mileage_calculation ?? {},
+      missing_items: out.missing_items ?? [],
+      readiness_status: out.readiness_status ?? { status: "needs_review", score: 0 },
       completed_at: new Date().toISOString(),
     },
     locked_state: { ...ls, finalized: true },
@@ -287,6 +284,7 @@ Deno.serve(async (req) => {
         .update({
           status: "failed",
           error: { message: errMsg, stage },
+          current_stage: stage,
         })
         .eq("id", run_id)
         .select("*")
