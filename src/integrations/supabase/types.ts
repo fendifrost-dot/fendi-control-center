@@ -1432,6 +1432,54 @@ export type Database = {
         }
         Relationships: []
       }
+      workflow_runs: {
+        Row: {
+          client_id: string | null
+          client_name: string | null
+          created_at: string
+          current_stage: string
+          error: Json | null
+          id: string
+          intent: string
+          locked_state: Json | null
+          result_payload: Json | null
+          statement_job_ids: Json | null
+          status: string
+          tax_year: number | null
+          updated_at: string
+        }
+        Insert: {
+          client_id?: string | null
+          client_name?: string | null
+          created_at?: string
+          current_stage?: string
+          error?: Json | null
+          id?: string
+          intent: string
+          locked_state?: Json | null
+          result_payload?: Json | null
+          statement_job_ids?: Json | null
+          status?: string
+          tax_year?: number | null
+          updated_at?: string
+        }
+        Update: {
+          client_id?: string | null
+          client_name?: string | null
+          created_at?: string
+          current_stage?: string
+          error?: Json | null
+          id?: string
+          intent?: string
+          locked_state?: Json | null
+          result_payload?: Json | null
+          statement_job_ids?: Json | null
+          status?: string
+          tax_year?: number | null
+          updated_at?: string
+        }
+        Relationships: []
+      }
       workflows: {
         Row: {
           created_at: string
