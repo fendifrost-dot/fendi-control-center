@@ -72,6 +72,16 @@ export function extractClientNameForTaxCommand(userMessage: string): string | nu
     if (name.length >= 2 && name.length < 120) return name;
   }
 
+  // "Generate 2025 tax return for Jane Doe" — must run BEFORE generic /generate\s+(.+?)\s+tax\s+return/,
+  // which incorrectly captures the year as the name.
+  const genYearForName = msg.match(
+    /\b(?:generate|prepare|file|complete|run)\s+(?:the\s+)?\d{4}\s+tax\s+return\s+for\s+([A-Za-z][A-Za-z\s.'-]+)/i,
+  );
+  if (genYearForName?.[1]) {
+    const name = cleanup(genYearForName[1]);
+    if (name.length >= 2 && name.length < 120) return name;
+  }
+
   const gen = msg.match(/generate\s+(.+?)\s+tax\s+return/i);
   if (gen?.[1]) {
     const name = cleanup(gen[1].replace(/^the\s+/i, ""));

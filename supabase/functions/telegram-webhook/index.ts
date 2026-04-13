@@ -4885,7 +4885,14 @@ serve(async (req) => {
         _currentTaskId = null;
         return new Response("ok");
       } catch (e) {
-        console.error("[workflow-engine] fallback to legacy path:", String(e));
+        const errMsg = e instanceof Error ? e.message : String(e);
+        console.error("[workflow-engine] fallback to legacy path:", errMsg);
+        await sendMessage(
+          chatId,
+          `⚠️ Workflow engine could not run (${errMsg.slice(0, 200)}). Falling back to manual tools / assistant.`,
+          {},
+          `task:${taskId}:workflow-error`,
+        );
       }
     }
 
