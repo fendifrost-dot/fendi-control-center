@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import { supabase } from "@/integrations/supabase/client";
 import { Button } from "@/components/ui/button";
@@ -8,6 +8,12 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/com
 
 type Phase = "checking" | "ready" | "invalid" | "done";
 
+/**
+ * Password recovery: Supabase may redirect with ?code= (PKCE). The client must run
+ * `initialize()` then optionally `exchangeCodeForSession(code)` if a session is not
+ * already established. Do not treat "invalid" until after retries — Strict Mode and
+ * async URL parsing can delay the session.
+ */
 export default function ResetPassword() {
   const navigate = useNavigate();
   const [phase, setPhase] = useState<Phase>("checking");
@@ -15,15 +21,21 @@ export default function ResetPassword() {
   const [confirm, setConfirm] = useState("");
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
+  const settledRef = useRef(false);
 
   useEffect(() => {
     let cancelled = false;
-    let settled = false;
 
     const markReady = () => {
-      if (cancelled || settled) return;
-      settled = true;
+      if (cancelled || settledRef.current) return;
+      settledRef.current = true;
       setPhase("ready");
+    };
+
+    const markInvalid = () => {
+      if (cancelled || settledRef.current) return;
+      settledRef.current = true;
+      setPhase("invalid");
     };
 
     const { data: { subscription } } = supabase.auth.onAuthStateChange((event) => {
@@ -32,31 +44,61 @@ export default function ResetPassword() {
       }
     });
 
-    const trySession = async () => {
-      const { data: { session } } = await supabase.auth.getSession();
-      if (cancelled) return;
-      if (session?.user) {
-        markReady();
+    (async () => {
+      try {
+        await supabase.auth.initialize();
+
+        let { data: { session } } = await supabase.auth.getSession();
+        if (session?.user) {
+          markReady();
+          return;
+        }
+
+        const code = new URLSearchParams(window.location.search).get("code");
+        if (code) {
+          const { error: exchangeError } = await supabase.auth.exchangeCodeForSession(code);
+          if (exchangeError) {
+            console.warn("[reset-password] exchangeCodeForSession:", exchangeError.message);
+          }
+          ({ data: { session } } = await supabase.auth.getSession());
+          if (session?.user) {
+            markReady();
+            return;
+          }
+        }
+
+        for (let i = 0; i < 24; i++) {
+          if (cancelled) return;
+          await new Promise((r) => setTimeout(r, 120));
+          ({ data: { session } } = await supabase.auth.getSession());
+          if (session?.user) {
+            markReady();
+            return;
+          }
+        }
+        // Still no session: PASSWORD_RECOVERY may fire next, or failSafe will show invalid.
+      } catch (e) {
+        console.error("[reset-password]", e);
+        markInvalid();
       }
-    };
+    })();
 
-    void trySession();
-    const rafId = requestAnimationFrame(() => void trySession());
-    const t1 = window.setTimeout(() => void trySession(), 300);
-    const t2 = window.setTimeout(() => void trySession(), 1200);
-
-    const fail = window.setTimeout(() => {
-      if (cancelled || settled) return;
-      setPhase((p) => (p === "checking" ? "invalid" : p));
-    }, 10000);
+    const failSafe = window.setTimeout(() => {
+      if (cancelled || settledRef.current) return;
+      void supabase.auth.getSession().then(({ data: { session } }) => {
+        if (cancelled || settledRef.current) return;
+        if (session?.user) {
+          markReady();
+        } else {
+          markInvalid();
+        }
+      });
+    }, 12000);
 
     return () => {
       cancelled = true;
       subscription.unsubscribe();
-      cancelAnimationFrame(rafId);
-      window.clearTimeout(t1);
-      window.clearTimeout(t2);
-      window.clearTimeout(fail);
+      window.clearTimeout(failSafe);
     };
   }, []);
 
@@ -97,7 +139,8 @@ export default function ResetPassword() {
           <CardHeader>
             <CardTitle className="text-center text-xl">Link invalid or expired</CardTitle>
             <CardDescription className="text-center">
-              Request a new reset link. Open it from the same browser you use for this app.
+              If you requested the reset in another browser or cleared site data, open the link in the same browser you
+              used to request it. Otherwise request a new link.
             </CardDescription>
           </CardHeader>
           <CardContent className="flex flex-col gap-2">

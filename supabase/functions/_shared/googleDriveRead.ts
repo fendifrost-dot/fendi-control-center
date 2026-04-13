@@ -140,6 +140,9 @@ export interface DriveFile {
   modifiedTime?: string;
 }
 
+/** File with path from tax folder root, e.g. `CHASE 2022/2022.pdf` */
+export type DriveFileWithPath = DriveFile & { relativePath: string };
+
 /** Shared Drive params appended to every files.list / files.get call. */
 const SHARED_DRIVE_PARAMS = "&supportsAllDrives=true&includeItemsFromAllDrives=true";
 
@@ -208,6 +211,36 @@ export async function listFilesRecursive(folderId: string, depth = 0, maxDepth =
   }
 
   return files;
+}
+
+/**
+ * Recursive file list with relative paths from the tax year folder (for path-aware classification).
+ * e.g. `CHASE 2022/2022.pdf`, `Chime STTMNT 2023/Chime-Checking-Statement-April-2023.pdf`
+ */
+export async function listFilesRecursiveWithPaths(
+  folderId: string,
+  pathPrefix: string,
+  depth: number,
+  maxDepth: number,
+): Promise<DriveFileWithPath[]> {
+  if (depth > maxDepth) return [];
+
+  const out: DriveFileWithPath[] = [];
+  const files = await listFilesInFolder(folderId);
+  for (const f of files) {
+    const rel = pathPrefix ? `${pathPrefix}/${f.name}` : f.name;
+    out.push({ ...f, relativePath: rel });
+  }
+
+  const subfolders = await listSubfolders(folderId);
+  for (const sub of subfolders) {
+    const nextPrefix = pathPrefix ? `${pathPrefix}/${sub.name}` : sub.name;
+    console.log("  ".repeat(depth) + "[listFilesRecursiveWithPaths] → " + nextPrefix);
+    const nested = await listFilesRecursiveWithPaths(sub.id, nextPrefix, depth + 1, maxDepth);
+    out.push(...nested);
+  }
+
+  return out;
 }
 
 /** Download a file's content as base64 and raw bytes. Handles Google Docs export. */

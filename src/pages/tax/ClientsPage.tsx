@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { Link } from "react-router-dom";
 import { supabase } from "@/integrations/supabase/client";
 import { Button } from "@/components/ui/button";
+import { Badge } from "@/components/ui/badge";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import {
   Dialog,
@@ -13,26 +14,26 @@ import {
 } from "@/components/ui/dialog";
 import {
   AlertDialog,
-  AlertDialogAction,
   AlertDialogCancel,
   AlertDialogContent,
   AlertDialogDescription,
   AlertDialogFooter,
   AlertDialogHeader,
   AlertDialogTitle,
-  AlertDialogTrigger,
 } from "@/components/ui/alert-dialog";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Separator } from "@/components/ui/separator";
-import { Plus, User, ChevronRight, FileSpreadsheet, Users, FolderOpen, Trash2 } from "lucide-react";
+import { Plus, User, ChevronRight, FileSpreadsheet, Users, FolderOpen, Trash2, Loader2 } from "lucide-react";
 import { useToast } from "@/hooks/use-toast";
+import { removeClientTaxSourceFiles } from "@/lib/removeClientTaxSourceFiles";
 
 type ClientRow = {
   id: string;
   name: string;
   email: string | null;
   created_at: string | null;
+  client_pipeline: string;
 };
 
 export default function ClientsPage() {
@@ -50,12 +51,14 @@ export default function ClientsPage() {
     phone: "",
     business_type: "",
   });
+  const [pendingDelete, setPendingDelete] = useState<ClientRow | null>(null);
+  const [deletingId, setDeletingId] = useState<string | null>(null);
 
   const load = useCallback(async () => {
     setLoading(true);
     const { data: cRows, error: ce } = await supabase
       .from("clients")
-      .select("id,name,email,created_at")
+      .select("id,name,email,created_at,client_pipeline")
       .order("name");
     if (ce) {
       toast({ title: "Could not load clients", description: ce.message, variant: "destructive" });
@@ -82,6 +85,35 @@ export default function ClientsPage() {
     void load();
   }, [load]);
 
+  const deleteClient = useCallback(
+    async (row: ClientRow) => {
+      setDeletingId(row.id);
+      try {
+        try {
+          await removeClientTaxSourceFiles(supabase, row.id);
+        } catch (e) {
+          console.warn("[clients] tax storage cleanup", e);
+        }
+        const { error } = await supabase.rpc("delete_client_and_related_data", {
+          p_client_id: row.id,
+        });
+        if (error) throw error;
+        toast({
+          title: "Client removed",
+          description: `${row.name} and related records were deleted.`,
+        });
+        setPendingDelete(null);
+        await load();
+      } catch (e) {
+        const msg = e instanceof Error ? e.message : String(e);
+        toast({ title: "Could not delete client", description: msg, variant: "destructive" });
+      } finally {
+        setDeletingId(null);
+      }
+    },
+    [load, toast],
+  );
+
   async function addClient(e: React.FormEvent) {
     e.preventDefault();
     if (!form.name.trim()) return;
@@ -102,16 +134,6 @@ export default function ClientsPage() {
     toast({ title: "Client added" });
     setForm({ name: "", email: "", phone: "", business_type: "" });
     setOpen(false);
-    void load();
-  }
-
-  async function deleteClient(id: string, name: string) {
-    const { error } = await supabase.rpc("delete_client_and_related_data", { p_client_id: id });
-    if (error) {
-      toast({ title: `Could not delete ${name}`, description: error.message, variant: "destructive" });
-      return;
-    }
-    toast({ title: `Deleted ${name}` });
     void load();
   }
 
@@ -282,67 +304,102 @@ export default function ClientsPage() {
           <div className="grid gap-4 sm:grid-cols-2">
             {filtered.map((c) => (
               <div key={c.id} className="group relative">
-                <Link to={`/clients/${c.id}`} className="block">
-                  <Card className="h-full border-border/80 transition-all hover:border-primary/35 hover:shadow-md">
-                    <CardHeader className="flex flex-row items-start gap-4 space-y-0 pb-2">
-                      <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-full bg-primary/10 text-primary">
-                        <User className="h-5 w-5" />
-                      </div>
-                      <div className="min-w-0 flex-1">
-                        <div className="flex items-start justify-between gap-2">
-                          <CardTitle className="text-lg leading-tight">{c.name}</CardTitle>
-                          <ChevronRight className="h-5 w-5 shrink-0 text-muted-foreground opacity-0 transition-opacity group-hover:opacity-100" />
+                <Card className="h-full overflow-hidden border-border/80 transition-all hover:border-primary/35 hover:shadow-md">
+                  <div className="flex min-h-[8rem] flex-row">
+                    <Link to={`/clients/${c.id}`} className="group flex min-w-0 flex-1 flex-col">
+                      <CardHeader className="flex flex-row items-start gap-4 space-y-0 pb-2">
+                        <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-full bg-primary/10 text-primary">
+                          <User className="h-5 w-5" />
                         </div>
-                        {c.email && (
-                          <p className="mt-1 truncate text-sm text-muted-foreground">{c.email}</p>
-                        )}
-                      </div>
-                    </CardHeader>
-                    <CardContent className="space-y-1 text-sm text-muted-foreground">
-                      <p>
-                        <span className="text-foreground/80">Tax returns on file:</span> {returnCount[c.id] ?? 0}
-                      </p>
-                      <p>
-                        <span className="text-foreground/80">Last activity:</span>{" "}
-                        {lastActivity[c.id] ? new Date(lastActivity[c.id]).toLocaleString() : "—"}
-                      </p>
-                    </CardContent>
-                  </Card>
-                </Link>
-                <AlertDialog>
-                  <AlertDialogTrigger asChild>
-                    <Button
-                      variant="ghost"
-                      size="icon"
-                      className="absolute right-2 top-2 h-8 w-8 opacity-0 transition-opacity group-hover:opacity-100 hover:bg-destructive/10 hover:text-destructive"
-                      onClick={(e) => e.stopPropagation()}
-                    >
-                      <Trash2 className="h-4 w-4" />
-                    </Button>
-                  </AlertDialogTrigger>
-                  <AlertDialogContent>
-                    <AlertDialogHeader>
-                      <AlertDialogTitle>Delete {c.name}?</AlertDialogTitle>
-                      <AlertDialogDescription>
-                        This permanently removes the client and all related data — tax returns, documents, observations, credit analyses, and dispute letters. This cannot be undone.
-                      </AlertDialogDescription>
-                    </AlertDialogHeader>
-                    <AlertDialogFooter>
-                      <AlertDialogCancel>Cancel</AlertDialogCancel>
-                      <AlertDialogAction
-                        className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
-                        onClick={() => deleteClient(c.id, c.name)}
+                        <div className="min-w-0 flex-1">
+                          <div className="flex items-start justify-between gap-2">
+                            <div className="flex min-w-0 flex-wrap items-center gap-2">
+                              <CardTitle className="text-lg leading-tight">{c.name}</CardTitle>
+                              {c.client_pipeline === "credit" && (
+                                <Badge variant="secondary" className="font-normal">
+                                  Credit folder
+                                </Badge>
+                              )}
+                              {c.client_pipeline === "tax" && (
+                                <Badge variant="outline" className="border-emerald-500/40 font-normal text-emerald-700 dark:text-emerald-400">
+                                  Tax folder
+                                </Badge>
+                              )}
+                              {c.client_pipeline === "unknown" && (
+                                <Badge variant="outline" className="font-normal text-muted-foreground">
+                                  Pipeline unknown
+                                </Badge>
+                              )}
+                            </div>
+                            <ChevronRight className="h-5 w-5 shrink-0 text-muted-foreground opacity-0 transition-opacity group-hover:opacity-100" />
+                          </div>
+                          {c.email && (
+                            <p className="mt-1 truncate text-sm text-muted-foreground">{c.email}</p>
+                          )}
+                        </div>
+                      </CardHeader>
+                      <CardContent className="space-y-1 text-sm text-muted-foreground">
+                        <p>
+                          <span className="text-foreground/80">Tax returns on file:</span> {returnCount[c.id] ?? 0}
+                        </p>
+                        <p>
+                          <span className="text-foreground/80">Last activity:</span>{" "}
+                          {lastActivity[c.id] ? new Date(lastActivity[c.id]).toLocaleString() : "—"}
+                        </p>
+                      </CardContent>
+                    </Link>
+                    <div className="flex shrink-0 flex-col border-l border-border/60 bg-muted/20">
+                      <Button
+                        type="button"
+                        variant="ghost"
+                        size="icon"
+                        className="h-full min-h-[3rem] rounded-none text-muted-foreground hover:text-destructive"
+                        aria-label={`Delete ${c.name}`}
+                        disabled={deletingId === c.id}
+                        onClick={() => setPendingDelete(c)}
                       >
-                        Delete permanently
-                      </AlertDialogAction>
-                    </AlertDialogFooter>
-                  </AlertDialogContent>
-                </AlertDialog>
+                        {deletingId === c.id ? (
+                          <Loader2 className="h-5 w-5 animate-spin" />
+                        ) : (
+                          <Trash2 className="h-5 w-5" />
+                        )}
+                      </Button>
+                    </div>
+                  </div>
+                </Card>
               </div>
             ))}
           </div>
         )}
       </section>
+
+      <AlertDialog
+        open={pendingDelete !== null}
+        onOpenChange={(open) => {
+          if (!open) setPendingDelete(null);
+        }}
+      >
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Delete {pendingDelete?.name ?? "client"}?</AlertDialogTitle>
+            <AlertDialogDescription>
+              This permanently removes this client, their tax return rows, document records, marketing spend, and other
+              linked data in Control Center. Files in tax document storage under this client folder are removed when
+              possible. This cannot be undone.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel disabled={deletingId !== null}>Cancel</AlertDialogCancel>
+            <Button
+              variant="destructive"
+              disabled={deletingId !== null || !pendingDelete}
+              onClick={() => pendingDelete && void deleteClient(pendingDelete)}
+            >
+              {deletingId ? "Deleting…" : "Delete client"}
+            </Button>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
 
       <section className="rounded-xl border bg-muted/30 p-5 sm:p-6">
         <h3 className="text-sm font-semibold">Typical workflow</h3>

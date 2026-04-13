@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useRef, useState } from "react";
 import { Link } from "react-router-dom";
 import { supabase } from "@/integrations/supabase/client";
 import { Button } from "@/components/ui/button";
@@ -11,15 +11,19 @@ export default function ForgotPassword() {
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
   const [sent, setSent] = useState(false);
+  const submitLock = useRef(false);
 
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
+    if (sent || submitLock.current) return;
     setError("");
+    submitLock.current = true;
     setLoading(true);
     const redirectTo = `${window.location.origin}/reset-password`;
     const { error: err } = await supabase.auth.resetPasswordForEmail(email.trim(), {
       redirectTo,
     });
+    submitLock.current = false;
     setLoading(false);
     if (err) {
       setError(err.message);
@@ -64,7 +68,7 @@ export default function ForgotPassword() {
                 />
               </div>
               {error && <p className="text-sm text-destructive">{error}</p>}
-              <Button type="submit" className="w-full" disabled={loading}>
+              <Button type="submit" className="w-full" disabled={loading || sent}>
                 {loading ? "Sending…" : "Send reset link"}
               </Button>
               <p className="text-center text-sm text-muted-foreground">

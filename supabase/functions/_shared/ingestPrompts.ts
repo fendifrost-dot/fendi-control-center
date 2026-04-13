@@ -1,4 +1,14 @@
 import type { DocClass } from "./docClassifier.ts";
+import { SCHEDULE_C_CATEGORIES, type ScheduleCCategoryKey } from "./categories.ts";
+
+/** IRS Schedule C Part II labels — deterministic anchor for prompts (no AI classification). */
+export function scheduleCExpenseLineLabels(): Record<ScheduleCCategoryKey, string> {
+  const o = {} as Record<ScheduleCCategoryKey, string>;
+  for (const k of Object.keys(SCHEDULE_C_CATEGORIES) as ScheduleCCategoryKey[]) {
+    o[k] = SCHEDULE_C_CATEGORIES[k].label;
+  }
+  return o;
+}
 
 export const INCOME_1099_PROMPT: string = `You are a tax document extractor specializing in 1099-series income forms. Your job is to extract the exact figures printed on this form — nothing more, nothing less.
 
@@ -73,34 +83,50 @@ Extract the following and return ONLY valid JSON:
 
 Omit any field that is blank or zero. Do not fabricate amounts. If a field is not visible, omit it.`;
 
-export const FINANCIAL_STATEMENT_PROMPT: string = `You are reading a financial statement, NOT an income document. Do NOT report the deposits on this statement as income. Deposits on a bank statement are a consequence of income that is already reported on a 1099, W-2, or other authoritative income form. Reporting bank deposits as income in addition to the 1099 that produced them causes duplicate counting. If you see a deposit that looks like it corresponds to a 1099 payment, IGNORE IT for income purposes — it will already be captured from the 1099.
+export const FINANCIAL_STATEMENT_PROMPT: string = `You are analyzing a bank/credit card/payment-platform statement for a self-employed taxpayer.
 
-Extract the following and return ONLY valid JSON:
+INCOME RULE: Do NOT use deposits as "reported income" for tax totals — authoritative income comes from 1099/W-2. The field reported_income MUST be null.
+
+YOUR JOB: Extract EVERY transaction row from this document with maximum fidelity. Do not summarize into categories. Do not assign IRS Schedule C lines (downstream system does that).
+
+Return ONLY valid JSON:
 {
-  "account_type": "checking" | "savings" | "credit_card" | "brokerage" | "other",
-  "institution_name": "<bank or institution name>",
-  "statement_period": {
-    "start": "<YYYY-MM-DD>",
-    "end": "<YYYY-MM-DD>"
-  },
-  "beginning_balance": <amount>,
-  "ending_balance": <amount>,
+  "account_type": "checking" | "savings" | "credit_card" | "brokerage" | "payment_platform" | "other",
+  "institution_name": "<institution name>",
+  "statement_period": { "start": "<YYYY-MM-DD>", "end": "<YYYY-MM-DD>" },
+  "beginning_balance": <number or null>,
+  "ending_balance": <number or null>,
   "transactions": [
     {
       "date": "<YYYY-MM-DD>",
-      "description": "<transaction description>",
-      "amount": <positive for credits/deposits, negative for debits/charges>,
+      "description": "<exact text from statement>",
+      "amount": <negative for money OUT, positive for money IN>,
       "category": "deposit" | "withdrawal" | "payment" | "fee" | "transfer" | "interest" | "other"
     }
   ],
   "reported_income": null,
-  "reported_income_reason": "financial statements do not report income",
-  "notes": "<any relevant notes, or empty string>"
+  "reported_income_reason": "Use 1099/W-2 for income; statement is for cashflow only",
+  "notes": ""
 }
 
-The "reported_income" field MUST be null. This field exists to make it machine-checkable that this document is not contributing to income totals.
-Include transactions only if they appear to be business-relevant expense candidates (categorization purposes only).
-Do not sum deposits and report them as income.`;
+Rules:
+- Include ALL transactions; do not drop rows.
+- Negative amount = debit/charge/payment out; positive = deposit/credit in.
+- Do NOT label business vs personal.
+- Do NOT map to IRS lines.`;
+
+/** When heuristics could not classify — still extract structured financial data if present */
+export const REQUIRES_REVIEW_EXTRACTION_PROMPT: string = `You are analyzing a document that may be a tax form, bank statement, receipt, or mixed scan.
+
+If this is a bank or card statement: extract the same JSON shape as a financial statement:
+- account_type, institution_name, statement_period, transactions[] with date, description, amount (negative=outflow), category (banking type only), reported_income: null.
+
+If this is clearly a 1099 or W-2, return the appropriate specialized shape (boxes/employer fields) if you can read them; otherwise return best-effort extracted_data with income_items/expense_items arrays.
+
+If nothing financial is readable, return:
+{ "account_type": "other", "institution_name": "", "statement_period": { "start": "", "end": "" }, "transactions": [], "reported_income": null, "notes": "unreadable or non-financial" }
+
+Never invent dollar amounts.`;
 
 export const RECEIPT_OR_INVOICE_PROMPT: string = `You are a tax document extractor specializing in business expense receipts and invoices. Your job is to extract expense information for deduction categorization.
 
@@ -137,10 +163,10 @@ export function pickSystemPrompt(docClass: DocClass): string | null {
       return FINANCIAL_STATEMENT_PROMPT;
     case "receipt_or_invoice":
       return RECEIPT_OR_INVOICE_PROMPT;
+    case "requires_review":
+      return REQUIRES_REVIEW_EXTRACTION_PROMPT;
     case "tax_form":
     case "identity_or_legal":
-    case "unknown":
-      // Non-dollar-bearing or ambiguous — skip LLM pass, record as filed-only
       return null;
     default:
       return null;

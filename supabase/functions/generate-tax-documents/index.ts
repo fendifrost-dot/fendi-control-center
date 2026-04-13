@@ -5,6 +5,13 @@ import { upsertTaxReturn, logAudit } from "../_shared/taxReturns.ts";
 import { crossCheckReturn } from "../_shared/crossCheckReturn.ts";
 import { normalizeToCanonical, type CanonicalTaxSummary } from "../_shared/canonical.ts";
 import { validateCanonical } from "../_shared/guards.ts";
+import {
+  mapManualUiCategoryToScheduleC,
+  MANUAL_CATEGORY_MAP,
+  SCHEDULE_C_CATEGORIES,
+  UNCLASSIFIED_SCHEDULE_C,
+  type ScheduleCCategoryKey,
+} from "../_shared/categories.ts";
 
 function escapeIlike(s: string): string {
   return s.replace(/\\/g, "\\\\").replace(/%/g, "\\%").replace(/_/g, "\\_");
@@ -783,8 +790,27 @@ ${taxDataPayload}${priorYearBlock}`;
 
         const businessIncome =
           Math.round((ingestionDerivedBusinessIncome + manualIncomeTotal) * 100) / 100;
-        const totalExpenses =
-          Math.round(((Number(scheduleC.total_expenses) || 0) + manualDeductionTotal) * 100) / 100;
+
+        for (const entry of manualDeductionEntries) {
+          const amt = Number((entry as Record<string, unknown>).amount);
+          if (!Number.isFinite(amt) || amt === 0) continue;
+          const uiCat = String((entry as Record<string, unknown>).category || "");
+          const mapped: ScheduleCCategoryKey | typeof UNCLASSIFIED_SCHEDULE_C =
+            MANUAL_CATEGORY_MAP[uiCat] !== undefined
+              ? MANUAL_CATEGORY_MAP[uiCat]!
+              : mapManualUiCategoryToScheduleC(uiCat);
+          const key = mapped === UNCLASSIFIED_SCHEDULE_C ? "unclassified" : mapped;
+          const prev = Number(scheduleC[key]) || 0;
+          scheduleC[key] = Math.round((prev + amt) * 100) / 100;
+        }
+
+        let computedTotal = 0;
+        for (const cat of Object.keys(SCHEDULE_C_CATEGORIES) as ScheduleCCategoryKey[]) {
+          computedTotal += Number(scheduleC[cat]) || 0;
+        }
+        computedTotal += Number(scheduleC.unclassified) || 0;
+
+        const totalExpenses = Math.round(computedTotal * 100) / 100;
         const netProfit = Math.round((businessIncome - totalExpenses) * 100) / 100;
 
         scheduleC.gross_receipts = businessIncome;
@@ -799,7 +825,7 @@ ${taxDataPayload}${priorYearBlock}`;
         form1040.total_income = Math.round((netProfit + wages) * 100) / 100;
 
         console.log(
-          `[generate] Applied deterministic manual entries: manualIncome=$${manualIncomeTotal}, manualDeductions=$${manualDeductionTotal}, businessIncome=$${businessIncome}, netProfit=$${netProfit}, form_1040.total_income=$${form1040.total_income}`,
+          `[generate] Applied deterministic manual entries (per-line + total): manualIncome=$${manualIncomeTotal}, manualDeductions=$${manualDeductionTotal}, businessIncome=$${businessIncome}, netProfit=$${netProfit}, form_1040.total_income=$${form1040.total_income}`,
         );
       }
 

@@ -15,5 +15,7 @@ export const supabase = createClient<Database>(SUPABASE_URL, SUPABASE_PUBLISHABL
     autoRefreshToken: true,
     /** Required so password-recovery links (`#access_token=…&type=recovery`) establish a session in the SPA. */
     detectSessionInUrl: true,
+    /** Matches `resetPasswordForEmail` PKCE — stores code verifier so `?code=` links can be exchanged. */
+    flowType: "pkce",
   },
 });

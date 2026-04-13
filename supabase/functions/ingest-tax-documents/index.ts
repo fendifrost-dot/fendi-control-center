@@ -1,10 +1,26 @@
 import { serve } from 'https://deno.land/std@0.168.0/http/server.ts';
 import { createClient, type SupabaseClient } from 'https://esm.sh/@supabase/supabase-js@2.49.1';
-import { findClientTaxFolder, listFilesInFolder, downloadFile } from '../_shared/googleDriveRead.ts';
+import { findClientTaxFolder, listFilesRecursiveWithPaths, downloadFile } from '../_shared/googleDriveRead.ts';
 import { upsertTaxReturn, getTaxReturn } from '../_shared/taxReturns.ts';
 import { classifyDocument, type DocClass, type DocClassification } from '../_shared/docClassifier.ts';
 import { pickSystemPrompt } from '../_shared/ingestPrompts.ts';
 import { analyzeDocumentWithGemini } from '../_shared/geminiParser.ts';
+import {
+  SCHEDULE_C_CATEGORIES,
+  UNCLASSIFIED_SCHEDULE_C,
+  emptyScheduleCExpenseTotals,
+  type ScheduleCCategoryKey,
+} from '../_shared/categories.ts';
+import {
+  buildTransactionsFromExpenseItems,
+  emptyFinancialState,
+  type FinancialState,
+  type Transaction,
+  type IngestStatus,
+  type ReviewReason,
+} from '../_shared/financialState.ts';
+import { detectPatterns } from '../_shared/patternEngine.ts';
+import { retrieveTaxKnowledge } from '../_shared/taxKnowledge.ts';
 
 const corsHeaders = {
   'Access-Control-Allow-Origin': '*',
@@ -29,7 +45,16 @@ interface ExpenseItem {
   description: string;
   amount: number;
   payee?: string;
+  /** Bank / institution from statement header (normalized ingest) */
+  source_institution?: string;
   date?: string;
+  /** Banking / receipt raw label — not IRS */
+  raw_category?: string;
+  /** Schedule C key when adjudicated; null until Layer 5+ */
+  schedule_c_category?: string | null;
+  confidence?: number;
+  flags?: string[];
+  needs_review?: boolean;
 }
 
 interface ExtractedData {
@@ -39,6 +64,7 @@ interface ExtractedData {
     income_items: IncomeItem[];
     expense_items: ExpenseItem[];
     payer_info: Record<string, string>;
+    metadata?: Record<string, unknown>;
   };
 }
 
@@ -68,6 +94,9 @@ interface DriveIngestFileRecord {
   skipReason?: string;
   status: 'success' | 'skipped' | 'error';
   error?: string;
+  /** From mode=list / classify — e.g. CHASE 2022/2022.pdf */
+  relative_path?: string;
+  file_size_bytes?: number;
 }
 
 interface DriveIngestSession {
@@ -201,26 +230,16 @@ Return ONLY valid JSON with this exact structure:
  * detects the response shape and converts it so that aggregatePL() always
  * receives uniform data.
  */
-function normalizeToExtractedData(raw: Record<string, unknown>): ExtractedData {
-  // Already in ExtractedData format (default prompt or already normalized)
-  if (
-    typeof raw.doc_type === 'string' &&
-    raw.doc_type !== 'other' &&
-    raw.extracted_data &&
-    typeof raw.extracted_data === 'object'
-  ) {
-    const ed = raw.extracted_data as Record<string, unknown>;
-    return {
-      doc_type: raw.doc_type as string,
-      classification: (raw.classification as string) || 'mixed',
-      extracted_data: {
-        income_items: (ed.income_items as IncomeItem[]) || [],
-        expense_items: (ed.expense_items as ExpenseItem[]) || [],
-        payer_info: (ed.payer_info as Record<string, string>) || { name: '', ein: '', address: '' },
-      },
-    };
-  }
+function isDebitExpense(tx: Record<string, unknown>): boolean {
+  const amount = Number(tx.amount);
+  const type = String(tx.type || '').toLowerCase();
+  const cat = String(tx.category || '').toLowerCase();
+  if (Number.isFinite(amount) && amount < 0) return true;
+  if (['withdrawal', 'payment', 'fee', 'debit', 'purchase'].includes(type)) return true;
+  return ['withdrawal', 'payment', 'fee', 'debit', 'purchase'].some((k) => cat.includes(k));
+}
 
+function normalizeToExtractedData(raw: Record<string, unknown>): ExtractedData {
   // ── 1099 format (from INCOME_1099_PROMPT) ──────────────────────
   if ('form_subtype' in raw || ('boxes' in raw && 'payer' in raw)) {
     const subtype = String(raw.form_subtype || 'other').toUpperCase();
@@ -289,20 +308,50 @@ function normalizeToExtractedData(raw: Record<string, unknown>): ExtractedData {
     };
   }
 
-  // ── Financial statement format (from FINANCIAL_STATEMENT_PROMPT) ─
+  // ── Financial statement format (from FINANCIAL_STATEMENT_PROMPT / requires_review) ─
   if ('account_type' in raw && 'institution_name' in raw) {
-    // Financial statements contribute $0 income by design (dedup rule)
+    const transactions = Array.isArray(raw.transactions) ? (raw.transactions as Record<string, unknown>[]) : [];
+    const expenseTransactions = transactions.filter((tx) => isDebitExpense(tx));
+
+    const institution = String(raw.institution_name || '');
+    const expense_items: ExpenseItem[] = expenseTransactions.map((tx) => {
+      const rawCat = String(tx.type || tx.category || 'unknown');
+      return {
+        category: rawCat,
+        raw_category: rawCat,
+        description: String(tx.description || ''),
+        amount: Math.abs(Number(tx.amount) || 0),
+        payee: institution,
+        source_institution: institution,
+        date: tx.date != null && tx.date !== '' ? String(tx.date) : '',
+        schedule_c_category: null,
+        confidence: typeof tx.confidence === 'number' ? tx.confidence : 0.5,
+        flags: ['bank_extract', 'needs_review'],
+        needs_review: true,
+      };
+    });
+
+    const meta = {
+      account_type: raw.account_type,
+      institution: raw.institution_name,
+      statement_period: raw.statement_period ?? null,
+      total_transactions: transactions.length,
+      expense_transactions: expenseTransactions.length,
+      skipped_income_transactions: transactions.length - expenseTransactions.length,
+    };
+
     return {
       doc_type: 'bank_statement',
-      classification: 'mixed',
+      classification: 'expense',
       extracted_data: {
         income_items: [],
-        expense_items: [],
+        expense_items,
         payer_info: {
-          name: String(raw.institution_name || ''),
+          name: institution,
           ein: '',
           address: '',
         },
+        metadata: meta,
       },
     };
   }
@@ -312,10 +361,15 @@ function normalizeToExtractedData(raw: Record<string, unknown>): ExtractedData {
     const lineItems = (raw.line_items || []) as Array<Record<string, unknown>>;
     const expenseItems: ExpenseItem[] = lineItems.map((item) => ({
       category: String(item.category || 'other'),
+      raw_category: String(item.category || 'other'),
       description: String(item.description || ''),
       amount: Number(item.amount) || 0,
       payee: String(raw.vendor_name || ''),
       date: String(item.date || raw.date || ''),
+      schedule_c_category: null,
+      confidence: 0.6,
+      flags: ['receipt_extract', 'needs_review'],
+      needs_review: true,
     }));
 
     return {
@@ -329,6 +383,32 @@ function normalizeToExtractedData(raw: Record<string, unknown>): ExtractedData {
           ein: '',
           address: '',
         },
+      },
+    };
+  }
+
+  // Already in ExtractedData shape (default prompt)
+  if (
+    typeof raw.doc_type === 'string' &&
+    raw.doc_type !== 'other' &&
+    raw.extracted_data &&
+    typeof raw.extracted_data === 'object'
+  ) {
+    const ed = raw.extracted_data as Record<string, unknown>;
+    const expense_items = ((ed.expense_items as ExpenseItem[]) || []).map((e) => ({
+      ...e,
+      schedule_c_category: e.schedule_c_category ?? null,
+      raw_category: e.raw_category ?? e.category,
+      flags: e.flags ?? [],
+    }));
+    return {
+      doc_type: raw.doc_type as string,
+      classification: (raw.classification as string) || 'mixed',
+      extracted_data: {
+        income_items: (ed.income_items as IncomeItem[]) || [],
+        expense_items,
+        payer_info: (ed.payer_info as Record<string, string>) || { name: '', ein: '', address: '' },
+        metadata: (ed.metadata as Record<string, unknown>) || undefined,
       },
     };
   }
@@ -366,6 +446,12 @@ async function analyzeDocumentRouter(
   return normalized;
 }
 
+function expenseBucket(item: ExpenseItem): ScheduleCCategoryKey | typeof UNCLASSIFIED_SCHEDULE_C {
+  const s = item.schedule_c_category;
+  if (typeof s === 'string' && s in SCHEDULE_C_CATEGORIES) return s as ScheduleCCategoryKey;
+  return UNCLASSIFIED_SCHEDULE_C;
+}
+
 function aggregatePL(allExtracted: ExtractedData[]): PLSummary {
   const incomeByCategory: Record<string, number> = {
     'W-2 Wages': 0,
@@ -378,16 +464,7 @@ function aggregatePL(allExtracted: ExtractedData[]): PLSummary {
     'Other Income': 0,
   };
 
-  const expensesByCategory: Record<string, number> = {
-    business: 0,
-    medical: 0,
-    charitable: 0,
-    education: 0,
-    home_office: 0,
-    vehicle: 0,
-    supplies: 0,
-    other: 0,
-  };
+  const expensesByCategory = emptyScheduleCExpenseTotals() as unknown as Record<string, number>;
 
   for (const doc of allExtracted) {
     for (const item of doc.extracted_data.income_items) {
@@ -426,8 +503,8 @@ function aggregatePL(allExtracted: ExtractedData[]): PLSummary {
 
     for (const item of doc.extracted_data.expense_items) {
       const amount = Number(item.amount) || 0;
-      const cat = item.category in expensesByCategory ? item.category : 'other';
-      expensesByCategory[cat] += amount;
+      const bucket = expenseBucket(item);
+      expensesByCategory[bucket] = (expensesByCategory[bucket] ?? 0) + amount;
     }
   }
 
@@ -441,6 +518,119 @@ function aggregatePL(allExtracted: ExtractedData[]): PLSummary {
     expenses_by_category: expensesByCategory,
     net_income: Math.round((totalIncome - totalExpenses) * 100) / 100,
   };
+}
+
+type StagedIngestDoc = {
+  docId: string;
+  fileName: string;
+  docClass: DocClass;
+  extracted: ExtractedData;
+  relativePath: string | null;
+  fileSizeBytes: number | null;
+  /** True when file exceeds single-call LLM size guidance (chunking not yet implemented) */
+  largePdfWarning?: boolean;
+};
+
+type SkippedIngestDoc = {
+  docId: string;
+  fileName: string;
+  docClass: DocClass;
+  skipReason: string;
+  relativePath: string | null;
+  fileSizeBytes: number | null;
+  kind: 'policy_skip' | 'error';
+};
+
+function inferPolicySkipIngestStatus(docClass: DocClass): IngestStatus {
+  if (docClass === 'requires_review') return 'requires_review';
+  return 'classified_only';
+}
+
+function buildIngestFinancialState(
+  staged: StagedIngestDoc[],
+  skippedDocs: SkippedIngestDoc[] = [],
+): FinancialState {
+  const state = emptyFinancialState();
+  const allTx: Transaction[] = [];
+
+  for (const sk of skippedDocs) {
+    const ingestStatus: IngestStatus = sk.kind === 'error'
+      ? 'requires_review'
+      : inferPolicySkipIngestStatus(sk.docClass);
+    const wr: ReviewReason = sk.kind === 'error' ? 'parse_failure' : 'ambiguous_doc_type';
+    state.documents.push({
+      id: sk.docId,
+      fileName: sk.fileName,
+      relativePath: sk.relativePath,
+      classification: sk.docClass,
+      confidence: 0.55,
+      ingestStatus,
+      requiresReview: ingestStatus !== 'ingested',
+      fileSizeBytes: sk.fileSizeBytes,
+    });
+    state.warnings.push({
+      type: wr,
+      detail: sk.skipReason,
+      documentId: sk.docId,
+    });
+  }
+
+  for (const s of staged) {
+    const ingestStatus: IngestStatus = 'ingested';
+    state.documents.push({
+      id: s.docId,
+      fileName: s.fileName,
+      relativePath: s.relativePath,
+      classification: s.docClass,
+      confidence: 0.7,
+      ingestStatus,
+      requiresReview: false,
+      fileSizeBytes: s.fileSizeBytes,
+    });
+
+    if (s.largePdfWarning) {
+      state.warnings.push({
+        type: 'large_pdf_requires_chunking',
+        detail:
+          'PDF exceeds single-call size guidance; chunked ingest not yet implemented — review extraction quality',
+        documentId: s.docId,
+      });
+    }
+
+    const { transactions, candidates } = buildTransactionsFromExpenseItems(
+      s.docId,
+      s.fileName,
+      s.extracted.extracted_data.expense_items.map((e) => ({
+        category: e.category,
+        description: e.description,
+        amount: e.amount,
+        date: e.date,
+        schedule_c_category: e.schedule_c_category ?? null,
+        confidence: e.confidence,
+        flags: e.flags,
+      })),
+    );
+    state.transactions.push(...transactions);
+    state.expenseCandidates.push(...candidates);
+    allTx.push(...transactions);
+    for (const t of transactions) {
+      state.auditTrail.push({ documentId: s.docId, transactionId: t.id });
+    }
+
+    const uncat = transactions.filter((t) => !t.scheduleCCategory);
+    if (uncat.length > 0) {
+      state.warnings.push({
+        type: 'ambiguous_doc_type',
+        detail:
+          `${uncat.length} bank expense line(s) have no Schedule C line (schedule_c_category null — pending adjudication)`,
+        documentId: s.docId,
+      });
+    }
+  }
+
+  state.patterns = detectPatterns(allTx);
+  state.confidence = staged.length + skippedDocs.length > 0 ? 0.85 : 1;
+  return state;
 }
 
 function arrayBufferToBase64(buffer: ArrayBuffer): string {
@@ -544,10 +734,12 @@ async function ingestFromUploadedDocuments(
     );
   }
 
-  const allExtracted: ExtractedData[] = [];
+  const staged: StagedIngestDoc[] = [];
+  const skippedDocs: SkippedIngestDoc[] = [];
   const processedFiles: Array<{ name: string; doc_type: string; status: string }> = [];
   const errors: Array<{ name: string; error: string }> = [];
   const results: IngestResult[] = [];
+  const ingestWarnings: Array<{ document_id: string; file_name: string; reason: string }> = [];
 
   for (const row of docRows as Array<{
     id: string;
@@ -576,6 +768,7 @@ async function ingestFromUploadedDocuments(
         filename: row.file_name ?? "",
         mimeType: mime,
         textSample: "",
+        relativePath: row.storage_object_path?.replace(/^\/+/, "") ?? "",
       });
       console.log(
         `[ingest] doc=${row.id} class=${classification.docClass} confidence=${classification.confidence} reasons=${classification.reasons.join("|")}`
@@ -583,19 +776,39 @@ async function ingestFromUploadedDocuments(
 
       const systemPrompt = pickSystemPrompt(classification.docClass);
       if (systemPrompt === null) {
-        console.log(`[ingest] doc=${row.id} class=${classification.docClass} → skipping LLM pass, recording as filed-only`);
+        const reason = `policy_skip:${classification.docClass}`;
+        console.log(`[ingest] doc=${row.id} class=${classification.docClass} → ${reason}`);
+        ingestWarnings.push({ document_id: row.id, file_name: row.file_name, reason });
+        skippedDocs.push({
+          docId: row.id,
+          fileName: row.file_name,
+          docClass: classification.docClass,
+          skipReason: reason,
+          relativePath: row.storage_object_path?.replace(/^\/+/, "") ?? null,
+          fileSizeBytes: null,
+          kind: 'policy_skip',
+        });
         results.push({
           documentId: row.id,
           docClass: classification.docClass,
           skipped: true,
-          skipReason: "non-dollar-bearing document class",
+          skipReason: reason,
         });
         processedFiles.push({ name: row.file_name, doc_type: classification.docClass, status: 'skipped' });
         continue;
       }
 
       const extracted = await analyzeDocumentRouter(base64, row.file_name, mime, systemPrompt);
-      allExtracted.push(extracted);
+      const byteLen = ab.byteLength;
+      staged.push({
+        docId: row.id,
+        fileName: row.file_name,
+        docClass: classification.docClass,
+        extracted,
+        relativePath: row.storage_object_path?.replace(/^\/+/, "") ?? null,
+        fileSizeBytes: byteLen,
+        largePdfWarning: byteLen > 50_000_000,
+      });
       results.push({ documentId: row.id, docClass: classification.docClass, extracted });
 
       await hub
@@ -646,13 +859,26 @@ async function ingestFromUploadedDocuments(
       const message = err instanceof Error ? err.message : String(err);
       console.error(`[ingest-tax-documents] Storage error ${row.file_name}: ${message}`);
       errors.push({ name: row.file_name, error: message });
+      skippedDocs.push({
+        docId: row.id,
+        fileName: row.file_name,
+        docClass: 'requires_review',
+        skipReason: message,
+        relativePath: row.storage_object_path?.replace(/^\/+/, "") ?? null,
+        fileSizeBytes: null,
+        kind: 'error',
+      });
       processedFiles.push({
         name: row.file_name,
-        doc_type: 'unknown',
+        doc_type: 'requires_review',
         status: 'error',
       });
     }
   }
+
+  const allExtracted = staged.map((s) => s.extracted);
+  const financialState = buildIngestFinancialState(staged, skippedDocs);
+  const taxKnowledge = retrieveTaxKnowledge({ patterns: financialState.patterns, broad: true });
 
   // Change 3: Cross-document dedup — financial statements never contribute income.
   // Bug 2 fix — previously 1099 income and the matching bank deposit were both summed.
@@ -704,6 +930,9 @@ async function ingestFromUploadedDocuments(
     analyzed_data: {
       pl_summary: plSummary,
       documents: allExtracted,
+      financial_state: financialState,
+      tax_knowledge: taxKnowledge,
+      ingest_warnings: ingestWarnings.length ? ingestWarnings : undefined,
       processed_files: processedFiles,
       errors: errors.length ? errors : undefined,
       source: 'storage_upload',
@@ -733,6 +962,9 @@ async function ingestFromUploadedDocuments(
     pl_summary: plSummary,
     aggregated_data,
     documents: allExtracted,
+    financial_state: financialState,
+    tax_knowledge: taxKnowledge,
+    ingest_warnings: ingestWarnings.length ? ingestWarnings : undefined,
   };
 }
 
@@ -780,10 +1012,10 @@ async function handleDriveList(
   }
 
   const { folderId, folderName } = folderResult;
-  const files = await listFilesInFolder(folderId);
+  const files = await listFilesRecursiveWithPaths(folderId, '', 0, 6);
   if (files.length === 0) {
     return new Response(
-      JSON.stringify({ error: 'No files found in the tax folder' }),
+      JSON.stringify({ error: 'No files found in the tax folder (recursive listing)' }),
       { status: 404, headers: { ...corsHeaders, 'Content-Type': 'application/json' } },
     );
   }
@@ -793,12 +1025,16 @@ async function handleDriveList(
       filename: f.name ?? "",
       mimeType: f.mimeType,
       textSample: "",
+      relativePath: f.relativePath,
     });
     return {
       id: f.id,
       name: f.name,
+      relativePath: f.relativePath,
       mimeType: f.mimeType,
+      size: f.size,
       analyzable: fileAnalyzable(classification),
+      doc_class: classification.docClass,
     };
   });
 
@@ -849,6 +1085,8 @@ async function handleDriveProcessSingle(
   fileMime: string | undefined,
   folderIdIn: string | undefined,
   folderNameIn: string | undefined,
+  /** From mode=list: e.g. CHASE 2022/2022.pdf — required for generic filenames */
+  relativePathIn?: string,
 ): Promise<Response> {
   let folderId = folderIdIn ?? '';
   let folderName = folderNameIn ?? '';
@@ -870,11 +1108,21 @@ async function handleDriveProcessSingle(
   const mimeHint = fileMime && fileMime.length > 0 ? fileMime : 'application/pdf';
 
   try {
-    const { base64, downloadMime } = await downloadFile(fileId, mimeHint);
+    const { base64, downloadMime, bytes } = await downloadFile(fileId, mimeHint);
+    const largeFileBytes = bytes.length;
+    const largeFileWarning =
+      largeFileBytes > 50_000_000
+        ? `file is ${Math.round(largeFileBytes / 1e6)}MB — single-shot LLM may fail; chunked PDF ingest not yet implemented`
+        : undefined;
+    if (largeFileWarning) {
+      console.warn(`[ingest] process_single ${fileName}: ${largeFileWarning}`);
+    }
+
     const classification: DocClassification = classifyDocument({
       filename: fileName ?? "",
       mimeType: downloadMime,
       textSample: "",
+      relativePath: relativePathIn,
     });
 
     const systemPrompt = pickSystemPrompt(classification.docClass);
@@ -885,8 +1133,10 @@ async function handleDriveProcessSingle(
         file_mime: downloadMime,
         docClass: classification.docClass,
         skipped: true,
-        skipReason: 'non-dollar-bearing document class',
+        skipReason: `policy_skip:${classification.docClass}`,
         status: 'skipped',
+        relative_path: relativePathIn,
+        file_size_bytes: largeFileBytes,
       };
       await mergeDriveIngestSession(hub, clientId, clientName, taxYear, folderId, folderName, rec);
 
@@ -896,6 +1146,9 @@ async function handleDriveProcessSingle(
           mode: 'process_single',
           document_id: fileId,
           doc_type: classification.docClass,
+          doc_class: classification.docClass,
+          relative_path: relativePathIn,
+          file_size_bytes: largeFileBytes,
           status: 'skipped',
           skip_reason: rec.skipReason,
         }),
@@ -942,6 +1195,8 @@ async function handleDriveProcessSingle(
       docClass: classification.docClass,
       extracted,
       status: 'success',
+      relative_path: relativePathIn,
+      file_size_bytes: largeFileBytes,
     };
     await mergeDriveIngestSession(hub, clientId, clientName, taxYear, folderId, folderName, rec);
 
@@ -951,6 +1206,11 @@ async function handleDriveProcessSingle(
         mode: 'process_single',
         document_id: fileId,
         doc_type: extracted.doc_type,
+        doc_class: classification.docClass,
+        relative_path: relativePathIn,
+        file_size_bytes: largeFileBytes,
+        ingest_status: 'ingested',
+        large_file_warning: largeFileWarning,
         status: 'success',
         extracted_data: extracted,
       }),
@@ -963,9 +1223,10 @@ async function handleDriveProcessSingle(
       file_id: fileId,
       file_name: fileName,
       file_mime: fileMime,
-      docClass: 'unknown',
+      docClass: 'requires_review',
       status: 'error',
       error: message,
+      relative_path: relativePathIn,
     };
     await mergeDriveIngestSession(hub, clientId, clientName, taxYear, folderId, folderName, rec);
 
@@ -1010,18 +1271,28 @@ async function handleDriveAggregate(
 
   const fileRecords = Object.values(session.files);
   const driveResults: IngestResult[] = [];
-  const allExtracted: ExtractedData[] = [];
+  const stagedDrive: StagedIngestDoc[] = [];
+  const skippedDrive: SkippedIngestDoc[] = [];
   const processedFiles: Array<{ name: string; doc_type: string; status: string }> = [];
   const errors: Array<{ name: string; error: string }> = [];
 
   for (const fr of fileRecords) {
     if (fr.status === 'success' && fr.extracted) {
+      const sz = fr.file_size_bytes ?? 0;
       driveResults.push({
         documentId: fr.file_id,
         docClass: fr.docClass,
         extracted: fr.extracted,
       });
-      allExtracted.push(fr.extracted);
+      stagedDrive.push({
+        docId: fr.file_id,
+        fileName: fr.file_name,
+        docClass: fr.docClass,
+        extracted: fr.extracted,
+        relativePath: fr.relative_path ?? null,
+        fileSizeBytes: fr.file_size_bytes ?? null,
+        largePdfWarning: sz > 50_000_000,
+      });
       processedFiles.push({
         name: fr.file_name,
         doc_type: fr.extracted.doc_type,
@@ -1034,6 +1305,15 @@ async function handleDriveAggregate(
         skipped: true,
         skipReason: fr.skipReason,
       });
+      skippedDrive.push({
+        docId: fr.file_id,
+        fileName: fr.file_name,
+        docClass: fr.docClass,
+        skipReason: fr.skipReason ?? 'skipped',
+        relativePath: fr.relative_path ?? null,
+        fileSizeBytes: fr.file_size_bytes ?? null,
+        kind: 'policy_skip',
+      });
       processedFiles.push({
         name: fr.file_name,
         doc_type: fr.docClass,
@@ -1044,14 +1324,27 @@ async function handleDriveAggregate(
         documentId: fr.file_id,
         docClass: fr.docClass,
       });
+      skippedDrive.push({
+        docId: fr.file_id,
+        fileName: fr.file_name,
+        docClass: fr.docClass,
+        skipReason: fr.error ?? 'error',
+        relativePath: fr.relative_path ?? null,
+        fileSizeBytes: fr.file_size_bytes ?? null,
+        kind: 'error',
+      });
       processedFiles.push({
         name: fr.file_name,
-        doc_type: 'unknown',
+        doc_type: 'requires_review',
         status: 'error',
       });
       if (fr.error) errors.push({ name: fr.file_name, error: fr.error });
     }
   }
+
+  const allExtracted = stagedDrive.map((s) => s.extracted);
+  const financialStateDrive = buildIngestFinancialState(stagedDrive, skippedDrive);
+  const taxKnowledgeDrive = retrieveTaxKnowledge({ patterns: financialStateDrive.patterns, broad: true });
 
   const driveIncomeSources = driveResults.filter(
     (r) => r.docClass === "income_1099" || r.docClass === "income_w2"
@@ -1108,6 +1401,9 @@ async function handleDriveAggregate(
       ...prev,
       pl_summary: plSummary,
       aggregated_data,
+      documents: allExtracted,
+      financial_state: financialStateDrive,
+      tax_knowledge: taxKnowledgeDrive,
       processed_files: processedFiles,
       errors: errors.length > 0 ? errors : undefined,
       source: 'drive_ingest',
@@ -1133,6 +1429,8 @@ async function handleDriveAggregate(
     errors: errors.length > 0 ? errors : undefined,
     pl_summary: plSummary,
     aggregated_data,
+    financial_state: financialStateDrive,
+    tax_knowledge: taxKnowledgeDrive,
   };
 
   return new Response(JSON.stringify(summary), {
@@ -1165,6 +1463,7 @@ serve(async (req: Request) => {
       file_mime,
       folder_id: body_folder_id,
       folder_name: body_folder_name,
+      relative_path,
     } = body as {
       client_name?: string;
       client_id?: string;
@@ -1176,6 +1475,8 @@ serve(async (req: Request) => {
       file_mime?: string;
       folder_id?: string;
       folder_name?: string;
+      /** From mode=list file entry — e.g. CHASE 2022/2022.pdf */
+      relative_path?: string;
     };
     const hubUrl = Deno.env.get('SUPABASE_URL');
     const hubKey = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY');
@@ -1266,6 +1567,7 @@ serve(async (req: Request) => {
         typeof file_mime === 'string' ? file_mime : undefined,
         typeof body_folder_id === 'string' ? body_folder_id : undefined,
         typeof body_folder_name === 'string' ? body_folder_name : undefined,
+        typeof relative_path === 'string' && relative_path.length > 0 ? relative_path : undefined,
       );
     }
 

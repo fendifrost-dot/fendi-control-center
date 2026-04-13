@@ -1,5 +1,8 @@
 import { createClient, type SupabaseClient } from 'https://esm.sh/@supabase/supabase-js@2.49.1';
 import { getAccessToken } from '../_shared/googleDriveUpload.ts';
+import type { ScheduleCCategoryKey } from '../_shared/categories.ts';
+
+export type { ScheduleCCategoryKey };
 
 const corsHeaders = {
   'Access-Control-Allow-Origin': '*',

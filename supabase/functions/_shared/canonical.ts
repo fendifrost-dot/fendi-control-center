@@ -1,3 +1,6 @@
+/** Re-export Schedule C keys for callers that build canonical summaries from ingest. */
+export type { ScheduleCCategoryKey } from "./categories.ts";
+
 /**
  * Canonical post-LLM tax summary shape.
  * Every numeric field is a non-negative number in dollars (2 decimal places allowed).
