@@ -1128,8 +1128,9 @@ async function createStatementChunkJob(
   const estimatedPages = Math.max(1, Math.min(150, Math.ceil(input.file_size_bytes / 1_000_000)));
   const estimatedChunkCount = Math.max(1, Math.ceil(estimatedPages / 5));
   const now = new Date().toISOString();
+  const jobId = crypto.randomUUID();
   const job: StatementChunkJob = {
-    job_id: crypto.randomUUID(),
+    job_id: jobId,
     client_id: clientId,
     tax_year: taxYear,
     file_id: input.file_id,
@@ -1143,6 +1144,31 @@ async function createStatementChunkJob(
     created_at: now,
     updated_at: now,
   };
+
+  // Determine source_type: if file_id looks like a storage path (contains '/'), it's storage
+  const sourceType = input.file_id.includes('/') ? 'storage' : 'drive';
+
+  // Persist durable job record in statement_chunk_jobs table
+  const { error: insertErr } = await hub.from('statement_chunk_jobs').insert({
+    id: jobId,
+    client_id: clientId,
+    tax_year: taxYear,
+    file_id: input.file_id,
+    file_name: input.file_name,
+    relative_path: input.relative_path,
+    source_type: sourceType,
+    file_size_bytes: input.file_size_bytes,
+    chunk_size_pages: 5,
+    chunk_count: estimatedChunkCount,
+    pages_total: estimatedPages,
+    status: 'requires_async_processing',
+  });
+  if (insertErr) {
+    console.error(`[ingest] Failed to insert statement_chunk_jobs row: ${insertErr.message}`);
+    // Non-fatal: continue with analyzed_data blob write as fallback
+  } else {
+    console.log(`[ingest] Durable chunk job created: id=${jobId} source_type=${sourceType}`);
+  }
 
   const existing = await getTaxReturn(hub, clientId, taxYear);
   const prev = (existing?.analyzed_data as Record<string, unknown> | null) || {};
