@@ -1625,24 +1625,65 @@ const AGENT_TOOLS: ToolDef[] = [
       assessment_id?: string;
     }) => {
       const { action, client_name, client_id, assessment_id } = params;
-      // Credit Compass = fairway-fixer-18 / Credit Guardian (same project); Lovable display name may say Credit Compass.
-      // Secrets: often same host as CREDIT_GUARDIAN_URL. This path uses Bearer → control-center-api (legacy shape).
-      // Fairway’s control-center-api handler is the same as cross-project-api and expects x-api-key — if CREDIT_COMPASS_URL
-      // points at Fairway and you get 401, align with CREDIT_GUARDIAN_KEY or refactor this tool to fetchCreditGuardian().
+      // Credit Compass is the same Fairway/Credit Guardian project in practice.
+      // Prefer the shared cross-project fetch path first to avoid brittle Lovable config drift.
+      const trySharedFetch = async (): Promise<string | null> => {
+        try {
+          let body: Record<string, unknown> | null = null;
+          switch (action) {
+            case "get_clients":
+              body = { action: "get_clients" };
+              break;
+            case "get_client_detail":
+            case "get_assessment": {
+              const cid = client_id ?? assessment_id;
+              if (!cid) return JSON.stringify({ error: "client_id or assessment_id required" });
+              body = { action: "get_client_detail", params: { client_id: cid } };
+              break;
+            }
+            case "get_dispute_letters": {
+              const cid = client_id ?? assessment_id;
+              if (!cid) return JSON.stringify({ error: "client_id or assessment_id required" });
+              body = { action: "get_documents", params: { client_id: cid } };
+              break;
+            }
+            default:
+              // create_assessment / generate_dispute_letters may rely on project-specific handlers.
+              return null;
+          }
+          const sharedResp = await fetchCreditGuardian(body);
+          const sharedText = await sharedResp.text();
+          if (!sharedResp.ok) {
+            return JSON.stringify({
+              error: `Credit Compass shared route failed: ${sharedResp.status}`,
+              detail: sharedText.slice(0, 2000),
+            });
+          }
+          return sharedText;
+        } catch (err: unknown) {
+          const msg = err instanceof Error ? err.message : String(err);
+          return JSON.stringify({ error: `Credit Compass shared route error: ${msg}` });
+        }
+      };
+
+      const sharedResult = await trySharedFetch();
+      if (sharedResult !== null) return sharedResult;
+
       const CREDIT_COMPASS_URL = Deno.env.get("CREDIT_COMPASS_URL");
       if (!CREDIT_COMPASS_URL) {
-        return JSON.stringify({ error: "CREDIT_COMPASS_URL secret is not set in this project" });
+        return JSON.stringify({
+          error:
+            "CREDIT_COMPASS_URL is not set and no shared-route mapping exists for this action",
+          action,
+        });
       }
-      // Service role or shared secret for the Credit Compass / Fairway project (CREDIT_COMPASS_KEY in CC Edge secrets).
       const compassKey = Deno.env.get("CREDIT_COMPASS_KEY") ?? "";
       if (!compassKey) {
         return JSON.stringify({
-          error:
-            "CREDIT_COMPASS_KEY is not set — add it to Control Center Edge Function secrets",
+          error: "CREDIT_COMPASS_KEY is not set for control-center-api fallback",
+          action,
         });
       }
-      // Auth strategy: try x-api-key first (matches Fairway cross-project-api contract),
-      // fall back to Bearer if that returns 401/403.
       const payload = JSON.stringify({ action, client_name, client_id, assessment_id });
       const endpoint = `${CREDIT_COMPASS_URL}/functions/v1/control-center-api`;
       try {
@@ -1668,6 +1709,11 @@ const AGENT_TOOLS: ToolDef[] = [
         }
         if (!resp.ok) {
           const detail = (await resp.text()).slice(0, 2000);
+          // 5xx from Lovable-side endpoint often indicates upstream misconfiguration; attempt shared route fallback.
+          if (resp.status >= 500) {
+            const fallback = await trySharedFetch();
+            if (fallback !== null) return fallback;
+          }
           return JSON.stringify({
             error: `Credit Compass returned ${resp.status} (tried x-api-key then Bearer)`,
             detail,
