@@ -635,7 +635,7 @@ async function fetchWorkflowRegistry(): Promise<WorkflowEntry[]> {
   }
 }
 
-async function sendHeaderOnce(taskId: string, chatId: string, model: "gemini" | "grok") {
+async function sendHeaderOnce(taskId: string, chatId: string, model: BotModel) {
   const headerText = `ð¤ *${SYSTEM_IDENTITY}* _(Model: ${getModelLabel(model)})_`;
   await enqueueTelegram(taskId, chatId, "sendMessage", {
     chat_id: chatId, text: headerText, parse_mode: "Markdown",
@@ -757,7 +757,15 @@ async function editMessageReplyMarkup(chatId: string, messageId: number) {
 }
 
 // âââ Model & conversation state helpers âââââââââââââââââââââââââ
-async function getActiveModel(chatId?: string): Promise<{ model: "gemini" | "grok"; session_created?: boolean }> {
+type BotModel = "claude" | "chatgpt" | "gemini" | "grok";
+
+function normalizeBotModel(v: unknown): BotModel {
+  const s = String(v ?? "").toLowerCase().trim();
+  if (s === "claude" || s === "chatgpt" || s === "gemini" || s === "grok") return s;
+  return "claude";
+}
+
+async function getActiveModel(chatId?: string): Promise<{ model: BotModel; session_created?: boolean }> {
   // Try chat-scoped session first
   if (chatId) {
     const { data: session } = await supabase
@@ -765,9 +773,7 @@ async function getActiveModel(chatId?: string): Promise<{ model: "gemini" | "gro
       .select("setting_value")
       .eq("setting_key", `session:${chatId}:active_model`)
       .single();
-    if (session?.setting_value) {
-      return { model: session.setting_value === "grok" ? "grok" : "gemini" };
-    }
+    if (session?.setting_value) return { model: normalizeBotModel(session.setting_value) };
   }
 
   // Fall back to global setting
@@ -777,19 +783,20 @@ async function getActiveModel(chatId?: string): Promise<{ model: "gemini" | "gro
     .eq("setting_key", "ai_model")
     .single();
 
-  if (data?.setting_value) {
-    return { model: data.setting_value === "grok" ? "grok" : "gemini" };
-  }
+  if (data?.setting_value) return { model: normalizeBotModel(data.setting_value) };
 
-  // No session exists â default to grok
-  return { model: "grok", session_created: true };
+  // No session exists — default to Claude-first policy.
+  return { model: "claude", session_created: true };
 }
 
-function getModelLabel(model: "gemini" | "grok"): string {
-  return model === "grok" ? "Grok" : "Gemini";
+function getModelLabel(model: BotModel): string {
+  if (model === "claude") return "Claude";
+  if (model === "chatgpt") return "ChatGPT";
+  if (model === "grok") return "Grok";
+  return "Gemini";
 }
 
-function formatAssistantMessage(model: "gemini" | "grok", text: string): string {
+function formatAssistantMessage(model: BotModel, text: string): string {
   return `ð¤ *${SYSTEM_IDENTITY}* _(Model: ${getModelLabel(model)})_\n\n${text}`;
 }
 
@@ -808,7 +815,7 @@ function isExplicitModelSwitchRequest(userMessage: string, targetModel?: string)
 type ConversationTurn = {
   role: "user" | "assistant";
   content: string;
-  model: "gemini" | "grok";
+  model: BotModel;
   at: string;
 };
 
@@ -887,10 +894,10 @@ async function resolveSession(chatId: string): Promise<{ id: string; active_mode
 
   if (existing) return existing;
 
-  // Create new session (default model: grok)
+  // Create new session (default model: claude)
   const { data: created, error } = await supabase
     .from("sessions")
-    .insert({ channel: "telegram", channel_user_id: chatId, active_model: "grok", context: {} })
+    .insert({ channel: "telegram", channel_user_id: chatId, active_model: "claude", context: {} })
     .select("id, active_model")
     .single();
 
@@ -1185,11 +1192,11 @@ const AGENT_TOOLS: ToolDef[] = [
   },
   {
     name: "switch_ai_model",
-    description: "Switch the active AI model between 'gemini' and 'grok'. This is only allowed when the user explicitly requests a switch.",
-    parameters: { type: "object", properties: { model: { type: "string", enum: ["gemini", "grok"], description: "The model to switch to" } }, required: ["model"] },
+    description: "Switch the active AI model. Allowed: claude, chatgpt, gemini, grok. This is only allowed when the user explicitly requests a switch.",
+    parameters: { type: "object", properties: { model: { type: "string", enum: ["claude", "chatgpt", "gemini", "grok"], description: "The model to switch to" } }, required: ["model"] },
     destructive: true,
     execute: async (args: any) => {
-      const nextModel = args.model === "grok" ? "grok" : "gemini";
+      const nextModel = normalizeBotModel(args.model);
       await supabase.from("bot_settings").upsert({ setting_key: "ai_model", setting_value: nextModel, updated_at: new Date().toISOString() }, { onConflict: "setting_key" });
       return `Switched to ${nextModel}.`;
     },
@@ -3372,6 +3379,47 @@ async function agenticClaudeCall(
   }
 }
 
+async function agenticCallByModel(
+  model: BotModel,
+  userMessage: string,
+  docContext: string,
+  conversationContext: string,
+  allowedToolNames?: string[],
+  workflowKey?: string,
+): Promise<{ text: string; toolCalls: Array<{ name: string; args: any }> }> {
+  // Policy: Claude/ChatGPT preference -> Gemini fallback; Grok remains last-resort.
+  if (model === "claude" || model === "chatgpt") {
+    if (anthropicApiKeyConfigured()) {
+      return await agenticClaudeCall(
+        userMessage,
+        docContext,
+        conversationContext,
+        allowedToolNames,
+        workflowKey,
+      );
+    }
+    return await agenticGeminiCall(
+      userMessage,
+      docContext,
+      conversationContext,
+      allowedToolNames,
+      workflowKey,
+    );
+  }
+  if (model === "grok") {
+    return await (anthropicApiKeyConfigured()
+      ? agenticClaudeCall(userMessage, docContext, conversationContext, allowedToolNames, workflowKey)
+      : agenticGrokCall(userMessage, docContext, conversationContext, allowedToolNames, workflowKey));
+  }
+  return await agenticGeminiCall(
+    userMessage,
+    docContext,
+    conversationContext,
+    allowedToolNames,
+    workflowKey,
+  );
+}
+
 // âââ Execution logging helpers âââââââââââââââââââââââââââââââââ
 
 async function logToolAttempt(requestId: string, toolName: string, args: any, model: string, chatId: string, userMessage: string): Promise<string> {
@@ -3424,7 +3472,7 @@ async function runDeterministicManualTaxTools(
   chatId: string,
   text: string,
   taskId: string,
-  replyModel: "grok" | "gemini",
+  replyModel: BotModel,
 ): Promise<boolean> {
   console.log("[telegram] checking deterministic manual tax:", text.slice(0, 300));
   const incomeArgs = tryParseManualIncomeMessage(text);
@@ -3481,7 +3529,7 @@ async function executeAgenticLoop(
   userMessage: string,
   opts: {
     taskId: string;
-    sessionModel: "grok" | "gemini" | "chatgpt";
+    sessionModel: BotModel;
     lane?: "lane1_do" | "lane2_assistant" | "lane3_autonomous";
     allowTools?: boolean;
     workflowKey?: string;
@@ -3596,7 +3644,7 @@ async function executeAgenticLoop(
 
   logEvent({ event: "workflow_tools_loaded", workflow: opts.workflowKey, tools: workflowToolNames || "all", taskId: opts.taskId });
 
-  const model: "grok" | "gemini" = opts.sessionModel === "chatgpt" ? "grok" : opts.sessionModel as "grok" | "gemini";
+  const model: BotModel = normalizeBotModel(opts.sessionModel);
   let docContext = await getRecentDocContext();
   const requestId = crypto.randomUUID();
 
@@ -3649,11 +3697,14 @@ async function executeAgenticLoop(
         toolCalls: [{ name: "find_playlist_opportunities", args: { track_name: inferredTrack } }],
       };
     } else {
-      result = model === "grok"
-        ? await (anthropicApiKeyConfigured()
-          ? agenticClaudeCall(userMessage, docContext, conversationContext, workflowToolNames, opts.workflowKey)
-          : agenticGrokCall(userMessage, docContext, conversationContext, workflowToolNames, opts.workflowKey))
-        : await agenticGeminiCall(userMessage, docContext, conversationContext, workflowToolNames, opts.workflowKey);
+      result = await agenticCallByModel(
+        model,
+        userMessage,
+        docContext,
+        conversationContext,
+        workflowToolNames,
+        opts.workflowKey,
+      );
     }
   } else if (opts.workflowKey === "analyze_credit_strategy") {
     const inferredClient = extractClientNameForCreditCommand(userMessage, conversationContext);
@@ -3664,11 +3715,14 @@ async function executeAgenticLoop(
         toolCalls: [{ name: "analyze_credit_strategy", args: { client_name: inferredClient } }],
       };
     } else {
-      result = model === "grok"
-        ? await (anthropicApiKeyConfigured()
-          ? agenticClaudeCall(userMessage, docContext, conversationContext, workflowToolNames, opts.workflowKey)
-          : agenticGrokCall(userMessage, docContext, conversationContext, workflowToolNames, opts.workflowKey))
-        : await agenticGeminiCall(userMessage, docContext, conversationContext, workflowToolNames, opts.workflowKey);
+      result = await agenticCallByModel(
+        model,
+        userMessage,
+        docContext,
+        conversationContext,
+        workflowToolNames,
+        opts.workflowKey,
+      );
     }
   } else if (opts.workflowKey === "drive_ingest") {
     const cgExplicit = opts.explicitCreditGuardianIngest === true;
@@ -3744,11 +3798,14 @@ async function executeAgenticLoop(
         toolCalls: [],
       };
     } else {
-      result = model === "grok"
-        ? await (anthropicApiKeyConfigured()
-          ? agenticClaudeCall(userMessage, docContext, conversationContext, workflowToolNames, opts.workflowKey)
-          : agenticGrokCall(userMessage, docContext, conversationContext, workflowToolNames, opts.workflowKey))
-        : await agenticGeminiCall(userMessage, docContext, conversationContext, workflowToolNames, opts.workflowKey);
+      result = await agenticCallByModel(
+        model,
+        userMessage,
+        docContext,
+        conversationContext,
+        workflowToolNames,
+        opts.workflowKey,
+      );
     }
   } else if (opts.workflowKey === "generate_tax_docs") {
     const inferredClient = extractClientNameForTaxCommand(userMessage);
@@ -3771,18 +3828,24 @@ async function executeAgenticLoop(
         }],
       };
     } else {
-      result = model === "grok"
-        ? await (anthropicApiKeyConfigured()
-          ? agenticClaudeCall(userMessage, docContext, conversationContext, workflowToolNames, opts.workflowKey)
-          : agenticGrokCall(userMessage, docContext, conversationContext, workflowToolNames, opts.workflowKey))
-        : await agenticGeminiCall(userMessage, docContext, conversationContext, workflowToolNames, opts.workflowKey);
+      result = await agenticCallByModel(
+        model,
+        userMessage,
+        docContext,
+        conversationContext,
+        workflowToolNames,
+        opts.workflowKey,
+      );
     }
   } else {
-    result = model === "grok"
-      ? await (anthropicApiKeyConfigured()
-        ? agenticClaudeCall(userMessage, docContext, conversationContext, workflowToolNames, opts.workflowKey)
-        : agenticGrokCall(userMessage, docContext, conversationContext, workflowToolNames, opts.workflowKey))
-      : await agenticGeminiCall(userMessage, docContext, conversationContext, workflowToolNames, opts.workflowKey);
+    result = await agenticCallByModel(
+      model,
+      userMessage,
+      docContext,
+      conversationContext,
+      workflowToolNames,
+      opts.workflowKey,
+    );
   }
   logEvent({ event: "ai_response", taskId: opts.taskId, workflow: opts.workflowKey, model, toolCalls: result.toolCalls.length, hasText: !!result.text });
   await supabase.from("tasks").update({ result_json: { progress_step: "E_ai_done", tool_count: result.toolCalls.length, execution_lock: lockId } }).eq("id", opts.taskId);
@@ -3865,7 +3928,7 @@ async function executeAgenticLoop(
     // HARD BLOCK: switch_ai_model is NEVER allowed inside the agentic loop.
     // Model switching is handled exclusively by /model command before the loop runs.
     if (tc.name === "switch_ai_model") {
-      toolResults.push("ð Model switching is blocked inside the execution loop. Use `/model grok` or `/model gemini` explicitly.");
+      toolResults.push("ð Model switching is blocked inside the execution loop. Use `/model claude`, `/model chatgpt`, `/model gemini`, or `/model grok` explicitly.");
       continue;
     }
 
@@ -4522,7 +4585,7 @@ serve(async (req) => {
     }
 
     // Determine if this is an explicit model request (for requested_model field only — no mutation)
-    const modelRequestMatch = text.match(/^\/model\s+(grok|gemini|chatgpt)$/i);
+    const modelRequestMatch = text.match(/^\/model\s+(claude|chatgpt|grok|gemini)$/i);
     const requestedModel = modelRequestMatch ? modelRequestMatch[1].toLowerCase() : null;
 
     const routingClearAndContinue =
@@ -4570,7 +4633,7 @@ serve(async (req) => {
           return new Response("ok");
         }
         await sendMessage(chatId, `📋 Queued: \`${taskId}\``, {}, `task:${taskId}:queued`);
-        const modelForPitch = (session.active_model === "grok" ? "grok" : "gemini") as "grok" | "gemini";
+        const modelForPitch = normalizeBotModel(session.active_model);
         const ids = [...pendingBulkEarly.playlist_ids];
         await clearPendingPitchBulk(chatId);
         for (const pid of ids) {
@@ -4632,7 +4695,7 @@ serve(async (req) => {
           return new Response("ok");
         }
         await sendMessage(chatId, `📋 Queued: \`${taskId}\``, {}, `task:${taskId}:queued`);
-        const modelForPitch = (session.active_model === "grok" ? "grok" : "gemini") as "grok" | "gemini";
+        const modelForPitch = normalizeBotModel(session.active_model);
         await clearPendingPitchTier3(chatId);
         try {
           const res = await callFanFuelHub("execute-pitch", {
@@ -4721,7 +4784,7 @@ serve(async (req) => {
           return new Response("ok");
         }
         await clearPlaylistConfirm(chatId);
-        const modelForPlaylist = (session.active_model === "grok" ? "grok" : "gemini") as "grok" | "gemini";
+        const modelForPlaylist = normalizeBotModel(session.active_model);
         try {
           const out = await runPlaylistHubResearch(pendingPlaylistEarly.track_name, userVibe, chatId);
           await sendMessage(chatId, formatAssistantMessage(modelForPlaylist, out), {}, `task:${taskId}:playlist-result`);
@@ -4952,7 +5015,7 @@ serve(async (req) => {
       }
     }
 
-    const modelPitch = (session.active_model === "grok" ? "grok" : "gemini") as "grok" | "gemini";
+    const modelPitch = normalizeBotModel(session.active_model);
 
     if (await runDeterministicManualTaxTools(chatId, text, taskId, modelPitch)) {
       _currentTaskId = null;
@@ -5227,7 +5290,7 @@ serve(async (req) => {
     ) {
       const conv = await buildConversationContext(chatId);
       const trackNl = extractPlaylistTrackName(text, conv);
-      const modelNl = (session.active_model === "grok" ? "grok" : "gemini") as "grok" | "gemini";
+      const modelNl = normalizeBotModel(session.active_model);
 
       if (trackNl) {
         const inferredNl = inferVibeFromTrack(trackNl);
@@ -5312,7 +5375,7 @@ serve(async (req) => {
     const explicitCgIngestIntent = isExplicitCreditGuardianIngestIntent(lowerText);
 
     if (explicitCgIngestIntent && !IMPLEMENTED_WORKFLOW_KEYS.has("drive_ingest")) {
-      const modelCg = (session.active_model === "grok" ? "grok" : "gemini") as "grok" | "gemini";
+      const modelCg = normalizeBotModel(session.active_model);
       await sendMessage(
         chatId,
         formatAssistantMessage(
@@ -5558,7 +5621,7 @@ serve(async (req) => {
             lane: "lane1_do",
             allowTools: true,
             workflowKey: autoPromotedWorkflow.key,
-            sessionModel: session.active_model as "grok" | "gemini" | "chatgpt",
+            sessionModel: normalizeBotModel(session.active_model),
             explicitCreditGuardianIngest: explicitCgIngestIntent && autoPromotedWorkflow.key === "drive_ingest",
           }),
           new Promise<never>((_, reject) => setTimeout(() => reject(new Error("TIMEOUT")), 55000)),
@@ -5610,7 +5673,7 @@ serve(async (req) => {
 
     if (text.toLowerCase() === "/model") {
       await setShortcutAttribution(taskId, "model");
-      await sendMessage(chatId, `ð¤ *${SYSTEM_IDENTITY}*\n\nActive model: *${getModelLabel(session.active_model as any)}*\nð Model switching is locked until you explicitly run /model grok or /model gemini.`);
+      await sendMessage(chatId, `ð¤ *${SYSTEM_IDENTITY}*\n\nActive model: *${getModelLabel(normalizeBotModel(session.active_model))}*\nð Model switching is locked until you explicitly run /model claude, /model chatgpt, /model gemini, or /model grok.`);
       await supabase.from("tasks").update({ status: "succeeded", result_json: { execution_lane: "shortcut", progress_step: "shortcut_model", action: "model_check", active_model: session.active_model } }).eq("id", taskId);
       await sendMessage(chatId, `â Done: \`${taskId}\``);
       return new Response("ok");
@@ -5659,7 +5722,7 @@ serve(async (req) => {
         const statusTool = AGENT_TOOLS.find(t => t.name === "get_system_status");
         const statusResult = statusTool ? await statusTool.execute({}) : "Tool get_system_status not found";
         const health = systemHealthCheck();
-        const model = session.active_model as "grok" | "gemini";
+        const model = normalizeBotModel(session.active_model);
 
         // Parse and format status into human-readable text
         let formattedStatus: string;
@@ -6177,7 +6240,7 @@ serve(async (req) => {
             lane: "lane1_do",
             allowTools: true,
             workflowKey: chosen!.key,
-            sessionModel: session.active_model as "grok" | "gemini" | "chatgpt",
+            sessionModel: normalizeBotModel(session.active_model),
             explicitCreditGuardianIngest: chosen!.key === "drive_ingest" && explicitCgForDo,
           }),
           timeoutPromise,
@@ -6234,7 +6297,7 @@ serve(async (req) => {
         await Promise.race([
           executeAgenticLoop(chatId, text, {
             taskId: autonomousTaskId,
-            sessionModel: session.active_model as "grok" | "gemini" | "chatgpt",
+            sessionModel: normalizeBotModel(session.active_model),
             lane: "lane3_autonomous",
             allowTools: true,
             workflowKey: "free_agent",
@@ -6288,7 +6351,7 @@ serve(async (req) => {
               lane: "lane1_do",
               allowTools: true,
               workflowKey: nlMatch.key,
-              sessionModel: session.active_model as "grok" | "gemini" | "chatgpt",
+              sessionModel: normalizeBotModel(session.active_model),
             }),
             new Promise<never>((_, reject) =>
               setTimeout(() => reject(new Error("TIMEOUT")), 55000)
@@ -6319,7 +6382,7 @@ serve(async (req) => {
     const lane2Start = Date.now();
     await supabase.from("tasks").update({ status: "running", selected_workflow: "lane2_assistant", result_json: { execution_lane: "lane2_assistant", progress_step: "lane2_start" } }).eq("id", taskId);
 
-    const model: "grok" | "gemini" = (session.active_model === "chatgpt" ? "grok" : session.active_model) as "grok" | "gemini";
+    const model: BotModel = normalizeBotModel(session.active_model);
     let lane2Status: "succeeded" | "failed" = "succeeded";
     let lane2Error: string | null = null;
     let assistantReply: string = "";
@@ -6373,7 +6436,27 @@ Be concise, professional, and use emoji sparingly.`;
       );
 
       let aiResponse: string;
-      if (model === "grok") {
+      if (model === "claude" || model === "chatgpt") {
+        try {
+          aiResponse = await callClaude(assistantSystemPrompt, text, 1024);
+        } catch (claudeErr) {
+          console.error("[LANE2] Claude failed, trying Gemini fallback:", claudeErr);
+          const resp = await Promise.race([fetch(
+            `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${GEMINI_KEY}`,
+            {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({
+                contents: [{ role: "user", parts: [{ text }] }],
+                systemInstruction: { parts: [{ text: assistantSystemPrompt }] },
+                generationConfig: { maxOutputTokens: 1024 },
+              }),
+            }
+          ), assistantTimeout]);
+          const data = await resp.json();
+          aiResponse = data.candidates?.[0]?.content?.parts?.[0]?.text || "I'm not sure how to help with that. Try /workflows.";
+        }
+      } else if (model === "grok") {
         const resp = await Promise.race([fetch("https://api.x.ai/v1/chat/completions", {
           method: "POST",
           headers: { Authorization: `Bearer ${GROK_KEY}`, "Content-Type": "application/json" },
