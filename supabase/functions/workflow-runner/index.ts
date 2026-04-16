@@ -114,7 +114,7 @@ async function handleProcessAsyncStatements(run: Run, supabase: ReturnType<typeo
       .eq("tax_year", ls.tax_year);
     if (ls.client_id) query = query.eq("client_id", ls.client_id);
     const { data: jobs } = await query;
-    allIds = (jobs ?? []).map((j: { id: string }) => j.id);
+    allIds = (jobs ?? []).map((j) => j.id as string);
   }
 
   if (allIds.length === 0) {
@@ -127,8 +127,8 @@ async function handleProcessAsyncStatements(run: Run, supabase: ReturnType<typeo
     .select("id, status")
     .in("id", allIds);
 
-  const pending = (currentJobs ?? []).filter((j: { status: string }) =>
-    PENDING_CHUNK_STATUSES.has(j.status)
+  const pending = (currentJobs ?? []).filter((j) =>
+    PENDING_CHUNK_STATUSES.has(j.status as string)
   );
 
   if (pending.length > 0) {
@@ -208,7 +208,7 @@ async function handleFinalize(run: Run) {
   };
 }
 
-type HandlerFn = (run: Run, supabase: ReturnType<typeof createClient>) => Promise<Record<string, unknown>>;
+type HandlerFn = (run: Run, supabase: any) => Promise<Record<string, unknown>>;
 
 const HANDLERS: Record<Stage, HandlerFn> = {
   load_state: handleLoadState,
