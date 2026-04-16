@@ -18,6 +18,7 @@ import {
   type RetrievalCompositionOptions,
 } from "../_shared/creditKnowledgeRetrieval.ts";
 import { validateDisputeStrategy } from "../_shared/validateDisputeStrategy.ts";
+import { getAccessToken, searchDriveFolder, uploadFileToDrive } from "../_shared/googleDriveUpload.ts";
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
@@ -27,6 +28,17 @@ const corsHeaders = {
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
 const SUPABASE_SERVICE_ROLE_KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
 const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
+
+function normalizeDriveRootId(): string | null {
+  const raw = Deno.env.get("DRIVE_FOLDER_ID");
+  if (!raw) return null;
+  return raw.includes("/folders/") ? raw.split("/folders/").pop()!.split("?")[0] : raw;
+}
+
+function displayNameFromDetail(d: Record<string, unknown>): string {
+  const n = d.name ?? d.legal_name ?? d.preferred_name;
+  return typeof n === "string" && n.trim() ? n.trim() : "Client";
+}
 
 serve(async (req) => {
   if (req.method === "OPTIONS") return new Response(null, { headers: corsHeaders });
@@ -191,11 +203,50 @@ serve(async (req) => {
       .single();
     if (error) throw error;
 
+    let driveUpload: {
+      attempted: boolean;
+      uploaded: boolean;
+      file_name?: string;
+      web_view_link?: string;
+      error?: string;
+    } = { attempted: false, uploaded: false };
+
+    if (Deno.env.get("DISPUTE_LETTERS_UPLOAD_DRIVE") !== "false") {
+      const root = normalizeDriveRootId();
+      if (root) {
+        driveUpload.attempted = true;
+        try {
+          const token = await getAccessToken();
+          const label = displayNameFromDetail(detailObj);
+          let folderId = await searchDriveFolder(token, label, root);
+          if (!folderId) folderId = await searchDriveFolder(token, label.toUpperCase(), root);
+          if (folderId) {
+            const safeBureau = String(draft.bureau || "bureau").replace(/[^\w\-]+/g, "_").slice(0, 40);
+            const fname = `Dispute-${safeBureau}-${String(row.id).slice(0, 8)}.txt`;
+            const textBody = new TextEncoder().encode(
+              `Subject: ${assembled.subject}\n\n${assembled.letterBody}`,
+            );
+            const up = await uploadFileToDrive(token, fname, textBody, "text/plain", folderId);
+            driveUpload = {
+              attempted: true,
+              uploaded: true,
+              file_name: fname,
+              web_view_link: up.webViewLink,
+            };
+          }
+        } catch (e) {
+          driveUpload.error = e instanceof Error ? e.message : String(e);
+          console.error("[generate-dispute-letters] Drive upload failed:", e);
+        }
+      }
+    }
+
     return new Response(JSON.stringify({
       ok: true,
       letter_id: row.id,
       created_at: row.created_at,
       draft,
+      drive_upload: driveUpload,
     }), {
       headers: { ...corsHeaders, "Content-Type": "application/json" },
     });

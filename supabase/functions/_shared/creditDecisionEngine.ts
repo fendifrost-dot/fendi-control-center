@@ -175,6 +175,12 @@ export function inferCreditWorkflowKey(lowerText: string): CreditWorkflowDecisio
   let workflowKey: CreditWorkflowKey = "analyze_credit_strategy";
   let confidence = 0.55;
 
+  /** Pronoun-led credit references — below auto-exec threshold so Telegram can still rescue with session binding. */
+  if (/\b(her|his|their)\s+(credit|report|file|dispute|case)\b/i.test(lowerText)) {
+    reasons.push("credit_pronoun_reference");
+    return { workflowKey: "analyze_credit_strategy", confidence: 0.58, reasons };
+  }
+
   const drive = firstMatchReason(DRIVE_INGEST_PATTERNS, lowerText, "drive_ingest");
   if (drive) {
     reasons.push(drive);
@@ -213,6 +219,36 @@ export function shouldAutoExecuteCreditIntent(lowerText: string): boolean {
   if (isExplicitCreditGuardianIngestIntent(lowerText)) return true;
   const d = inferCreditWorkflowKey(lowerText);
   return d.confidence >= 0.6;
+}
+
+/**
+ * Lane 2 only: general credit education / definitions without an execution request.
+ * When false and credit tools are implied, routing should prefer Lane 1.
+ */
+export function isCreditInformationalOnly(lowerText: string): boolean {
+  const t = lowerText.trim();
+  if (!/\b(credit|bureau|fico|score|tradeline|dispute|equifax|experian|transunion|guardian)\b/i.test(t)) {
+    return false;
+  }
+  if (
+    /\b(analyze|generate|run|execute|sync|ingest|pull|create|send|letter|compare|review|check|file|upload|add\s+to)\b/i.test(t)
+  ) {
+    return false;
+  }
+  if (/^(what|how|why|when|who|explain|define|tell me about|is it true|can you explain)\b/i.test(t)) {
+    return true;
+  }
+  if (/\b(what is|what's)\b.*\b(credit score|fico|apr|utilization)\b/i.test(t)) {
+    return true;
+  }
+  return false;
+}
+
+/** Borderline credit workflow (e.g. pronoun reference at 0.58) — promote to Lane 1 without lowering global auto-exec threshold. */
+export function shouldRescueCreditLane1(lowerText: string): boolean {
+  if (isExplicitCreditGuardianIngestIntent(lowerText)) return false;
+  const d = inferCreditWorkflowKey(lowerText);
+  return d.confidence >= 0.55 && d.confidence < 0.6 && d.reasons[0] !== "no_credit_match";
 }
 
 export interface CaseMemorySnippetRow {

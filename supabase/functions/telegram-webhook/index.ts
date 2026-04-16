@@ -21,8 +21,10 @@ import { createOrResumeWorkflowRun, resolveIntent } from "../_shared/workflowEng
 import {
   extractCreditGuardianClientNameForIngest,
   inferCreditWorkflowKey,
+  isCreditInformationalOnly,
   isExplicitCreditGuardianIngestIntent,
   shouldAutoExecuteCreditIntent,
+  shouldRescueCreditLane1,
 } from "../_shared/creditDecisionEngine.ts";
 import { resolveDriveIngestFilterKey } from "../_shared/driveClientAlias.ts";
 import {
@@ -460,6 +462,20 @@ const SYNTHETIC_DRIVE_INGEST: WorkflowEntry = {
 function resolveAutoCreditWorkflow(lowerText: string): WorkflowEntry | undefined {
   if (!shouldAutoExecuteCreditIntent(lowerText)) return undefined;
   const d = inferCreditWorkflowKey(lowerText);
+  if (d.workflowKey === "credit_analysis_and_disputes" && IMPLEMENTED_WORKFLOW_KEYS.has("credit_analysis_and_disputes")) {
+    return SYNTHETIC_CREDIT_ANALYSIS_AND_DISPUTES;
+  }
+  if (d.workflowKey === "drive_ingest" && IMPLEMENTED_WORKFLOW_KEYS.has("drive_ingest")) {
+    return SYNTHETIC_DRIVE_INGEST;
+  }
+  if (d.workflowKey === "analyze_credit_strategy" && IMPLEMENTED_WORKFLOW_KEYS.has("analyze_credit_strategy")) {
+    return SYNTHETIC_ANALYZE_CREDIT_STRATEGY;
+  }
+  return undefined;
+}
+
+/** Lane 1 rescue when confidence is 0.55–0.59 (e.g. pronoun-led credit reference). */
+function syntheticWorkflowForCreditDecision(d: ReturnType<typeof inferCreditWorkflowKey>): WorkflowEntry | undefined {
   if (d.workflowKey === "credit_analysis_and_disputes" && IMPLEMENTED_WORKFLOW_KEYS.has("credit_analysis_and_disputes")) {
     return SYNTHETIC_CREDIT_ANALYSIS_AND_DISPUTES;
   }
@@ -2843,6 +2859,47 @@ async function clearPlaylistConfirm(chatId: string): Promise<void> {
   await supabase.from("bot_settings").delete().eq("setting_key", playlistConfirmKey(chatId));
 }
 
+type CreditClientBinding = {
+  cg_client_id: string;
+  display_name: string;
+  updated_at: string;
+};
+
+function creditClientBindingKey(chatId: string): string {
+  return `session:${chatId}:credit_client_binding`;
+}
+
+async function getCreditClientBinding(chatId: string): Promise<CreditClientBinding | null> {
+  const { data } = await supabase
+    .from("bot_settings")
+    .select("setting_value")
+    .eq("setting_key", creditClientBindingKey(chatId))
+    .maybeSingle();
+  if (!data?.setting_value) return null;
+  try {
+    const p = JSON.parse(data.setting_value) as CreditClientBinding;
+    if (p && typeof p.cg_client_id === "string" && typeof p.display_name === "string") return p;
+  } catch { /* ignore */ }
+  return null;
+}
+
+async function setCreditClientBinding(chatId: string, state: CreditClientBinding): Promise<void> {
+  await supabase.from("bot_settings").upsert(
+    {
+      setting_key: creditClientBindingKey(chatId),
+      setting_value: JSON.stringify(state),
+      updated_at: new Date().toISOString(),
+    },
+    { onConflict: "setting_key" },
+  );
+}
+
+function isShortCreditAffirmation(raw: string): boolean {
+  const t = raw.trim().toLowerCase();
+  return /^(yes|y|ok|yeah|yep|sure|please|proceed|go ahead|that's it|thats it|do it|run it|confirm|continue)\b/i.test(t) ||
+    /^(yes|y|ok)\s*[!.]*$/i.test(t);
+}
+
 // ─── Last playlist research (pitch report / pitch N) ─────────────────
 type LastPlaylistResearch = {
   track_name: string;
@@ -3066,6 +3123,30 @@ function extractPlaylistTrackName(userMessage: string, conversationContext: stri
 
 function extractClientNameForCreditCommand(userMessage: string, conversationContext: string): string | null {
   const combined = `${userMessage}\n${conversationContext}`;
+  const creditCue = /\b(credit|dispute|bureau|equifax|experian|transunion|tradeline|report|strateg)/i.test(userMessage);
+
+  const forName = userMessage.match(
+    /\b(?:for|about|regarding)\s+["']?([A-Za-z][A-Za-z0-9\s.'-]{1,78})["']?\s*(?:[.,!?]|$|\n)/i,
+  );
+  if (forName?.[1] && creditCue) {
+    const name = forName[1].replace(/\b(the|a|my|our|client)\b/gi, "").trim();
+    if (name.length >= 2 && name.length <= 80 && !/^(credit|report|dispute|client)$/i.test(name)) return name;
+  }
+
+  const reportFor = userMessage.match(
+    /\b(?:credit\s+)?report\s+for\s+["']?([A-Za-z][A-Za-z0-9\s.'-]{1,78})/i,
+  );
+  if (reportFor?.[1]) {
+    const name = reportFor[1].replace(/\b(the|a|my|our)\b/gi, "").trim();
+    if (name.length >= 2 && name.length <= 80) return name;
+  }
+
+  const disputeFor = userMessage.match(/\bdispute\s+(?:letter\s+)?for\s+["']?([A-Za-z][A-Za-z0-9\s.'-]{1,78})/i);
+  if (disputeFor?.[1]) {
+    const name = disputeFor[1].replace(/\b(the|a|my|our)\b/gi, "").trim();
+    if (name.length >= 2 && name.length <= 80) return name;
+  }
+
   const explicit = userMessage.match(
     /\banaly[sz]e\s+(.+?)\s+(?:new\s+)?(?:equifax|experian|transunion)?\s*credit\s+reports?\b/i,
   );
@@ -3707,12 +3788,33 @@ async function executeAgenticLoop(
       );
     }
   } else if (opts.workflowKey === "analyze_credit_strategy") {
-    const inferredClient = extractClientNameForCreditCommand(userMessage, conversationContext);
-    if (inferredClient) {
-      logEvent({ event: "credit_client_inferred", taskId: opts.taskId, inferredClient });
+    const binding = await getCreditClientBinding(chatId);
+    const explicitFromMessage = extractClientNameForCreditCommand(userMessage, conversationContext);
+    const pronounCredit = /\b(her|his|their)\s+(credit|report|file|dispute|case)\b/i.test(userMessage);
+    const affirm = isShortCreditAffirmation(userMessage) && !explicitFromMessage;
+
+    let toolArgs: Record<string, unknown> | null = null;
+    if (explicitFromMessage) {
+      toolArgs = { client_name: explicitFromMessage };
+      logEvent({ event: "credit_client_inferred", taskId: opts.taskId, inferredClient: explicitFromMessage });
+    } else if (binding && (pronounCredit || affirm)) {
+      if (binding.cg_client_id) {
+        toolArgs = { client_id: binding.cg_client_id };
+        logEvent({
+          event: "credit_client_from_binding",
+          taskId: opts.taskId,
+          cg_client_id: binding.cg_client_id,
+        });
+      } else {
+        toolArgs = { client_name: binding.display_name };
+        logEvent({ event: "credit_client_from_binding_name", taskId: opts.taskId, display_name: binding.display_name });
+      }
+    }
+
+    if (toolArgs) {
       result = {
         text: "",
-        toolCalls: [{ name: "analyze_credit_strategy", args: { client_name: inferredClient } }],
+        toolCalls: [{ name: "analyze_credit_strategy", args: toolArgs }],
       };
     } else {
       result = await agenticCallByModel(
@@ -3853,7 +3955,16 @@ async function executeAgenticLoop(
   // Step 2: If no tool calls, just send the text response
   if (result.toolCalls.length === 0) {
     const responseText = result.text || "I'm not sure how to help with that. Try /workflows for available commands.";
-    const reply = formatAssistantMessage(model, responseText);
+    const explicitCgBadExtraction =
+      opts.workflowKey === "drive_ingest" &&
+      opts.explicitCreditGuardianIngest === true &&
+      (responseText.includes("client name required") || responseText.includes("Could not extract"));
+    const creditWorkflowNoToolReceipt =
+      Boolean(opts.workflowKey && isCreditWorkflowForSummary(opts.workflowKey) && !explicitCgBadExtraction);
+    const finalUserText = creditWorkflowNoToolReceipt
+      ? `${responseText}\n\n_⚠️ No credit tools ran on this turn — name the client, confirm a prior match, or use a short reply like "yes" if we already picked someone._`
+      : responseText;
+    const reply = formatAssistantMessage(model, finalUserText);
     await sendMessage(chatId, reply);
     await appendConversationTurn(chatId, {
       role: "assistant",
@@ -3862,10 +3973,6 @@ async function executeAgenticLoop(
       at: new Date().toISOString(),
     });
 
-    const explicitCgBadExtraction =
-      opts.workflowKey === "drive_ingest" &&
-      opts.explicitCreditGuardianIngest === true &&
-      (responseText.includes("client name required") || responseText.includes("Could not extract"));
     if (explicitCgBadExtraction) {
       console.log(
         JSON.stringify({
@@ -3884,9 +3991,9 @@ async function executeAgenticLoop(
       status: "succeeded",
       selected_tools: [],
       result_json: {
-        execution_complete: true,
+        execution_complete: !(explicitCgBadExtraction || creditWorkflowNoToolReceipt),
         workflow: opts.workflowKey,
-        text_response: responseText.slice(0, 2000),
+        text_response: finalUserText.slice(0, 2000),
         model_used: opts.sessionModel,
         execution_duration_ms: executionDuration,
         execution_lock: null,
@@ -3900,6 +4007,7 @@ async function executeAgenticLoop(
             },
           }
           : {}),
+        ...(creditWorkflowNoToolReceipt ? { credit_execution_incomplete: true } : {}),
       },
     }).eq("id", opts.taskId);
     await sendMessage(chatId, `â Done: \`${opts.taskId}\``, {}, `task:${opts.taskId}:done`);
@@ -3968,6 +4076,29 @@ async function executeAgenticLoop(
         await logToolSuccess(logId, output, startedAt);
         console.log(JSON.stringify({ event: "tool_execution", tool: tc.name, workflow: opts.workflowKey, duration_ms: toolDuration, taskId: opts.taskId, ts: Date.now() }));
         toolResults.push(output);
+        if (tc.name === "analyze_credit_strategy") {
+          try {
+            const parsed = JSON.parse(String(output)) as {
+              ok?: boolean;
+              client_id?: string;
+              matched_display_name?: string;
+            };
+            if (parsed?.ok === true && typeof parsed.client_id === "string") {
+              const fromArgs = tc.args as { client_name?: string } | undefined;
+              const dn =
+                (typeof parsed.matched_display_name === "string" && parsed.matched_display_name.trim()
+                  ? parsed.matched_display_name.trim()
+                  : "") ||
+                (typeof fromArgs?.client_name === "string" ? fromArgs.client_name : "") ||
+                parsed.client_id;
+              await setCreditClientBinding(chatId, {
+                cg_client_id: parsed.client_id,
+                display_name: dn,
+                updated_at: new Date().toISOString(),
+              });
+            }
+          } catch { /* non-JSON tool output */ }
+        }
       } catch (e) {
         const toolDuration = Date.now() - toolStart;
         const errStr = e instanceof Error ? e.message : String(e);
@@ -5516,6 +5647,24 @@ serve(async (req) => {
       autoPromotedWorkflow = SYNTHETIC_DRIVE_INGEST;
     }
 
+    const chatCreditBinding = await getCreditClientBinding(chatId);
+    if (
+      !autoPromotedWorkflow &&
+      chatCreditBinding &&
+      isShortCreditAffirmation(text) &&
+      IMPLEMENTED_WORKFLOW_KEYS.has("analyze_credit_strategy")
+    ) {
+      autoPromotedWorkflow = SYNTHETIC_ANALYZE_CREDIT_STRATEGY;
+    }
+    if (
+      !autoPromotedWorkflow &&
+      chatCreditBinding &&
+      /\b(her|his|their)\s+(credit|report|file|dispute|case)\b/i.test(lowerText) &&
+      IMPLEMENTED_WORKFLOW_KEYS.has("analyze_credit_strategy")
+    ) {
+      autoPromotedWorkflow = SYNTHETIC_ANALYZE_CREDIT_STRATEGY;
+    }
+
     if (playlistDirectRedo) {
       console.log("[PLAYLIST_REDO_DIRECT] hub research with saved vibe", {
         taskId,
@@ -6324,6 +6473,67 @@ serve(async (req) => {
       }
       _currentTaskId = null;
       return new Response("ok");
+    }
+
+    // ══════════════════════════════════════════════════════════
+    // CREDIT LANE 1 RESCUE — borderline credit confidence (e.g. pronoun reference at 0.58)
+    // ══════════════════════════════════════════════════════════
+    if (!text.startsWith("/") && !isAutonomousRequest && !explicitCgIngestIntent) {
+      const isTaxShortcutRescue = lowerText.startsWith("/tax status") || lowerText.startsWith("/tax forms");
+      const taxIntentRescue = isTaxShortcutRescue ? false : isTaxIntent(lowerText);
+      const creditDecisionRescue = inferCreditWorkflowKey(lowerText);
+      if (
+        !taxIntentRescue &&
+        !isCreditInformationalOnly(lowerText) &&
+        shouldRescueCreditLane1(lowerText)
+      ) {
+        const wfRescue = syntheticWorkflowForCreditDecision(creditDecisionRescue);
+        if (wfRescue) {
+          console.log(JSON.stringify({
+            ts: Date.now(),
+            event: "credit_lane1_rescue",
+            taskId,
+            workflowKey: wfRescue.key,
+            confidence_score: creditDecisionRescue.confidence,
+          }));
+          await supabase.from("tasks").update({
+            status: "running",
+            selected_workflow: wfRescue.key,
+            result_json: {
+              execution_lane: "lane1_do",
+              progress_step: "credit_lane1_rescue",
+              credit_rescue: true,
+              confidence_score: creditDecisionRescue.confidence,
+            },
+          }).eq("id", taskId);
+          try {
+            await Promise.race([
+              executeAgenticLoop(chatId, text, {
+                taskId,
+                lane: "lane1_do",
+                allowTools: true,
+                workflowKey: wfRescue.key,
+                sessionModel: normalizeBotModel(session.active_model),
+              }),
+              new Promise<never>((_, reject) => setTimeout(() => reject(new Error("TIMEOUT")), 55000)),
+            ]);
+          } catch (rescueErr) {
+            const errMsg = rescueErr instanceof Error ? rescueErr.message : String(rescueErr);
+            const failResult = buildFailureResultJson(
+              { execution_lane: "lane1_do", progress_step: "credit_rescue_failed" },
+              errMsg,
+            );
+            await supabase.from("tasks").update({
+              status: "failed",
+              error: errMsg.slice(0, 300),
+              result_json: failResult,
+            }).eq("id", taskId);
+            await sendMessage(chatId, `\u274c Failed: \`${taskId}\` \u2014 ${errMsg.slice(0, 200)}`, {}, `task:${taskId}:failed`);
+          }
+          _currentTaskId = null;
+          return new Response("ok");
+        }
+      }
     }
 
     // ══════════════════════════════════════════════════════════

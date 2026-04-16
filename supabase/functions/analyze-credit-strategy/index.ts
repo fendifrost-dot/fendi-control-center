@@ -9,7 +9,7 @@ import {
   retrieveKnowledge,
 } from "../_shared/creditKnowledgeRetrieval.ts";
 import { assembleCreditAnalysisUserPrompt, buildRetrievalIntentSummary, inferRetrievalTaskFromDocs } from "../_shared/creditPromptComposer.ts";
-import { fuzzyClientSearch } from "../_shared/fuzzyClientSearch.ts";
+import { cgDisplayName, resolveUnifiedClientFromName } from "../_shared/unifiedClientResolution.ts";
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
@@ -57,174 +57,16 @@ Rules:
 - Flag any patterns suggesting systemic violations.
 - Return ONLY the JSON object, no markdown fences or extra text.`;
 
-// Levenshtein distance for fuzzy matching on CG client list
-function levenshtein(a: string, b: string): number {
-  const al = a.toLowerCase(), bl = b.toLowerCase();
-  const matrix: number[][] = [];
-  for (let i = 0; i <= al.length; i++) matrix[i] = [i];
-  for (let j = 0; j <= bl.length; j++) matrix[0][j] = j;
-  for (let i = 1; i <= al.length; i++) {
-    for (let j = 1; j <= bl.length; j++) {
-      const cost = al[i - 1] === bl[j - 1] ? 0 : 1;
-      matrix[i][j] = Math.min(
-        matrix[i - 1][j] + 1,
-        matrix[i][j - 1] + 1,
-        matrix[i - 1][j - 1] + cost
-      );
-    }
-  }
-  return matrix[al.length][bl.length];
-}
-
-function nameSimilarity(a: string, b: string): number {
-  if (!a || !b) return 0;
-  const maxLen = Math.max(a.length, b.length);
-  if (maxLen === 0) return 1;
-  return 1 - levenshtein(a, b) / maxLen;
-}
-
-/** Credit Guardian API returns `legal_name` / `preferred_name` (see fairway `get_clients`), not `name`. */
-function cgDisplayName(c: Record<string, unknown>): string {
-  const n = c.name ?? c.legal_name ?? c.preferred_name;
-  return typeof n === "string" ? n : "";
-}
-
-/** Strip trailing folder-style dates e.g. "Jabril 04.10" → "Jabril" for matching. */
-function normalizeCreditClientName(raw: string): string {
-  let s = raw.trim();
-  s = s.replace(/\s+\d{1,2}\.\d{1,2}(?:\.\d{2,4})?\s*$/i, "").trim();
-  s = s.replace(/\s+\d{4}-\d{2}-\d{2}\s*$/i, "").trim();
-  return s;
-}
-
-function tokenMatch(query: string, target: string): number {
-  const q = query.toLowerCase().trim();
-  const t = target.toLowerCase().trim();
-  if (q === t) return 1.0;
-  if (t.includes(q)) return 0.85;
-  if (q.includes(t)) return 0.75;
-  const qTokens = q.split(/[\s\-_]+/).filter(Boolean);
-  const tTokens = t.split(/[\s\-_]+/).filter(Boolean);
-  let matched = 0;
-  for (const qt of qTokens) {
-    for (const tt of tTokens) {
-      if (tt.includes(qt) || qt.includes(tt)) { matched++; break; }
-      if (nameSimilarity(qt, tt) > 0.75) { matched += 0.7; break; }
-    }
-  }
-  return qTokens.length > 0 ? (matched / qTokens.length) * 0.7 : 0;
-}
-
-async function resolveClientId(clientName: string): Promise<{
-  clientId: string | null;
-  needsVerification: boolean;
-  message?: string;
-  matchedName?: string;
-}> {
-  const normalizedName = normalizeCreditClientName(clientName);
-  // Prefer normalized first so "Jabril 04.10" resolves as "Jabril" before fuzzy ambiguity on the full string.
-  const namesToMatch = [...new Set([normalizedName, clientName.trim()].filter((n) => n.length >= 2))];
-
-  // Step 1: Try Credit Guardian client list with fuzzy matching
-  try {
-    const resp = await fetchCreditGuardian({ action: "get_clients" });
-    if (resp.ok) {
-      const payload = await resp.json();
-      const rows = Array.isArray(payload?.data) ? payload.data : (Array.isArray(payload) ? payload : []);
-
-      for (const queryName of namesToMatch) {
-        // Exact match
-        const exact = rows.find((c: any) => cgDisplayName(c).toLowerCase() === queryName.toLowerCase());
-        if (exact?.id) {
-          return { clientId: exact.id, needsVerification: false, matchedName: cgDisplayName(exact) };
-        }
-
-        // Substring match (both directions)
-        const substring = rows.find((c: any) => {
-          const name = cgDisplayName(c).toLowerCase();
-          const query = queryName.toLowerCase();
-          return name.includes(query) || query.includes(name);
-        });
-        if (substring?.id) {
-          return { clientId: substring.id, needsVerification: false, matchedName: cgDisplayName(substring) };
-        }
-
-        // Fuzzy match on CG clients
-        const scored = rows
-          .map((c: any) => ({
-            id: c.id,
-            name: cgDisplayName(c),
-            score: Math.max(
-              tokenMatch(queryName, cgDisplayName(c)),
-              nameSimilarity(queryName, cgDisplayName(c)),
-            ),
-          }))
-          .filter((c: any) => c.name && c.score >= 0.5)
-          .sort((a: any, b: any) => b.score - a.score);
-
-        if (scored.length > 0 && scored[0].score >= 0.7) {
-          const queryTokens = queryName.toLowerCase().split(/[\s\-_,.']+/).filter((t: string) => t.length > 1);
-          const matchTokens = scored[0].name.toLowerCase().split(/[\s\-_,.']+/).filter((t: string) => t.length > 1);
-          const hasTokenOverlap = queryTokens.some((qt: string) =>
-            matchTokens.some((mt: string) => mt.includes(qt) || qt.includes(mt) || nameSimilarity(qt, mt) > 0.8)
-          );
-          if (hasTokenOverlap) {
-            return { clientId: scored[0].id, needsVerification: false, matchedName: scored[0].name };
-          }
-        }
-
-        // Multiple possible matches - ask for verification
-        if (scored.length > 0) {
-          const opts = scored.slice(0, 4).map((c: any, i: number) => `${i + 1}. ${c.name}`).join("\n");
-          return {
-            clientId: null,
-            needsVerification: true,
-            message: `I found some possible matches for "${clientName}":\n\n${opts}\n\nCould you confirm which one, or let me know if the file might be listed under a different name?`,
-          };
-        }
-      }
-    }
-  } catch (err) {
-    console.error("[RESOLVE] CG client lookup error:", err);
-  }
-
-  // Step 2: Try local fuzzy search (clients table, aliases, Drive folders)
-  try {
-    const localResult = await fuzzyClientSearch(normalizedName.length >= 2 ? normalizedName : clientName);
-    if (localResult.exactMatch && !localResult.needsVerification) {
-      return { clientId: localResult.exactMatch.id, needsVerification: false, matchedName: localResult.exactMatch.name };
-    }
-    if (localResult.fuzzyMatches.length > 0) {
-      const opts = localResult.fuzzyMatches.slice(0, 4)
-        .map((m, i) => `${i + 1}. ${m.name} (${m.source.replace("_", " ")})`).join("\n");
-      return {
-        clientId: null,
-        needsVerification: true,
-        message: `I found some possible matches for "${clientName}":\n\n${opts}\n\nCould you confirm which one? Or if none of these are right, the file might be listed under a different name (like a nickname or legal name).`,
-      };
-    }
-  } catch (err) {
-    console.error("[RESOLVE] Local fuzzy search error:", err);
-  }
-
-  // Step 3: No match anywhere - ask user if it could be under a different name
-  return {
-    clientId: null,
-    needsVerification: true,
-    message: `I couldn't find a client matching "${clientName}" in our system. Could the file be listed under a different name? Sometimes files are stored under a nickname, legal name, or folder name that's different from what you used.`,
-  };
-}
-
 serve(async (req) => {
   if (req.method === "OPTIONS") return new Response(null, { headers: corsHeaders });
 
   try {
     const body = await req.json().catch(() => ({}));
-    let clientId = body.client_id as string | undefined;
+    let clientId = (body.client_id ?? body.cg_client_id) as string | undefined;
     const clientName = body.client_name as string | undefined;
 
     if (!clientId && clientName) {
-      const resolution = await resolveClientId(clientName);
+      const resolution = await resolveUnifiedClientFromName(clientName);
       if (resolution.needsVerification || !resolution.clientId) {
         return new Response(JSON.stringify({
           ok: false,
@@ -262,6 +104,9 @@ serve(async (req) => {
     const docs = await docsResp.json();
     const detailObj = detail as Record<string, unknown>;
     const docsObj = docs as Record<string, unknown>;
+    const matchedDisplayName =
+      cgDisplayName(detailObj) ||
+      (typeof clientName === "string" ? clientName.trim() : "");
 
     const retrievalTask = inferRetrievalTaskFromDocs(docsObj);
     const caseState = extractCaseStateFromDetailDocs(detailObj, docsObj);
@@ -314,6 +159,7 @@ serve(async (req) => {
       analysis_id: row.id,
       created_at: row.created_at,
       client_id: clientId,
+      matched_display_name: matchedDisplayName || undefined,
       analysis,
     }), {
       headers: { ...corsHeaders, "Content-Type": "application/json" },
