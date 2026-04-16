@@ -14,7 +14,9 @@ export interface CreditWorkflowDecision {
 }
 
 const DISPUTE_LETTER_PATTERNS: RegExp[] = [
-  /\bdispute\s+letter/i,
+  /\bdispute\s+letters?\b/i,
+  /\bcreate\s+dispute\s+letters?\b/i,
+  /\bdispute\s+letter\b/i,
   /\bgenerate\s+(updated?\s+)?(dispute|rebuttal)/i,
   /\brebuttal/i,
   /\bcompare\b.*\b(credit\s+)?report/i,
@@ -109,6 +111,9 @@ export function normalizeExtractedCgClientName(raw: string): string | null {
   return s;
 }
 
+/** Matches "… to (the) Credit Guardian (tool)" — users often include "the" and "tool". */
+const CG_TARGET = String.raw`(?:the\s+)?(?:credit\s+guardian|\bcg\b)(?:\s+tool)?`;
+
 /**
  * Extract client/person segment for explicit Credit Guardian ingest commands.
  * Returns null if no name found (caller may still run full-folder ingest without client_name).
@@ -118,35 +123,44 @@ export function extractCreditGuardianClientNameForIngest(message: string): strin
   const NAME = String.raw`(?:[A-Za-z0-9][A-Za-z0-9\s.'\/&\-]{0,78}?)`;
 
   const patterns: RegExp[] = [
-    /\b(?:add|put|sync|ingest|onboard|register|load|bring|import|enroll)\s+["']([^"']{2,80})["']\s+(?:to|into|in)\s+(?:credit\s+guardian|\bcg\b)\b/i,
+    /\b(?:add|put|sync|ingest|onboard|register|load|bring|import|enroll)\s+["']([^"']{2,80})["']\s+(?:to|into|in)\s+(?:the\s+)?(?:credit\s+guardian|\bcg\b)(?:\s+tool)?\b/i,
     new RegExp(
-      String.raw`\b(?:add|put|sync|ingest|onboard|register|load|bring|import|enroll)\s+(?:client\s+)?([A-Za-z0-9][A-Za-z0-9.'\-]*)\s+dispute\s+progress\s+(?:to|into|in)\s+(?:credit\s+guardian|\bcg\b)\b`,
+      String.raw`\b(?:add|put|sync|ingest|onboard|register|load|bring|import|enroll)\s+(?:client\s+)?([A-Za-z0-9][A-Za-z0-9.'\-]*)\s+dispute\s+progress\s+(?:to|into|in)\s+(?:the\s+)?(?:credit\s+guardian|\bcg\b)\b`,
       "i",
     ),
     new RegExp(
-      String.raw`\b(?:add|put|sync|ingest|onboard|register|load|bring|import|enroll)\s+(?:client\s+)?(${NAME})\s+(?:to|into|in)\s+(?:credit\s+guardian|\bcg\b)\b`,
+      String.raw`\b(?:can you|could you|would you|please)\s+(?:add|put|sync|ingest|onboard|register|import|enroll)\s+(?:client\s+)?(${NAME})\s+(?:to|into|in)\s+${CG_TARGET}\b`,
+      "i",
+    ),
+    // "Can you Demeika Harris to the credit guardian" (missing "add")
+    new RegExp(
+      String.raw`\b(?:can you|could you|would you)\s+(${NAME})\s+(?:to|into|in)\s+${CG_TARGET}\b`,
       "i",
     ),
     new RegExp(
-      String.raw`(?:^|[.!?]\s*)(?:please|hey|ok)[,.\s]+(?:add|put)\s+(?:client\s+)?(${NAME})\s+(?:to|into|in)\s+(?:credit\s+guardian|\bcg\b)\b`,
+      String.raw`\b(?:add|put|sync|ingest|onboard|register|load|bring|import|enroll)\s+(?:client\s+)?(${NAME})\s+(?:to|into|in)\s+${CG_TARGET}\b`,
       "i",
     ),
     new RegExp(
-      String.raw`\b(?:add|put)\s+(?:client\s+)?(${NAME})\s+to\s+credit\s+guardian\b`,
+      String.raw`(?:^|[.!?]\s*)(?:please|hey|ok)[,.\s]+(?:add|put)\s+(?:client\s+)?(${NAME})\s+(?:to|into|in)\s+${CG_TARGET}\b`,
       "i",
     ),
-    new RegExp(String.raw`\bput\s+(?:client\s+)?(${NAME})\s+in\s+(?:credit\s+guardian|\bcg\b)\b`, "i"),
-    new RegExp(String.raw`\bsync\s+(?:client\s+)?(${NAME})\s+to\s+(?:credit\s+guardian|\bcg\b)\b`, "i"),
-    new RegExp(String.raw`\bingest\s+(?:client\s+)?(${NAME})\s+into\s+(?:credit\s+guardian|\bcg\b)\b`, "i"),
     new RegExp(
-      String.raw`\bonboard\s+(?:client\s+)?(${NAME})\s+(?:into|to)\s+(?:credit\s+guardian|\bcg\b)\b`,
+      String.raw`\b(?:add|put)\s+(?:client\s+)?(${NAME})\s+to\s+(?:the\s+)?(?:credit\s+guardian|\bcg\b)(?:\s+tool)?\b`,
       "i",
     ),
-    new RegExp(String.raw`\bregister\s+(?:client\s+)?(${NAME})\s+in\s+(?:credit\s+guardian|\bcg\b)\b`, "i"),
-    new RegExp(String.raw`\bload\s+(?:client\s+)?(${NAME})\s+into\s+(?:credit\s+guardian|\bcg\b)\b`, "i"),
-    new RegExp(String.raw`\bbring\s+(?:client\s+)?(${NAME})\s+into\s+(?:credit\s+guardian|\bcg\b)\b`, "i"),
-    new RegExp(String.raw`\bimport\s+(?:client\s+)?(${NAME})\s+into\s+(?:credit\s+guardian|\bcg\b)\b`, "i"),
-    new RegExp(String.raw`\benroll\s+(?:client\s+)?(${NAME})\s+in\s+(?:credit\s+guardian|\bcg\b)\b`, "i"),
+    new RegExp(String.raw`\bput\s+(?:client\s+)?(${NAME})\s+in\s+(?:the\s+)?(?:credit\s+guardian|\bcg\b)(?:\s+tool)?\b`, "i"),
+    new RegExp(String.raw`\bsync\s+(?:client\s+)?(${NAME})\s+to\s+(?:the\s+)?(?:credit\s+guardian|\bcg\b)(?:\s+tool)?\b`, "i"),
+    new RegExp(String.raw`\bingest\s+(?:client\s+)?(${NAME})\s+into\s+(?:the\s+)?(?:credit\s+guardian|\bcg\b)(?:\s+tool)?\b`, "i"),
+    new RegExp(
+      String.raw`\bonboard\s+(?:client\s+)?(${NAME})\s+(?:into|to)\s+(?:the\s+)?(?:credit\s+guardian|\bcg\b)(?:\s+tool)?\b`,
+      "i",
+    ),
+    new RegExp(String.raw`\bregister\s+(?:client\s+)?(${NAME})\s+in\s+(?:the\s+)?(?:credit\s+guardian|\bcg\b)(?:\s+tool)?\b`, "i"),
+    new RegExp(String.raw`\bload\s+(?:client\s+)?(${NAME})\s+into\s+(?:the\s+)?(?:credit\s+guardian|\bcg\b)(?:\s+tool)?\b`, "i"),
+    new RegExp(String.raw`\bbring\s+(?:client\s+)?(${NAME})\s+into\s+(?:the\s+)?(?:credit\s+guardian|\bcg\b)(?:\s+tool)?\b`, "i"),
+    new RegExp(String.raw`\bimport\s+(?:client\s+)?(${NAME})\s+into\s+(?:the\s+)?(?:credit\s+guardian|\bcg\b)(?:\s+tool)?\b`, "i"),
+    new RegExp(String.raw`\benroll\s+(?:client\s+)?(${NAME})\s+in\s+(?:the\s+)?(?:credit\s+guardian|\bcg\b)(?:\s+tool)?\b`, "i"),
   ];
   for (const p of patterns) {
     const m = t.match(p);

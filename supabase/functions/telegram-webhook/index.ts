@@ -328,11 +328,12 @@ const CREDIT_CONVERSATION_ADDENDUM = `
 CREDIT / DISPUTE CONTEXT (this message): Stay on credit repair, Credit Guardian, Google Drive ingestion, and bureau disputes only.
 Do NOT pivot to music streaming, FanFuel, playlists, or artist growth unless the user explicitly asked for that.
 Do not joke that credit work “doesn’t vibe” with growth — treat credit ops as first-class.
+NEVER claim you lack tools, cannot access Credit Guardian / Credit Compass, or that the user must rely on /workflows alone — this chat has execution workflows for ingest, analysis, and dispute drafts. If they asked for those actions, briefly note that the system should route execution automatically; do not refuse on “no tools.”
 `.trim();
 
 function isCreditRelatedUserText(text: string): boolean {
   const t = text.toLowerCase();
-  return /\b(credit|dispute|bureau|equifax|experian|transunion|tradeline|fico|score|charge-?off|collection|guardian|ingest|drive\s*folder|furnisher|reinsert|611|fcta)\b/i
+  return /\b(credit|compass|dispute|bureau|equifax|experian|transunion|tradeline|fico|score|charge-?off|collection|guardian|ingest|drive\s*folder|furnisher|reinsert|611|fcta|lexis|innovis|corelogic|sagestream)\b/i
     .test(t);
 }
 
@@ -6476,16 +6477,21 @@ serve(async (req) => {
     }
 
     // ══════════════════════════════════════════════════════════
-    // CREDIT LANE 1 RESCUE — borderline credit confidence (e.g. pronoun reference at 0.58)
+    // CREDIT LANE 1 RESCUE — borderline confidence (0.55–0.59) + safety net when auto-promote missed
     // ══════════════════════════════════════════════════════════
     if (!text.startsWith("/") && !isAutonomousRequest && !explicitCgIngestIntent) {
       const isTaxShortcutRescue = lowerText.startsWith("/tax status") || lowerText.startsWith("/tax forms");
       const taxIntentRescue = isTaxShortcutRescue ? false : isTaxIntent(lowerText);
       const creditDecisionRescue = inferCreditWorkflowKey(lowerText);
+      const noCreditMatch = creditDecisionRescue.reasons.includes("no_credit_match");
+      const executionCue =
+        /\b(analyze|dispute|letters?|generate|create|add|sync|ingest|compass|guardian|pull|review|check|equifax|experian|transunion|lexis|innovis|corelogic|sagestream)\b/i.test(lowerText);
       if (
         !taxIntentRescue &&
         !isCreditInformationalOnly(lowerText) &&
-        shouldRescueCreditLane1(lowerText)
+        !noCreditMatch &&
+        creditDecisionRescue.confidence >= 0.55 &&
+        (shouldRescueCreditLane1(lowerText) || (creditDecisionRescue.confidence >= 0.6 && executionCue))
       ) {
         const wfRescue = syntheticWorkflowForCreditDecision(creditDecisionRescue);
         if (wfRescue) {
