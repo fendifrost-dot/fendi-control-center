@@ -763,6 +763,85 @@ async function sendMessage(chatId: string, text: string, options: any = {}, dedu
   }
 }
 
+/**
+ * Handle an operator-clarification callback. callbackData after "clar:" is
+ * "${pendingId}:${selectedRoute}". Looks up pending_route_clarifications,
+ * marks status, either sends "skipped" or dispatches via executeAgenticLoop.
+ * Returns a short string for the caller's sendMessage.
+ */
+async function handleRouteClarification(targetId: string): Promise<string> {
+  const parts = targetId.split(":");
+  const pendingId = parts[0];
+  const selectedRoute = parts.slice(1).join(":");
+  if (!pendingId || !selectedRoute) {
+    return "Invalid clarification callback (missing id or route).";
+  }
+
+  const { data: pending, error: pendErr } = await supabase
+    .from("pending_route_clarifications")
+    .select("*")
+    .eq("id", pendingId)
+    .maybeSingle();
+
+  if (pendErr || !pending) {
+    return `Clarification record not found (${pendingId.slice(0, 8)})`;
+  }
+  if (pending.status !== "awaiting_operator") {
+    return `Clarification already ${pending.status}`;
+  }
+
+  const markStatus = selectedRoute === "skip" ? "skipped" : "operator_selected";
+  await supabase
+    .from("pending_route_clarifications")
+    .update({
+      status: markStatus,
+      selected_route: selectedRoute,
+      selected_at: new Date().toISOString(),
+    })
+    .eq("id", pendingId);
+
+  console.log(JSON.stringify({
+    ts: Date.now(),
+    event: "routing_clarification_resolved",
+    correlation_id: pending.correlation_id,
+    pending_id: pendingId,
+    selected_route: selectedRoute,
+  }));
+
+  if (selectedRoute === "skip") {
+    return "Skipped — send another message to continue.";
+  }
+
+  const routeToWorkflow: Record<string, string> = {
+    compass: "query_credit_compass",
+    guardian_active: "analyze_credit_strategy",
+    guardian_ingest: "drive_ingest",
+  };
+  const workflowKey = routeToWorkflow[selectedRoute] ?? selectedRoute;
+
+  try {
+    await executeAgenticLoop(pending.chat_id as string, pending.message_text as string, {
+      taskId: pending.task_id as string,
+      lane: "lane1_do",
+      allowTools: true,
+      workflowKey,
+      sessionModel: normalizeBotModel("claude"),
+    });
+    return `Routed to ${selectedRoute}.`;
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    console.log(JSON.stringify({
+      ts: Date.now(),
+      event: "routing_clarification_dispatch_failed",
+      correlation_id: pending.correlation_id,
+      pending_id: pendingId,
+      selected_route: selectedRoute,
+      error: msg,
+    }));
+    return `Dispatch to ${selectedRoute} failed: ${msg.slice(0, 200)}`;
+  }
+}
+
 async function answerCallbackQuery(callbackQueryId: string, text?: string) {
   await _rawTelegramSend("answerCallbackQuery", { callback_query_id: callbackQueryId, text });
 }
@@ -4655,6 +4734,7 @@ serve(async (req) => {
         case "explain": result = await handleExplainMore(targetId); break;
         case "agent_confirm": result = await handleAgentConfirm(targetId); break;
         case "agent_cancel": result = await handleAgentCancel(targetId); break;
+        case "clar": result = await handleRouteClarification(targetId); break;
         default: result = "â Unknown action.";
       }
 
