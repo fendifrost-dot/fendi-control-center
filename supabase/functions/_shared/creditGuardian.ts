@@ -1,11 +1,15 @@
 /**
  * Fairway Fixer (Credit Guardian) edge functions — shared fetch.
- * Default function name: cross-project-api (same project also deploys control-center-api alias).
+ * Project: fairway-fixer-18 (Supabase ref gflvvzkiuleeochqcdeb).
+ * Default function: cross-project-api (the same project also deploys a control-center-api
+ * *alias* that resolves to the same handler — do not confuse with Compass's control-center-api).
  * Set CREDIT_GUARDIAN_FUNCTION to override.
  *
- * Not to be confused with: CC Tax (taxgenerator) — different Supabase project. Credit Compass is the same
- * Fairway/Credit Guardian project as this URL (Lovable may label it Credit Compass; repo: fairway-fixer-18).
- * The separate `query_credit_compass` tool may still call control-center-api with Bearer auth — see that tool’s comments.
+ * DO NOT route Credit Compass traffic through this helper. Credit Compass is a SEPARATE
+ * Supabase project (fendi-fight-plan, ref imjnqwcrgpqrouiiazam) with a different action
+ * vocabulary. Use `./creditCompass.ts` for Compass.
+ *
+ * Also distinct from: CC Tax (taxgenerator) — yet another Supabase project.
  */
 export function getCreditGuardianUrl(): string {
   return Deno.env.get("CREDIT_GUARDIAN_URL") || "https://gflvvzkiuleeochqcdeb.supabase.co";
