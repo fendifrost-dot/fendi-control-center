@@ -25,15 +25,19 @@ export function getCreditGuardianKey(): string {
   return k;
 }
 
-/** POST JSON body; authenticates with x-api-key only (matches Fairway cross-project-api). */
-export async function fetchCreditGuardian(body: Record<string, unknown>): Promise<Response> {
+/**
+ * POST JSON body; authenticates with x-api-key only (matches Fairway cross-project-api).
+ * Optionally pass correlationId to propagate the Hub's tg_${update_id} tracking header.
+ */
+export async function fetchCreditGuardian(
+  body: Record<string, unknown>,
+  opts: { correlationId?: string } = {},
+): Promise<Response> {
   const url = `${getCreditGuardianUrl()}/functions/v1/${getCreditGuardianFunctionName()}`;
-  return fetch(url, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      "x-api-key": getCreditGuardianKey(),
-    },
-    body: JSON.stringify(body),
-  });
+  const headers: Record<string, string> = {
+    "Content-Type": "application/json",
+    "x-api-key": getCreditGuardianKey(),
+  };
+  if (opts.correlationId) headers["x-correlation-id"] = opts.correlationId;
+  return fetch(url, { method: "POST", headers, body: JSON.stringify(body) });
 }

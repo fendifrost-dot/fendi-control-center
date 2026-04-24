@@ -4617,6 +4617,9 @@ serve(async (req) => {
 
   try {
     logTelegramWebhookAccepted(update, updateId);
+  // Correlation ID for the entire request lifecycle. Propagated to downstream
+  // Guardian/Compass fetches and structured routing logs.
+  const correlationId = `tg_${updateId}`;
     _currentTaskId = null;
 
     // ââ Callback queries (inline button presses) ââ
@@ -6471,6 +6474,7 @@ serve(async (req) => {
             taskId,
             workflowKey: wfRescue.key,
             confidence_score: creditDecisionRescue.confidence,
+            correlation_id: correlationId,
           }));
           await supabase.from("tasks").update({
             status: "running",
@@ -6480,6 +6484,7 @@ serve(async (req) => {
               progress_step: "credit_lane1_rescue",
               credit_rescue: true,
               confidence_score: creditDecisionRescue.confidence,
+              correlation_id: correlationId,
             },
           }).eq("id", taskId);
           try {
@@ -6566,7 +6571,7 @@ serve(async (req) => {
     // ââââââââââââââââââââââââââââââââââââââââââââââââââââââââââ
     console.log(`[LANE2] Assistant mode taskId=${taskId} ts=${Date.now()}`);
     const lane2Start = Date.now();
-    await supabase.from("tasks").update({ status: "running", selected_workflow: "lane2_assistant", result_json: { execution_lane: "lane2_assistant", progress_step: "lane2_start" } }).eq("id", taskId);
+    await supabase.from("tasks").update({ status: "running", selected_workflow: "lane2_assistant", result_json: { execution_lane: "lane2_assistant", progress_step: "lane2_start", correlation_id: correlationId } }).eq("id", taskId);
 
     const model: BotModel = normalizeBotModel(session.active_model);
     let lane2Status: "succeeded" | "failed" = "succeeded";
