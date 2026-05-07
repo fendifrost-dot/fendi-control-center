@@ -4715,7 +4715,11 @@ serve(async (req) => {
         );
         _currentTaskId = attTaskId;
         try {
-          const deps = buildLiveAttachmentDeps({ botToken: BOT_TOKEN, supabase });
+          const deps = buildLiveAttachmentDeps({
+            botToken: BOT_TOKEN,
+            supabase,
+            chatId: tgChatId,
+          });
           const outcome = await handleTelegramAttachment(
             update as unknown as TelegramAttachmentUpdate,
             deps,
@@ -4741,6 +4745,7 @@ serve(async (req) => {
                       client: outcome.matchedClient,
                       bureau_canonical: outcome.parsed.bureauCanonical,
                       round: outcome.parsed.round,
+                      source_message_disposition: outcome.sourceMessageDisposition,
                     }
                     : {}),
                 },

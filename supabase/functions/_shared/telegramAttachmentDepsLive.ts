@@ -28,21 +28,68 @@ export interface LiveDepsConfig {
   supabase: SupabaseClient;
   /** Override the table name — useful if the operator names it differently in Lovable. */
   pendingEventsTable?: string;
+  /**
+   * Telegram chat_id of the operator. Required to wire `deleteSourceMessage`,
+   * which auto-deletes the operator's source message after a successful Drive
+   * upload + queue insert (PII-on-Telegram mitigation, plan §"Risks worth naming").
+   *
+   * Behavior is controlled by the `TELEGRAM_AUTO_DELETE_AFTER_INGEST` env var
+   * (default ON; set to "0", "false", or "off" to disable without redeploying).
+   */
+  chatId?: string;
+  /** Test seam — override env-var lookup. Defaults to `Deno.env.get`. */
+  envGet?: (name: string) => string | undefined;
 }
 
 export function buildLiveAttachmentDeps(cfg: LiveDepsConfig): AttachmentHandlerDeps {
   const { botToken, supabase } = cfg;
   const pendingEventsTable = cfg.pendingEventsTable ?? "pending_guardian_events";
+  const envGet = cfg.envGet ?? ((n) => Deno.env.get(n));
 
   const drive = buildLiveDriveAdapter();
+  const deleteSourceMessage = buildDeleteSourceMessage(botToken, cfg.chatId, envGet);
 
-  return {
+  const deps: AttachmentHandlerDeps = {
     resolveTelegramFileUrl: async (fileId) => resolveTelegramFileUrlLive(botToken, fileId),
     downloadFile: async (url) => downloadFileLive(url),
     resolveClient: async (rawName) => resolveClientLive(rawName),
     drive,
     queuePendingGuardianEvent: async (event) =>
       queuePendingGuardianEventLive(supabase, pendingEventsTable, event),
+  };
+  if (deleteSourceMessage) deps.deleteSourceMessage = deleteSourceMessage;
+  return deps;
+}
+
+/**
+ * Auto-delete is OFF when chat_id missing or env flag is "0"/"false"/"off"/"no".
+ * Otherwise returns a closure that POSTs to Telegram `deleteMessage`. The
+ * handler treats any throw as non-fatal (logs a warning, keeps the source
+ * message visible, doesn't change the operator-facing reply).
+ */
+function buildDeleteSourceMessage(
+  botToken: string,
+  chatId: string | undefined,
+  envGet: (name: string) => string | undefined,
+): ((messageId: number) => Promise<void>) | undefined {
+  if (!chatId) return undefined;
+  const flag = (envGet("TELEGRAM_AUTO_DELETE_AFTER_INGEST") ?? "").trim().toLowerCase();
+  const disabled = flag === "0" || flag === "false" || flag === "off" || flag === "no";
+  if (disabled) return undefined;
+  return async (messageId: number) => {
+    const url = `https://api.telegram.org/bot${botToken}/deleteMessage`;
+    const resp = await fetch(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ chat_id: chatId, message_id: messageId }),
+    });
+    if (!resp.ok) {
+      throw new Error(`telegram deleteMessage ${resp.status}: ${await resp.text()}`);
+    }
+    const body = await resp.json() as { ok: boolean; description?: string };
+    if (!body.ok) {
+      throw new Error(`telegram deleteMessage not ok: ${body.description ?? "unknown"}`);
+    }
   };
 }
 

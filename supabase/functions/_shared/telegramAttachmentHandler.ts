@@ -123,6 +123,19 @@ export interface AttachmentHandlerDeps {
   };
   /** Append the structured event to `pending_guardian_events` (or analogous). */
   queuePendingGuardianEvent(event: PendingGuardianEventInput): Promise<void>;
+  /**
+   * Optional. Delete the operator's source Telegram message after a successful
+   * Drive upload + queue insert, to limit PII exposure on Telegram servers
+   * (intake-streamlining-plan.md §"Risks worth naming").
+   *
+   * Behavior contract:
+   *   - Called ONLY when the upload + queue both succeeded.
+   *   - Errors are non-fatal: handler logs a warning and the operator-facing
+   *     reply is unchanged. The original message stays visible in chat.
+   *   - Wire this off (omit the dep, or set TELEGRAM_AUTO_DELETE_AFTER_INGEST=0
+   *     in the live adapter) to keep the source message visible.
+   */
+  deleteSourceMessage?: (messageId: number) => Promise<void>;
   /** Optional clock injection for deterministic filename in tests. */
   now?: () => Date;
   logger?: {
@@ -148,6 +161,12 @@ export type AttachmentHandlerOutcome =
     alreadyExisted: boolean;
     parsed: ParsedAttachmentCaption;
     matchedClient: string;
+    /**
+     * "deleted" → source message removed from Telegram; "kept" → dep not provided
+     * or no message_id; "delete_failed" → tried and failed (e.g. bot lacks rights),
+     * source still visible. Surfaced for tasks/result_json + tests.
+     */
+    sourceMessageDisposition: "deleted" | "kept" | "delete_failed";
   };
 
 /** Detect a photo or document on the update; null otherwise. */
@@ -318,6 +337,27 @@ export async function handleTelegramAttachment(
     };
   }
 
+  // ── Source-message auto-delete (Drive + queue both succeeded above) ──
+  // Reduces PII exposure on Telegram servers per intake-streamlining-plan.md
+  // §"Risks worth naming". Failures here are non-fatal — the operator already
+  // got their Drive write and queued event; the worst case is the source
+  // message stays visible for them to clean up manually.
+  let sourceMessageDisposition: "deleted" | "kept" | "delete_failed" = "kept";
+  const messageId = update.message?.message_id;
+  if (deps.deleteSourceMessage && typeof messageId === "number") {
+    try {
+      await deps.deleteSourceMessage(messageId);
+      sourceMessageDisposition = "deleted";
+    } catch (err) {
+      sourceMessageDisposition = "delete_failed";
+      log.warn("source message delete failed (non-fatal)", {
+        correlationId,
+        messageId,
+        cause: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
+
   const roundDisplay = parsed.value.round != null ? ` / Round ${parsed.value.round}` : "";
   const dupeNote = upload.alreadyExisted ? " _(already on Drive — no duplicate created)_" : "";
   const reply =
@@ -331,6 +371,7 @@ export async function handleTelegramAttachment(
     bureau: parsed.value.bureauCanonical,
     drivePath: target.drivePath + fileName,
     alreadyExisted: upload.alreadyExisted,
+    sourceMessageDisposition,
   });
 
   return {
@@ -343,6 +384,7 @@ export async function handleTelegramAttachment(
     alreadyExisted: upload.alreadyExisted,
     parsed: parsed.value,
     matchedClient: resolution.matchedName,
+    sourceMessageDisposition,
   };
 }
 

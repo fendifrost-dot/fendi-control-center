@@ -23,6 +23,7 @@ interface FakeDeps extends AttachmentHandlerDeps {
   uploads: FakeUploadCall[];
   queued: PendingGuardianEventInput[];
   warnings: string[];
+  deleteCalls: number[];
 }
 
 function makeFakeDeps(opts: {
@@ -34,12 +35,15 @@ function makeFakeDeps(opts: {
   queueErr?: Error;
   uploadErr?: Error;
   now?: () => Date;
+  /** Set to "wired-success" / "wired-fail" / undefined to mirror env-flag scenarios. */
+  deleteMode?: "wired-success" | "wired-fail" | "not-wired";
 }): FakeDeps {
   const folders = [...(opts.driveFolders ?? [])];
   const existing = new Set<string>(opts.existingFiles ?? []);
   const uploads: FakeUploadCall[] = [];
   const queued: PendingGuardianEventInput[] = [];
   const warnings: string[] = [];
+  const deleteCalls: number[] = [];
 
   const resolveClient = opts.resolveClient ??
     (async (raw: string): Promise<ClientResolution> => ({
@@ -81,6 +85,24 @@ function makeFakeDeps(opts: {
     },
   };
 
+  let deleteSourceMessage: ((id: number) => Promise<void>) | undefined;
+  switch (opts.deleteMode ?? "not-wired") {
+    case "wired-success":
+      deleteSourceMessage = async (id) => {
+        deleteCalls.push(id);
+      };
+      break;
+    case "wired-fail":
+      deleteSourceMessage = async (id) => {
+        deleteCalls.push(id);
+        throw new Error("forbidden: bot lacks delete permission");
+      };
+      break;
+    case "not-wired":
+      deleteSourceMessage = undefined;
+      break;
+  }
+
   return {
     resolveTelegramFileUrl: opts.resolveTelegramFileUrl ??
       (async (id) => `https://api.telegram.org/file/bot/${id}`),
@@ -92,6 +114,7 @@ function makeFakeDeps(opts: {
       if (opts.queueErr) throw opts.queueErr;
       queued.push(event);
     },
+    deleteSourceMessage,
     now: opts.now ?? (() => new Date(Date.UTC(2026, 4, 2, 12))),
     logger: {
       info: () => {},
@@ -101,6 +124,7 @@ function makeFakeDeps(opts: {
     uploads,
     queued,
     warnings,
+    deleteCalls,
   };
 }
 
@@ -360,4 +384,82 @@ Deno.test("handleTelegramAttachment: text-only update returns no_attachment, no 
   assertEquals(out.kind, "no_attachment");
   assertEquals(deps.uploads.length, 0);
   assertEquals(deps.queued.length, 0);
+});
+
+// ── Source-message auto-delete (operator decision: yes, only on confirmed success) ──
+
+Deno.test("handleTelegramAttachment: success path → calls deleteSourceMessage with message_id", async () => {
+  const deps = makeFakeDeps({
+    driveFolders: [
+      { id: "c", name: "SAM CREDIT" },
+      { id: "r", name: "responses", parentId: "c" },
+    ],
+    deleteMode: "wired-success",
+  });
+  const out = await handleTelegramAttachment(basePhotoUpdate("Sam | Equifax | Round 2 response"), deps);
+  if (out.kind !== "logged") throw new Error(`expected logged, got ${out.kind}`);
+  assertEquals(out.sourceMessageDisposition, "deleted");
+  assertEquals(deps.deleteCalls, [100]); // basePhotoUpdate's message_id
+});
+
+Deno.test("handleTelegramAttachment: deleteSourceMessage failure is non-fatal — outcome stays logged, disposition records the failure, warning logged", async () => {
+  const deps = makeFakeDeps({
+    driveFolders: [
+      { id: "c", name: "SAM CREDIT" },
+      { id: "r", name: "responses", parentId: "c" },
+    ],
+    deleteMode: "wired-fail",
+  });
+  const out = await handleTelegramAttachment(basePhotoUpdate("Sam | Equifax | Round 2 response"), deps);
+  if (out.kind !== "logged") throw new Error(`expected logged, got ${out.kind}`);
+  assertEquals(out.sourceMessageDisposition, "delete_failed");
+  assertEquals(deps.deleteCalls, [100]);
+  assertEquals(deps.uploads.length, 1);
+  assertEquals(deps.queued.length, 1);
+  assert(deps.warnings.some((w) => w.includes("source message delete failed")));
+  // Operator-facing reply unchanged — the failure is invisible to them.
+  assert(out.reply.includes("Logged for"));
+  assert(!out.reply.includes("delete"));
+});
+
+Deno.test("handleTelegramAttachment: drive upload failure → does NOT call deleteSourceMessage", async () => {
+  const deps = makeFakeDeps({
+    driveFolders: [
+      { id: "c", name: "SAM CREDIT" },
+      { id: "r", name: "responses", parentId: "c" },
+    ],
+    uploadErr: new Error("403 quota exceeded"),
+    deleteMode: "wired-success",
+  });
+  const out = await handleTelegramAttachment(basePhotoUpdate("Sam | Equifax | Round 2 response"), deps);
+  assertEquals(out.kind, "error");
+  assertEquals(deps.deleteCalls, []);
+});
+
+Deno.test("handleTelegramAttachment: queue insert failure → does NOT call deleteSourceMessage (operator can retry)", async () => {
+  const deps = makeFakeDeps({
+    driveFolders: [
+      { id: "c", name: "SAM CREDIT" },
+      { id: "r", name: "responses", parentId: "c" },
+    ],
+    queueErr: new Error("supabase 5xx"),
+    deleteMode: "wired-success",
+  });
+  const out = await handleTelegramAttachment(basePhotoUpdate("Sam | Equifax | Round 2 response"), deps);
+  assertEquals(out.kind, "error");
+  assertEquals(deps.deleteCalls, []);
+});
+
+Deno.test("handleTelegramAttachment: deleteSourceMessage dep omitted (env flag off) → disposition='kept', no calls", async () => {
+  const deps = makeFakeDeps({
+    driveFolders: [
+      { id: "c", name: "SAM CREDIT" },
+      { id: "r", name: "responses", parentId: "c" },
+    ],
+    deleteMode: "not-wired",
+  });
+  const out = await handleTelegramAttachment(basePhotoUpdate("Sam | Equifax | Round 2 response"), deps);
+  if (out.kind !== "logged") throw new Error("expected logged");
+  assertEquals(out.sourceMessageDisposition, "kept");
+  assertEquals(deps.deleteCalls, []);
 });
