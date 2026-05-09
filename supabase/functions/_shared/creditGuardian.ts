@@ -1,11 +1,15 @@
 /**
  * Fairway Fixer (Credit Guardian) edge functions — shared fetch.
- * Default function name: cross-project-api (same project also deploys control-center-api alias).
+ * Project: fairway-fixer-18 (Supabase ref gflvvzkiuleeochqcdeb).
+ * Default function: cross-project-api (the same project also deploys a control-center-api
+ * *alias* that resolves to the same handler — do not confuse with Compass's control-center-api).
  * Set CREDIT_GUARDIAN_FUNCTION to override.
  *
- * Not to be confused with: CC Tax (taxgenerator) — different Supabase project. Credit Compass is the same
- * Fairway/Credit Guardian project as this URL (Lovable may label it Credit Compass; repo: fairway-fixer-18).
- * The separate `query_credit_compass` tool may still call control-center-api with Bearer auth — see that tool’s comments.
+ * DO NOT route Credit Compass traffic through this helper. Credit Compass is a SEPARATE
+ * Supabase project (fendi-fight-plan, ref imjnqwcrgpqrouiiazam) with a different action
+ * vocabulary. Use `./creditCompass.ts` for Compass.
+ *
+ * Also distinct from: CC Tax (taxgenerator) — yet another Supabase project.
  */
 export function getCreditGuardianUrl(): string {
   return Deno.env.get("CREDIT_GUARDIAN_URL") || "https://gflvvzkiuleeochqcdeb.supabase.co";
@@ -21,15 +25,19 @@ export function getCreditGuardianKey(): string {
   return k;
 }
 
-/** POST JSON body; authenticates with x-api-key only (matches Fairway cross-project-api). */
-export async function fetchCreditGuardian(body: Record<string, unknown>): Promise<Response> {
+/**
+ * POST JSON body; authenticates with x-api-key only (matches Fairway cross-project-api).
+ * Optionally pass correlationId to propagate the Hub's tg_${update_id} tracking header.
+ */
+export async function fetchCreditGuardian(
+  body: Record<string, unknown>,
+  opts: { correlationId?: string } = {},
+): Promise<Response> {
   const url = `${getCreditGuardianUrl()}/functions/v1/${getCreditGuardianFunctionName()}`;
-  return fetch(url, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      "x-api-key": getCreditGuardianKey(),
-    },
-    body: JSON.stringify(body),
-  });
+  const headers: Record<string, string> = {
+    "Content-Type": "application/json",
+    "x-api-key": getCreditGuardianKey(),
+  };
+  if (opts.correlationId) headers["x-correlation-id"] = opts.correlationId;
+  return fetch(url, { method: "POST", headers, body: JSON.stringify(body) });
 }

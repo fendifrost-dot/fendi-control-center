@@ -4,6 +4,10 @@ import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
 
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.49.1";
 import { fetchCreditGuardian } from "../_shared/creditGuardian.ts";
+import {
+  fetchCreditCompass,
+  mapToolActionToCompassAction,
+} from "../_shared/creditCompass.ts";
 import { getTaxReturn, listTaxReturns, getFormInstances, upsertTaxReturn } from "../_shared/taxReturns.ts";
 import {
   anthropicApiKeyConfigured,
@@ -758,6 +762,85 @@ async function sendMessage(chatId: string, text: string, options: any = {}, dedu
   } else {
     console.warn("[OUTBOX] No _currentTaskId, direct send fallback");
     await _rawTelegramSend("sendMessage", payload);
+  }
+}
+
+/**
+ * Handle an operator-clarification callback. callbackData after "clar:" is
+ * "${pendingId}:${selectedRoute}". Looks up pending_route_clarifications,
+ * marks status, either sends "skipped" or dispatches via executeAgenticLoop.
+ * Returns a short string for the caller's sendMessage.
+ */
+async function handleRouteClarification(targetId: string): Promise<string> {
+  const parts = targetId.split(":");
+  const pendingId = parts[0];
+  const selectedRoute = parts.slice(1).join(":");
+  if (!pendingId || !selectedRoute) {
+    return "Invalid clarification callback (missing id or route).";
+  }
+
+  const { data: pending, error: pendErr } = await supabase
+    .from("pending_route_clarifications")
+    .select("*")
+    .eq("id", pendingId)
+    .maybeSingle();
+
+  if (pendErr || !pending) {
+    return `Clarification record not found (${pendingId.slice(0, 8)})`;
+  }
+  if (pending.status !== "awaiting_operator") {
+    return `Clarification already ${pending.status}`;
+  }
+
+  const markStatus = selectedRoute === "skip" ? "skipped" : "operator_selected";
+  await supabase
+    .from("pending_route_clarifications")
+    .update({
+      status: markStatus,
+      selected_route: selectedRoute,
+      selected_at: new Date().toISOString(),
+    })
+    .eq("id", pendingId);
+
+  console.log(JSON.stringify({
+    ts: Date.now(),
+    event: "routing_clarification_resolved",
+    correlation_id: pending.correlation_id,
+    pending_id: pendingId,
+    selected_route: selectedRoute,
+  }));
+
+  if (selectedRoute === "skip") {
+    return "Skipped — send another message to continue.";
+  }
+
+  const routeToWorkflow: Record<string, string> = {
+    compass: "query_credit_compass",
+    guardian_active: "analyze_credit_strategy",
+    guardian_ingest: "drive_ingest",
+  };
+  const workflowKey = routeToWorkflow[selectedRoute] ?? selectedRoute;
+
+  try {
+    await executeAgenticLoop(pending.chat_id as string, pending.message_text as string, {
+      taskId: pending.task_id as string,
+      lane: "lane1_do",
+      allowTools: true,
+      workflowKey,
+      sessionModel: normalizeBotModel("claude"),
+    });
+    return `Routed to ${selectedRoute}.`;
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    console.log(JSON.stringify({
+      ts: Date.now(),
+      event: "routing_clarification_dispatch_failed",
+      correlation_id: pending.correlation_id,
+      pending_id: pendingId,
+      selected_route: selectedRoute,
+      error: msg,
+    }));
+    return `Dispatch to ${selectedRoute} failed: ${msg.slice(0, 200)}`;
   }
 }
 
@@ -1650,7 +1733,7 @@ const AGENT_TOOLS: ToolDef[] = [
   {
     name: "query_credit_compass" as const,
     description:
-      "Query Credit Compass (same Supabase/Lovable project as Credit Guardian — GitHub: fairway-fixer-18; Lovable may show the Credit Compass name) for credit assessment data, client records, dispute sessions, and strategy context. Use when the user asks about credit assessments, battle plans, or Credit Compass specifically.",
+      "Query Credit Compass (repo: fendi-fight-plan, Supabase project imjnqwcrgpqrouiiazam) for new-client assessments, battle plans, and report generation. Compass is a SEPARATE backend from Credit Guardian — use this tool for intake/assessment work; use query_credit_guardian for active-dispute lifecycle work.",
     parameters: {
       type: "object" as const,
       properties: {
@@ -1689,104 +1772,70 @@ const AGENT_TOOLS: ToolDef[] = [
       assessment_id?: string;
     }) => {
       const { action, client_name, client_id, assessment_id } = params;
-      // Credit Compass is the same Fairway/Credit Guardian project in practice.
-      // Prefer the shared cross-project fetch path first to avoid brittle Lovable config drift.
-      const trySharedFetch = async (): Promise<string | null> => {
-        try {
-          let body: Record<string, unknown> | null = null;
-          switch (action) {
-            case "get_clients":
-              body = { action: "get_clients" };
-              break;
-            case "get_client_detail":
-            case "get_assessment": {
-              const cid = client_id ?? assessment_id;
-              if (!cid) return JSON.stringify({ error: "client_id or assessment_id required" });
-              body = { action: "get_client_detail", params: { client_id: cid } };
-              break;
-            }
-            case "get_dispute_letters": {
-              const cid = client_id ?? assessment_id;
-              if (!cid) return JSON.stringify({ error: "client_id or assessment_id required" });
-              body = { action: "get_documents", params: { client_id: cid } };
-              break;
-            }
-            default:
-              // create_assessment / generate_dispute_letters may rely on project-specific handlers.
-              return null;
-          }
-          const sharedResp = await fetchCreditGuardian(body);
-          const sharedText = await sharedResp.text();
-          if (!sharedResp.ok) {
-            return JSON.stringify({
-              error: `Credit Compass shared route failed: ${sharedResp.status}`,
-              detail: sharedText.slice(0, 2000),
-            });
-          }
-          return sharedText;
-        } catch (err: unknown) {
-          const msg = err instanceof Error ? err.message : String(err);
-          return JSON.stringify({ error: `Credit Compass shared route error: ${msg}` });
-        }
-      };
 
-      const sharedResult = await trySharedFetch();
-      if (sharedResult !== null) return sharedResult;
-
-      const CREDIT_COMPASS_URL = Deno.env.get("CREDIT_COMPASS_URL");
-      if (!CREDIT_COMPASS_URL) {
+      // Compass-hosted dispute-letter functions live at separate endpoints
+      // (generate-dispute-letter / generate-specialty-freeze-letter), not on
+      // control-center-api. Flag as not-yet-implemented until a follow-up PR
+      // wires those paths explicitly — do NOT silently route to Guardian.
+      if (action === "get_dispute_letters" || action === "generate_dispute_letters") {
         return JSON.stringify({
           error:
-            "CREDIT_COMPASS_URL is not set and no shared-route mapping exists for this action",
+            "Compass dispute-letter actions are not yet wired on the Hub. These live on " +
+            "separate Compass edge functions (generate-dispute-letter / " +
+            "generate-specialty-freeze-letter) and require their own fetch path.",
           action,
         });
       }
-      const compassKey = Deno.env.get("CREDIT_COMPASS_KEY") ?? "";
-      if (!compassKey) {
+
+      const compassAction = mapToolActionToCompassAction(action);
+      if (!compassAction) {
         return JSON.stringify({
-          error: "CREDIT_COMPASS_KEY is not set for control-center-api fallback",
-          action,
+          error: `Unknown Credit Compass action: ${action}`,
+          hint:
+            "Valid actions: create_assessment, get_assessments, get_assessment_detail, " +
+            "get_report, generate_report, get_clients (-> get_assessments), " +
+            "get_client_detail (-> get_assessment_detail), get_assessment (-> get_assessment_detail)",
         });
       }
-      const payload = JSON.stringify({ action, client_name, client_id, assessment_id });
-      const endpoint = `${CREDIT_COMPASS_URL}/functions/v1/control-center-api`;
+
+      const body: Record<string, unknown> = { action: compassAction };
+      const forwardedParams: Record<string, unknown> = {};
+      if (client_name) forwardedParams.client_name = client_name;
+      if (client_id) forwardedParams.client_id = client_id;
+      if (assessment_id) forwardedParams.assessment_id = assessment_id;
+      if (Object.keys(forwardedParams).length > 0) body.params = forwardedParams;
+
+      const startedAt = Date.now();
       try {
-        let resp = await fetch(endpoint, {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            "x-api-key": compassKey,
-          },
-          body: payload,
-        });
-        // Fallback: if x-api-key rejected, try Bearer auth
-        if (resp.status === 401 || resp.status === 403) {
-          console.log("[query_credit_compass] x-api-key auth failed, trying Bearer fallback");
-          resp = await fetch(endpoint, {
-            method: "POST",
-            headers: {
-              "Content-Type": "application/json",
-              Authorization: `Bearer ${compassKey}`,
-            },
-            body: payload,
-          });
-        }
+        const resp = await fetchCreditCompass(body);
+        const text = await resp.text();
+        console.log(JSON.stringify({
+          ts: Date.now(),
+          event: "credit_compass_routing",
+          action: compassAction,
+          status: resp.status,
+          latency_ms: Date.now() - startedAt,
+        }));
         if (!resp.ok) {
-          const detail = (await resp.text()).slice(0, 2000);
-          // 5xx from Lovable-side endpoint often indicates upstream misconfiguration; attempt shared route fallback.
-          if (resp.status >= 500) {
-            const fallback = await trySharedFetch();
-            if (fallback !== null) return fallback;
-          }
           return JSON.stringify({
-            error: `Credit Compass returned ${resp.status} (tried x-api-key then Bearer)`,
-            detail,
+            error: `Credit Compass returned ${resp.status}`,
+            action: compassAction,
+            detail: text.slice(0, 2000),
           });
         }
-        return JSON.stringify(await resp.json());
+        return text;
       } catch (err: unknown) {
         const msg = err instanceof Error ? err.message : String(err);
-        return JSON.stringify({ error: `Failed to reach Credit Compass: ${msg}` });
+        console.log(JSON.stringify({
+          ts: Date.now(),
+          event: "credit_compass_exception",
+          action: compassAction,
+          message: msg,
+        }));
+        return JSON.stringify({
+          error: `Failed to reach Credit Compass: ${msg}`,
+          action: compassAction,
+        });
       }
     },
   },
@@ -4649,6 +4698,9 @@ serve(async (req) => {
 
   try {
     logTelegramWebhookAccepted(update, updateId);
+  // Correlation ID for the entire request lifecycle. Propagated to downstream
+  // Guardian/Compass fetches and structured routing logs.
+  const correlationId = `tg_${updateId}`;
     _currentTaskId = null;
 
     // ââ Callback queries (inline button presses) ââ
@@ -4684,6 +4736,7 @@ serve(async (req) => {
         case "explain": result = await handleExplainMore(targetId); break;
         case "agent_confirm": result = await handleAgentConfirm(targetId); break;
         case "agent_cancel": result = await handleAgentCancel(targetId); break;
+        case "clar": result = await handleRouteClarification(targetId); break;
         default: result = "â Unknown action.";
       }
 
@@ -6580,6 +6633,7 @@ serve(async (req) => {
             taskId,
             workflowKey: wfRescue.key,
             confidence_score: creditDecisionRescue.confidence,
+            correlation_id: correlationId,
           }));
           await supabase.from("tasks").update({
             status: "running",
@@ -6589,6 +6643,7 @@ serve(async (req) => {
               progress_step: "credit_lane1_rescue",
               credit_rescue: true,
               confidence_score: creditDecisionRescue.confidence,
+              correlation_id: correlationId,
             },
           }).eq("id", taskId);
           try {
@@ -6675,7 +6730,7 @@ serve(async (req) => {
     // ââââââââââââââââââââââââââââââââââââââââââââââââââââââââââ
     console.log(`[LANE2] Assistant mode taskId=${taskId} ts=${Date.now()}`);
     const lane2Start = Date.now();
-    await supabase.from("tasks").update({ status: "running", selected_workflow: "lane2_assistant", result_json: { execution_lane: "lane2_assistant", progress_step: "lane2_start" } }).eq("id", taskId);
+    await supabase.from("tasks").update({ status: "running", selected_workflow: "lane2_assistant", result_json: { execution_lane: "lane2_assistant", progress_step: "lane2_start", correlation_id: correlationId } }).eq("id", taskId);
 
     const model: BotModel = normalizeBotModel(session.active_model);
     let lane2Status: "succeeded" | "failed" = "succeeded";
