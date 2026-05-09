@@ -40,6 +40,8 @@ import {
   formatUnifiedIntelForPrompt,
   gatherUnifiedClientState,
 } from "../_shared/unifiedClientIntelligence.ts";
+import { handleTelegramAttachment, type TelegramAttachmentUpdate } from "../_shared/telegramAttachmentHandler.ts";
+import { buildLiveAttachmentDeps } from "../_shared/telegramAttachmentDepsLive.ts";
 
 const BOT_TOKEN = Deno.env.get("FendiAIbot")!;
 const CHAT_ID = Deno.env.get("TELEGRAM_CHAT_ID") ?? "";
@@ -4747,6 +4749,83 @@ serve(async (req) => {
       }
       _currentTaskId = null;
       return new Response("ok");
+    }
+
+    // ── Photo / document attachments (Phase 1 intake-streamlining) ──
+    // Routed BEFORE the text-only early-return because attachment-only messages
+    // have `caption` but no `text`. See _shared/telegramAttachmentHandler.ts.
+    {
+      const m = update.message as
+        | { photo?: unknown[]; document?: { file_id?: string }; caption?: string }
+        | undefined;
+      const hasAttachment = !!(m?.document?.file_id) || !!(m?.photo && m.photo.length > 0);
+      if (hasAttachment) {
+        const attSession = await resolveSession(tgChatId);
+        const attTaskId = await createTaskRow(
+          attSession.id,
+          `attachment:${m?.caption ?? "(no caption)"}`,
+          null,
+        );
+        _currentTaskId = attTaskId;
+        try {
+          const deps = buildLiveAttachmentDeps({
+            botToken: BOT_TOKEN,
+            supabase,
+            chatId: tgChatId,
+          });
+          const outcome = await handleTelegramAttachment(
+            update as unknown as TelegramAttachmentUpdate,
+            deps,
+          );
+          if (outcome.kind === "no_attachment") {
+            // Defensive — extractAttachmentSource agrees with hasAttachment, but in
+            // case of a future divergence, fall through rather than crash.
+          } else {
+            await sendMessage(tgChatId, outcome.reply);
+            await supabase
+              .from("tasks")
+              .update({
+                status: outcome.kind === "logged" ? "succeeded" : "failed",
+                result_json: {
+                  kind: outcome.kind,
+                  correlation_id: outcome.correlationId,
+                  ...(outcome.kind === "logged"
+                    ? {
+                      drive_path: outcome.drivePath,
+                      drive_file_name: outcome.driveFileName,
+                      drive_file_id: outcome.driveFileId,
+                      already_existed: outcome.alreadyExisted,
+                      client: outcome.matchedClient,
+                      bureau_canonical: outcome.parsed.bureauCanonical,
+                      round: outcome.parsed.round,
+                      source_message_disposition: outcome.sourceMessageDisposition,
+                    }
+                    : {}),
+                },
+              })
+              .eq("id", attTaskId);
+            _currentTaskId = null;
+            return new Response("ok");
+          }
+        } catch (attErr) {
+          console.error("[telegram-webhook] attachment handler crashed:", attErr);
+          await sendMessage(
+            tgChatId,
+            `📎 Internal error processing the attachment: ${
+              attErr instanceof Error ? attErr.message : String(attErr)
+            }`,
+          );
+          await supabase
+            .from("tasks")
+            .update({
+              status: "failed",
+              result_json: { kind: "exception", message: String(attErr) },
+            })
+            .eq("id", attTaskId);
+          _currentTaskId = null;
+          return new Response("ok");
+        }
+      }
     }
 
     // ── Text messages ──
