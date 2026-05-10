@@ -742,6 +742,75 @@ export type Database = {
           },
         ]
       }
+      pending_guardian_events: {
+        Row: {
+          bureau: string
+          bureau_canonical: string
+          cg_client_id: string | null
+          client_name: string
+          correlation_id: string
+          created_at: string
+          delivered_at: string | null
+          delivery_error: string | null
+          drive_file_id: string
+          drive_file_name: string
+          drive_path: string
+          event_type: string
+          file_unique_id: string
+          id: string
+          ocr_text: string | null
+          received_at: string
+          round: number | null
+          source: string
+          status: string
+          updated_at: string
+        }
+        Insert: {
+          bureau: string
+          bureau_canonical: string
+          cg_client_id?: string | null
+          client_name: string
+          correlation_id: string
+          created_at?: string
+          delivered_at?: string | null
+          delivery_error?: string | null
+          drive_file_id: string
+          drive_file_name: string
+          drive_path: string
+          event_type: string
+          file_unique_id: string
+          id?: string
+          ocr_text?: string | null
+          received_at?: string
+          round?: number | null
+          source: string
+          status?: string
+          updated_at?: string
+        }
+        Update: {
+          bureau?: string
+          bureau_canonical?: string
+          cg_client_id?: string | null
+          client_name?: string
+          correlation_id?: string
+          created_at?: string
+          delivered_at?: string | null
+          delivery_error?: string | null
+          drive_file_id?: string
+          drive_file_name?: string
+          drive_path?: string
+          event_type?: string
+          file_unique_id?: string
+          id?: string
+          ocr_text?: string | null
+          received_at?: string
+          round?: number | null
+          source?: string
+          status?: string
+          updated_at?: string
+        }
+        Relationships: []
+      }
       pitch_drafts: {
         Row: {
           channel: string
