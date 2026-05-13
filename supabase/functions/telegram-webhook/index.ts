@@ -1,19 +1,10 @@
-import { serve } from "https://deno.land/std@0.168.0/http/server.ts"; 
-
-
+import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
 
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.49.1";
 import { fetchCreditGuardian } from "../_shared/creditGuardian.ts";
-import {
-  fetchCreditCompass,
-  mapToolActionToCompassAction,
-} from "../_shared/creditCompass.ts";
+import { fetchCreditCompass, mapToolActionToCompassAction } from "../_shared/creditCompass.ts";
 import { getTaxReturn, listTaxReturns, getFormInstances, upsertTaxReturn } from "../_shared/taxReturns.ts";
-import {
-  anthropicApiKeyConfigured,
-  callClaudeWithTools,
-  toAnthropicTools,
-} from "../_shared/orchestrator.ts";
+import { anthropicApiKeyConfigured, callClaudeWithTools, toAnthropicTools } from "../_shared/orchestrator.ts";
 import { callClaude } from "../_shared/claude.ts";
 import {
   extractClientNameForTaxCommand,
@@ -63,11 +54,9 @@ function formatWorkflowUserPayload(
   const ingest = (rp.ingest || {}) as Record<string, unknown>;
   const ingestSummary = (rp.ingest_summary || {}) as Record<string, unknown>;
   const processed = Array.isArray(ingest.processed_files)
-    ? ingest.processed_files as Array<Record<string, unknown>>
+    ? (ingest.processed_files as Array<Record<string, unknown>>)
     : [];
-  const documents_found = Number(
-    ingestSummary.documents_found ?? ingest.files_processed ?? processed.length ?? 0,
-  );
+  const documents_found = Number(ingestSummary.documents_found ?? ingest.files_processed ?? processed.length ?? 0);
   const snapStatus = typeof snap.status === "string" ? snap.status : undefined;
   const runStatus = typeof run.status === "string" ? run.status : undefined;
   return {
@@ -90,9 +79,9 @@ function formatWorkflowUserPayload(
 }
 
 /** Resolve Control Center client UUID + canonical name for tax generation (Telegram). */
-async function resolveClientIdForTaxGeneration(nameRaw: string | undefined): Promise<
-  { ok: true; id: string; name: string } | { ok: false; message: string }
-> {
+async function resolveClientIdForTaxGeneration(
+  nameRaw: string | undefined,
+): Promise<{ ok: true; id: string; name: string } | { ok: false; message: string }> {
   const trimmed = (nameRaw ?? "")
     .trim()
     .replace(/^[\s"'`“”‘’,.;:!?]+|[\s"'`“”‘’,.;:!?]+$/g, "")
@@ -100,12 +89,10 @@ async function resolveClientIdForTaxGeneration(nameRaw: string | undefined): Pro
   if (!trimmed) {
     return {
       ok: false,
-      message:
-        "client_name is required (e.g. the client's full name as shown in Control Center).",
+      message: "client_name is required (e.g. the client's full name as shown in Control Center).",
     };
   }
-  const escapeIlike = (s: string) =>
-    s.replace(/\\/g, "\\\\").replace(/%/g, "\\%").replace(/_/g, "\\_");
+  const escapeIlike = (s: string) => s.replace(/\\/g, "\\\\").replace(/%/g, "\\%").replace(/_/g, "\\_");
   const rankTaxName = (name: string): number => {
     const upper = name.toUpperCase();
     if (upper.includes("TAXES")) return 0;
@@ -199,15 +186,13 @@ async function resolveClientIdForTaxGeneration(nameRaw: string | undefined): Pro
     }
     return {
       ok: false,
-      message:
-        `Several tax records match "${trimmed}". Use the full name. Options: ${unique.map((r) => r.client_name).join("; ")}`,
+      message: `Several tax records match "${trimmed}". Use the full name. Options: ${unique.map((r) => r.client_name).join("; ")}`,
     };
   }
 
   return {
     ok: false,
-    message:
-      `No client found for "${trimmed}". Create the client in Control Center or match the name exactly.`,
+    message: `No client found for "${trimmed}". Create the client in Control Center or match the name exactly.`,
   };
 }
 
@@ -223,7 +208,6 @@ function extractTaxYearsFromText(text: string): number[] {
   return [...years].sort((a, b) => a - b);
 }
 
-
 function formatPdfAndTxfSummary(r: Record<string, unknown>): string {
   const lines: string[] = [];
   const pdf = r.pdf_results as Record<string, unknown> | undefined;
@@ -236,11 +220,7 @@ function formatPdfAndTxfSummary(r: Record<string, unknown>): string {
     if (Array.isArray(results)) {
       const errs = results.filter((x) => x.status === "error");
       if (errs.length) {
-        lines.push(
-          `   PDF errors: ${
-            errs.map((e) => `${e.form}: ${String(e.error ?? "").slice(0, 80)}`).join("; ")
-          }`,
-        );
+        lines.push(`   PDF errors: ${errs.map((e) => `${e.form}: ${String(e.error ?? "").slice(0, 80)}`).join("; ")}`);
       }
     }
   } else if (pdf && typeof pdf === "object" && pdf.error != null) {
@@ -339,8 +319,9 @@ NEVER claim you lack tools, cannot access Credit Guardian / Credit Compass, or t
 
 function isCreditRelatedUserText(text: string): boolean {
   const t = text.toLowerCase();
-  return /\b(credit|compass|dispute|bureau|equifax|experian|transunion|tradeline|fico|score|charge-?off|collection|guardian|ingest|drive\s*folder|furnisher|reinsert|611|fcta|lexis|innovis|corelogic|sagestream)\b/i
-    .test(t);
+  return /\b(credit|compass|dispute|bureau|equifax|experian|transunion|tradeline|fico|score|charge-?off|collection|guardian|ingest|drive\s*folder|furnisher|reinsert|611|fcta|lexis|innovis|corelogic|sagestream)\b/i.test(
+    t,
+  );
 }
 
 function isCreditWorkflowForSummary(workflowKey?: string): boolean {
@@ -367,13 +348,28 @@ RULES:
 // ─── Implemented workflow keys → handler names (deterministic routing) ───
 // Cardinality is IMPLEMENTED_WORKFLOW_KEYS.size (also exposed in /status health); do not hardcode counts in docs.
 const IMPLEMENTED_WORKFLOW_KEYS = new Set([
-  "ping", "system_status", "resend_failed", "list_workflows", "help",
-  "model_switch", "document_approval", "document_rejection",
-  "failed_job_management", "drive_sync", "client_overview",
-  "file_browsing", "connected_project_stats", "error_explanation",
-  "active_jobs_summary", "document_ingestion_processing",
-  "drive_ingest", "free_agent",
-  "find_playlist_opportunities", "get_pitch_report", "send_playlist_pitch", "update_pitch_status",
+  "ping",
+  "system_status",
+  "resend_failed",
+  "list_workflows",
+  "help",
+  "model_switch",
+  "document_approval",
+  "document_rejection",
+  "failed_job_management",
+  "drive_sync",
+  "client_overview",
+  "file_browsing",
+  "connected_project_stats",
+  "error_explanation",
+  "active_jobs_summary",
+  "document_ingestion_processing",
+  "drive_ingest",
+  "free_agent",
+  "find_playlist_opportunities",
+  "get_pitch_report",
+  "send_playlist_pitch",
+  "update_pitch_status",
   "analyze_client_credit",
   "get_client_report",
   "generate_dispute_letters",
@@ -396,8 +392,11 @@ const IMPLEMENTED_WORKFLOW_KEYS = new Set([
 
 // ─── Workflow registry fetch ────────────────────────────────────
 interface WorkflowEntry {
-  key: string; name: string; description: string;
-  trigger_phrases: string[]; tools: string[];
+  key: string;
+  name: string;
+  description: string;
+  trigger_phrases: string[];
+  tools: string[];
 }
 
 // Synthetic workflow for auto-promoted "find playlist opportunities" when DB registry doesn't have it
@@ -444,8 +443,16 @@ const SYNTHETIC_QUERY_CC_TAX: WorkflowEntry = {
 const SYNTHETIC_GENERATE_TAX_DOCS: WorkflowEntry = {
   key: "generate_tax_docs",
   name: "Generate Tax Documents",
-  description: "Pull all CC Tax data and generate 6 prep documents: Form 1040 JSON summary (with Schedule SE), human-readable worksheet, TXF export for TurboTax, line-by-line Form 1040 mapping, CSV export for Free File, and filing recommendation based on AGI.",
-  trigger_phrases: ["prepare taxes", "complete taxes", "file taxes", "generate tax documents", "tax preparation", "turbotax export"],
+  description:
+    "Pull all CC Tax data and generate 6 prep documents: Form 1040 JSON summary (with Schedule SE), human-readable worksheet, TXF export for TurboTax, line-by-line Form 1040 mapping, CSV export for Free File, and filing recommendation based on AGI.",
+  trigger_phrases: [
+    "prepare taxes",
+    "complete taxes",
+    "file taxes",
+    "generate tax documents",
+    "tax preparation",
+    "turbotax export",
+  ],
   tools: ["generate_tax_docs", "add_manual_income", "add_manual_deduction", "import_prior_return"],
 };
 
@@ -469,7 +476,10 @@ const SYNTHETIC_DRIVE_INGEST: WorkflowEntry = {
 function resolveAutoCreditWorkflow(lowerText: string): WorkflowEntry | undefined {
   if (!shouldAutoExecuteCreditIntent(lowerText)) return undefined;
   const d = inferCreditWorkflowKey(lowerText);
-  if (d.workflowKey === "credit_analysis_and_disputes" && IMPLEMENTED_WORKFLOW_KEYS.has("credit_analysis_and_disputes")) {
+  if (
+    d.workflowKey === "credit_analysis_and_disputes" &&
+    IMPLEMENTED_WORKFLOW_KEYS.has("credit_analysis_and_disputes")
+  ) {
     return SYNTHETIC_CREDIT_ANALYSIS_AND_DISPUTES;
   }
   if (d.workflowKey === "drive_ingest" && IMPLEMENTED_WORKFLOW_KEYS.has("drive_ingest")) {
@@ -483,7 +493,10 @@ function resolveAutoCreditWorkflow(lowerText: string): WorkflowEntry | undefined
 
 /** Lane 1 rescue when confidence is 0.55–0.59 (e.g. pronoun-led credit reference). */
 function syntheticWorkflowForCreditDecision(d: ReturnType<typeof inferCreditWorkflowKey>): WorkflowEntry | undefined {
-  if (d.workflowKey === "credit_analysis_and_disputes" && IMPLEMENTED_WORKFLOW_KEYS.has("credit_analysis_and_disputes")) {
+  if (
+    d.workflowKey === "credit_analysis_and_disputes" &&
+    IMPLEMENTED_WORKFLOW_KEYS.has("credit_analysis_and_disputes")
+  ) {
     return SYNTHETIC_CREDIT_ANALYSIS_AND_DISPUTES;
   }
   if (d.workflowKey === "drive_ingest" && IMPLEMENTED_WORKFLOW_KEYS.has("drive_ingest")) {
@@ -505,12 +518,14 @@ function _resolveWorkflowKey(key: string): string {
   return WORKFLOW_KEY_ALIASES[key] || key;
 }
 
-
 function _normalizeText(s: string): string {
   return (s ?? "").trim().toLowerCase();
 }
 
-function _matchWorkflows(input: string, workflows: WorkflowEntry[]): { matches: WorkflowEntry[]; chosen?: WorkflowEntry } {
+function _matchWorkflows(
+  input: string,
+  workflows: WorkflowEntry[],
+): { matches: WorkflowEntry[]; chosen?: WorkflowEntry } {
   const norm = _normalizeText(input);
   if (!norm) return { matches: [] };
   const matched: WorkflowEntry[] = [];
@@ -529,7 +544,15 @@ function _matchWorkflows(input: string, workflows: WorkflowEntry[]): { matches: 
       }
     }
   }
-  if (matched.length >= 1) return { matches: matched, chosen: matched.sort((a, b) => Math.max(...(b.trigger_phrases || []).map(p => p.length), b.key.length) - Math.max(...(a.trigger_phrases || []).map(p => p.length), a.key.length))[0] };
+  if (matched.length >= 1)
+    return {
+      matches: matched,
+      chosen: matched.sort(
+        (a, b) =>
+          Math.max(...(b.trigger_phrases || []).map((p) => p.length), b.key.length) -
+          Math.max(...(a.trigger_phrases || []).map((p) => p.length), a.key.length),
+      )[0],
+    };
   return { matches: matched };
 }
 
@@ -545,7 +568,8 @@ function _formatWorkflowList(workflows: WorkflowEntry[]): string {
 }
 
 function _formatNoMatch(workflows: WorkflowEntry[]): string {
-  const suggestions = workflows.slice(0, 6)
+  const suggestions = workflows
+    .slice(0, 6)
     .map((wf) => `â¢ *${wf.name}* â try: \`${wf.trigger_phrases[0] || wf.key}\``)
     .join("\n");
   return `â No matching workflow for that request.\n\nRun /workflows to see everything available.\n\nSuggestions:\n${suggestions}`;
@@ -553,7 +577,7 @@ function _formatNoMatch(workflows: WorkflowEntry[]): string {
 
 async function classifyNaturalLanguageIntent(
   userMessage: string,
-  workflows: WorkflowEntry[]
+  workflows: WorkflowEntry[],
 ): Promise<WorkflowEntry | null> {
   try {
     const implemented = workflows
@@ -602,7 +626,7 @@ Respond with ONLY the workflow key or NONE.`;
             contents: [{ parts: [{ text: prompt }] }],
             generationConfig: { temperature: 0, maxOutputTokens: 50 },
           }),
-        }
+        },
       );
 
     let res = await callClassifier();
@@ -618,15 +642,12 @@ Respond with ONLY the workflow key or NONE.`;
     }
 
     const json = await res.json();
-    const rawText =
-      json?.candidates?.[0]?.content?.parts?.[0]?.text?.trim() || "";
+    const rawText = json?.candidates?.[0]?.content?.parts?.[0]?.text?.trim() || "";
     const cleaned = rawText.replace(/[^a-zA-Z0-9_]/g, "");
 
     if (!cleaned || cleaned.toUpperCase() === "NONE") return null;
 
-    const match = workflows.find(
-      (w) => w.key.toLowerCase() === cleaned.toLowerCase()
-    );
+    const match = workflows.find((w) => w.key.toLowerCase() === cleaned.toLowerCase());
     if (match && IMPLEMENTED_WORKFLOW_KEYS.has(match.key)) return match;
 
     return null;
@@ -645,13 +666,15 @@ async function fetchWorkflowRegistry(): Promise<WorkflowEntry[]> {
     }
     // Runtime shape guard
     if (!Array.isArray(data)) return [];
-    return (data as any[]).filter((w) => w.key && w.name).map((w) => ({
-              key: String(w.key),
-              name: String(w.name),
-              description: String(w.description || ""),
-              trigger_phrases: Array.isArray(w.trigger_phrases) ? w.trigger_phrases.map(String) : [],
-              tools: Array.isArray(w.tools) ? w.tools.map(String) : [],
-    }));
+    return (data as any[])
+      .filter((w) => w.key && w.name)
+      .map((w) => ({
+        key: String(w.key),
+        name: String(w.name),
+        description: String(w.description || ""),
+        trigger_phrases: Array.isArray(w.trigger_phrases) ? w.trigger_phrases.map(String) : [],
+        tools: Array.isArray(w.tools) ? w.tools.map(String) : [],
+      }));
   } catch (e) {
     console.error("[WORKFLOW] fetchWorkflowRegistry exception:", e);
     return [];
@@ -660,9 +683,17 @@ async function fetchWorkflowRegistry(): Promise<WorkflowEntry[]> {
 
 async function sendHeaderOnce(taskId: string, chatId: string, model: BotModel) {
   const headerText = `ð¤ *${SYSTEM_IDENTITY}* _(Model: ${getModelLabel(model)})_`;
-  await enqueueTelegram(taskId, chatId, "sendMessage", {
-    chat_id: chatId, text: headerText, parse_mode: "Markdown",
-  }, `task:${taskId}:header`);
+  await enqueueTelegram(
+    taskId,
+    chatId,
+    "sendMessage",
+    {
+      chat_id: chatId,
+      text: headerText,
+      parse_mode: "Markdown",
+    },
+    `task:${taskId}:header`,
+  );
   await flushTelegramOutbox(chatId, 1);
 }
 
@@ -678,24 +709,40 @@ async function _rawTelegramSend(method: string, payload: Record<string, any>) {
   return resp.json();
 }
 
-async function enqueueTelegram(taskId: string, chatId: string, kind: string, payload: Record<string, any>, dedupeKey?: string) {
+async function enqueueTelegram(
+  taskId: string,
+  chatId: string,
+  kind: string,
+  payload: Record<string, any>,
+  dedupeKey?: string,
+) {
   try {
     const row: Record<string, any> = {
-      task_id: taskId, chat_id: chatId, kind, payload,
-      status: "queued", attempt_count: 0,
+      task_id: taskId,
+      chat_id: chatId,
+      kind,
+      payload,
+      status: "queued",
+      attempt_count: 0,
       next_attempt_at: new Date().toISOString(),
     };
     if (dedupeKey) row.dedupe_key = dedupeKey;
     const { error } = await supabase.from("telegram_outbox").insert(row);
     if (error) {
-      if (error.code === "23505") { console.log(`[OUTBOX] Dedupe hit: ${dedupeKey}`); return; }
+      if (error.code === "23505") {
+        console.log(`[OUTBOX] Dedupe hit: ${dedupeKey}`);
+        return;
+      }
       console.error("[OUTBOX] Enqueue error:", error.message);
     }
-  } catch (e) { console.error("[OUTBOX] Enqueue fatal:", e); }
+  } catch (e) {
+    console.error("[OUTBOX] Enqueue fatal:", e);
+  }
 }
 
 async function flushTelegramOutbox(chatId: string, max = 5): Promise<{ sent: number; failed: number }> {
-  let sent = 0, failed = 0;
+  let sent = 0,
+    failed = 0;
   try {
     const { data: due } = await supabase
       .from("telegram_outbox")
@@ -707,14 +754,21 @@ async function flushTelegramOutbox(chatId: string, max = 5): Promise<{ sent: num
       .limit(max);
     if (!due || due.length === 0) return { sent: 0, failed: 0 };
     for (const row of due) {
-      await supabase.from("telegram_outbox").update({
-        status: "sending", last_attempt_at: new Date().toISOString(),
-        attempt_count: row.attempt_count + 1,
-      }).eq("id", row.id);
+      await supabase
+        .from("telegram_outbox")
+        .update({
+          status: "sending",
+          last_attempt_at: new Date().toISOString(),
+          attempt_count: row.attempt_count + 1,
+        })
+        .eq("id", row.id);
       try {
         const result = await _rawTelegramSend(row.kind || "sendMessage", row.payload as Record<string, any>);
         if (result.ok) {
-          await supabase.from("telegram_outbox").update({ status: "sent", sent_at: new Date().toISOString(), last_error: null }).eq("id", row.id);
+          await supabase
+            .from("telegram_outbox")
+            .update({ status: "sent", sent_at: new Date().toISOString(), last_error: null })
+            .eq("id", row.id);
           sent++;
         } else if (result.description?.includes("can't parse entities") && (row.payload as any)?.parse_mode) {
           console.warn("[OUTBOX] Parse error, retrying without parse_mode:", result.description);
@@ -722,35 +776,52 @@ async function flushTelegramOutbox(chatId: string, max = 5): Promise<{ sent: num
           delete plainPayload.parse_mode;
           const retry = await _rawTelegramSend(row.kind || "sendMessage", plainPayload);
           if (retry.ok) {
-            await supabase.from("telegram_outbox").update({ status: "sent", sent_at: new Date().toISOString(), last_error: "parse_mode_fallback" }).eq("id", row.id);
+            await supabase
+              .from("telegram_outbox")
+              .update({ status: "sent", sent_at: new Date().toISOString(), last_error: "parse_mode_fallback" })
+              .eq("id", row.id);
             sent++;
           } else {
             const backoff = Math.min(Math.pow(row.attempt_count + 1, 2) * 5, 120);
-            await supabase.from("telegram_outbox").update({
-              status: "failed", last_error: retry.description || JSON.stringify(retry).slice(0, 500),
-              next_attempt_at: new Date(Date.now() + backoff * 1000).toISOString(),
-            }).eq("id", row.id);
+            await supabase
+              .from("telegram_outbox")
+              .update({
+                status: "failed",
+                last_error: retry.description || JSON.stringify(retry).slice(0, 500),
+                next_attempt_at: new Date(Date.now() + backoff * 1000).toISOString(),
+              })
+              .eq("id", row.id);
             failed++;
           }
         } else {
           const backoff = Math.min(Math.pow(row.attempt_count + 1, 2) * 5, 120);
-          await supabase.from("telegram_outbox").update({
-            status: "failed", last_error: result.description || JSON.stringify(result).slice(0, 500),
-            next_attempt_at: new Date(Date.now() + backoff * 1000).toISOString(),
-          }).eq("id", row.id);
+          await supabase
+            .from("telegram_outbox")
+            .update({
+              status: "failed",
+              last_error: result.description || JSON.stringify(result).slice(0, 500),
+              next_attempt_at: new Date(Date.now() + backoff * 1000).toISOString(),
+            })
+            .eq("id", row.id);
           failed++;
         }
       } catch (e) {
         const backoff = Math.min(Math.pow(row.attempt_count + 1, 2) * 5, 120);
-        await supabase.from("telegram_outbox").update({
-          status: "failed", last_error: e instanceof Error ? e.message : String(e),
-          next_attempt_at: new Date(Date.now() + backoff * 1000).toISOString(),
-        }).eq("id", row.id);
+        await supabase
+          .from("telegram_outbox")
+          .update({
+            status: "failed",
+            last_error: e instanceof Error ? e.message : String(e),
+            next_attempt_at: new Date(Date.now() + backoff * 1000).toISOString(),
+          })
+          .eq("id", row.id);
         failed++;
       }
     }
     console.log(`[OUTBOX-FLUSH] chatId=${chatId} picked=${due.length} sent=${sent} failed=${failed}`);
-  } catch (e) { console.error("[OUTBOX-FLUSH] Fatal:", e); }
+  } catch (e) {
+    console.error("[OUTBOX-FLUSH] Fatal:", e);
+  }
   return { sent, failed };
 }
 
@@ -802,13 +873,15 @@ async function handleRouteClarification(targetId: string): Promise<string> {
     })
     .eq("id", pendingId);
 
-  console.log(JSON.stringify({
-    ts: Date.now(),
-    event: "routing_clarification_resolved",
-    correlation_id: pending.correlation_id,
-    pending_id: pendingId,
-    selected_route: selectedRoute,
-  }));
+  console.log(
+    JSON.stringify({
+      ts: Date.now(),
+      event: "routing_clarification_resolved",
+      correlation_id: pending.correlation_id,
+      pending_id: pendingId,
+      selected_route: selectedRoute,
+    }),
+  );
 
   if (selectedRoute === "skip") {
     return "Skipped — send another message to continue.";
@@ -832,14 +905,16 @@ async function handleRouteClarification(targetId: string): Promise<string> {
     return `Routed to ${selectedRoute}.`;
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
-    console.log(JSON.stringify({
-      ts: Date.now(),
-      event: "routing_clarification_dispatch_failed",
-      correlation_id: pending.correlation_id,
-      pending_id: pendingId,
-      selected_route: selectedRoute,
-      error: msg,
-    }));
+    console.log(
+      JSON.stringify({
+        ts: Date.now(),
+        event: "routing_clarification_dispatch_failed",
+        correlation_id: pending.correlation_id,
+        pending_id: pendingId,
+        selected_route: selectedRoute,
+        error: msg,
+      }),
+    );
     return `Dispatch to ${selectedRoute} failed: ${msg.slice(0, 200)}`;
   }
 }
@@ -862,7 +937,9 @@ async function editMessageReplyMarkup(chatId: string, messageId: number) {
 type BotModel = "claude" | "chatgpt" | "gemini" | "grok";
 
 function normalizeBotModel(v: unknown): BotModel {
-  const s = String(v ?? "").toLowerCase().trim();
+  const s = String(v ?? "")
+    .toLowerCase()
+    .trim();
   if (s === "claude" || s === "chatgpt" || s === "gemini" || s === "grok") return s;
   return "claude";
 }
@@ -879,11 +956,7 @@ async function getActiveModel(chatId?: string): Promise<{ model: BotModel; sessi
   }
 
   // Fall back to global setting
-  const { data } = await supabase
-    .from("bot_settings")
-    .select("setting_value")
-    .eq("setting_key", "ai_model")
-    .single();
+  const { data } = await supabase.from("bot_settings").select("setting_value").eq("setting_key", "ai_model").single();
 
   if (data?.setting_value) return { model: normalizeBotModel(data.setting_value) };
 
@@ -946,7 +1019,7 @@ async function saveConversationTurns(chatId: string, turns: ConversationTurn[]):
       setting_value: JSON.stringify(limited),
       updated_at: new Date().toISOString(),
     },
-    { onConflict: "setting_key" }
+    { onConflict: "setting_key" },
   );
 }
 
@@ -977,10 +1050,12 @@ async function getRecentDocContext(): Promise<string> {
 
   if (!docs || docs.length === 0) return "No recently processed documents.";
 
-  return docs.map((d: any, i: number) => {
-    const client = d.clients as any;
-    return `${i + 1}. ${d.file_name} | Type: ${d.doc_type || "unknown"} | Bureau: ${d.bureau || "N/A"} | Client: ${client?.name || "Unknown"}`;
-  }).join("\n");
+  return docs
+    .map((d: any, i: number) => {
+      const client = d.clients as any;
+      return `${i + 1}. ${d.file_name} | Type: ${d.doc_type || "unknown"} | Bureau: ${d.bureau || "N/A"} | Client: ${client?.name || "Unknown"}`;
+    })
+    .join("\n");
 }
 
 // âââ Session & Task helpers (deterministic spine) âââââââââââââââ
@@ -1008,14 +1083,18 @@ async function resolveSession(chatId: string): Promise<{ id: string; active_mode
 }
 
 async function createTaskRow(sessionId: string, requestText: string, requestedModel?: string | null): Promise<string> {
-  const { data, error } = await supabase.from("tasks").insert({
-    session_id: sessionId,
-    status: "queued",
-    request_text: requestText,
-    requested_model: requestedModel || null,
-    selected_workflow: "unknown",
-    result_json: { action: "created" },
-  }).select("id").single();
+  const { data, error } = await supabase
+    .from("tasks")
+    .insert({
+      session_id: sessionId,
+      status: "queued",
+      request_text: requestText,
+      requested_model: requestedModel || null,
+      selected_workflow: "unknown",
+      result_json: { action: "created" },
+    })
+    .select("id")
+    .single();
 
   if (error || !data) throw new Error(`Failed to create task: ${error?.message}`);
   return data.id;
@@ -1025,15 +1104,29 @@ async function createTaskRow(sessionId: string, requestText: string, requestedMo
 function classifyErrorCode(errMsg: string): { error_code: string; error_hint: string } {
   const msg = (errMsg || "").toLowerCase();
   if (msg.includes("timeout")) return { error_code: "TIMEOUT", error_hint: "Execution exceeded time limit" };
-  if (msg.includes("ai unavailable") || msg.includes("gemini agentic error") || msg.includes("grok agentic error") || /\b(4\d{2}|5\d{2})\b/.test(msg) && (msg.includes("api") || msg.includes("fetch"))) return { error_code: "AI_HTTP", error_hint: "AI API returned an error" };
-  if (msg.includes("parse") || msg.includes("json") || msg.includes("unexpected token")) return { error_code: "AI_PARSE", error_hint: "Failed to parse AI response" };
-  if (msg.includes("tools_blocked")) return { error_code: "TOOL_BLOCKED", error_hint: "Tool execution blocked outside Lane 1" };
-  if (msg.includes("workflow_not_found") || msg.includes("registry")) return { error_code: "WORKFLOW_NOT_FOUND", error_hint: "Workflow not found in registry" };
-  if (msg.includes("lock_not_acquired") || msg.includes("task_lock")) return { error_code: "LOCK_NOT_ACQUIRED", error_hint: "Another execution already running" };
+  if (
+    msg.includes("ai unavailable") ||
+    msg.includes("gemini agentic error") ||
+    msg.includes("grok agentic error") ||
+    (/\b(4\d{2}|5\d{2})\b/.test(msg) && (msg.includes("api") || msg.includes("fetch")))
+  )
+    return { error_code: "AI_HTTP", error_hint: "AI API returned an error" };
+  if (msg.includes("parse") || msg.includes("json") || msg.includes("unexpected token"))
+    return { error_code: "AI_PARSE", error_hint: "Failed to parse AI response" };
+  if (msg.includes("tools_blocked"))
+    return { error_code: "TOOL_BLOCKED", error_hint: "Tool execution blocked outside Lane 1" };
+  if (msg.includes("workflow_not_found") || msg.includes("registry"))
+    return { error_code: "WORKFLOW_NOT_FOUND", error_hint: "Workflow not found in registry" };
+  if (msg.includes("lock_not_acquired") || msg.includes("task_lock"))
+    return { error_code: "LOCK_NOT_ACQUIRED", error_hint: "Another execution already running" };
   return { error_code: "UNKNOWN", error_hint: "Unclassified failure" };
 }
 
-function buildFailureResultJson(base: Record<string, any>, errMsg: string, executionStart?: number): Record<string, any> {
+function buildFailureResultJson(
+  base: Record<string, any>,
+  errMsg: string,
+  executionStart?: number,
+): Record<string, any> {
   const { error_code, error_hint } = classifyErrorCode(errMsg);
   return {
     ...base,
@@ -1047,20 +1140,19 @@ function buildFailureResultJson(base: Record<string, any>, errMsg: string, execu
 
 // Helper: set shortcut workflow attribution BEFORE running shortcut logic
 async function setShortcutAttribution(taskId: string, command: string) {
-  await supabase.from("tasks").update({
-    status: "running",
-    selected_workflow: `shortcut_${command}`,
-    result_json: { execution_lane: "shortcut", progress_step: `shortcut_${command}_start` },
-  }).eq("id", taskId);
+  await supabase
+    .from("tasks")
+    .update({
+      status: "running",
+      selected_workflow: `shortcut_${command}`,
+      result_json: { execution_lane: "shortcut", progress_step: `shortcut_${command}_start` },
+    })
+    .eq("id", taskId);
 }
 
 // âââ Cross-project helpers ââââââââââââââââââââââââââââââââââââââ
 async function getConnectedProjects() {
-  const { data } = await supabase
-    .from("connected_projects")
-    .select("*")
-    .eq("is_active", true)
-    .order("name");
+  const { data } = await supabase.from("connected_projects").select("*").eq("is_active", true).order("name");
   return data || [];
 }
 
@@ -1090,17 +1182,21 @@ async function fetchProjectStats(project: any): Promise<{ name: string; tables: 
           return { name: project.name, tables: { clients: n } };
         }
         await resp.text();
-      } catch { /* try next */ }
+      } catch {
+        /* try next */
+      }
     }
 
     try {
       const fallback = await fetch(`${project.supabase_url}/functions/v1/project-stats`, {
         method: "GET",
-        headers: { "Content-Type": "application/json", "Authorization": `Bearer ${apiKey}` },
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${apiKey}` },
       });
       if (fallback.ok) return await fallback.json();
       await fallback.text();
-    } catch { /* ignore */ }
+    } catch {
+      /* ignore */
+    }
 
     console.error(`[fetchProjectStats] ${project.name}: all endpoints failed`);
     return null;
@@ -1147,27 +1243,55 @@ interface ToolDef {
 const AGENT_TOOLS: ToolDef[] = [
   {
     name: "get_system_status",
-    description: "Get overall system status: document counts, pending approvals, active/failed jobs, and current AI model.",
+    description:
+      "Get overall system status: document counts, pending approvals, active/failed jobs, and current AI model.",
     parameters: { type: "object", properties: {}, required: [] },
     destructive: false,
     execute: async (_args: any, context?: { chatId?: string }) => {
       const errors: { table: string; query: string; error_message: string }[] = [];
 
       const q1 = await supabase.from("documents").select("*", { count: "exact", head: true }).eq("status", "completed");
-      if (q1.error) { console.error("get_system_status: documents query error:", q1.error.message); errors.push({ table: "documents", query: "count completed", error_message: q1.error.message }); }
+      if (q1.error) {
+        console.error("get_system_status: documents query error:", q1.error.message);
+        errors.push({ table: "documents", query: "count completed", error_message: q1.error.message });
+      }
 
-      const q2 = await supabase.from("telegram_approval_queue").select("*", { count: "exact", head: true }).eq("status", "pending");
-      if (q2.error) { console.error("get_system_status: telegram_approval_queue query error:", q2.error.message); errors.push({ table: "telegram_approval_queue", query: "count pending", error_message: q2.error.message }); }
+      const q2 = await supabase
+        .from("telegram_approval_queue")
+        .select("*", { count: "exact", head: true })
+        .eq("status", "pending");
+      if (q2.error) {
+        console.error("get_system_status: telegram_approval_queue query error:", q2.error.message);
+        errors.push({ table: "telegram_approval_queue", query: "count pending", error_message: q2.error.message });
+      }
 
-      const q3 = await supabase.from("ingestion_jobs").select("*", { count: "exact", head: true }).in("status", ["queued", "processing", "retrying"]);
-      if (q3.error) { console.error("get_system_status: ingestion_jobs active query error:", q3.error.message); errors.push({ table: "ingestion_jobs", query: "count active", error_message: q3.error.message }); }
+      const q3 = await supabase
+        .from("ingestion_jobs")
+        .select("*", { count: "exact", head: true })
+        .in("status", ["queued", "processing", "retrying"]);
+      if (q3.error) {
+        console.error("get_system_status: ingestion_jobs active query error:", q3.error.message);
+        errors.push({ table: "ingestion_jobs", query: "count active", error_message: q3.error.message });
+      }
 
-      const q4 = await supabase.from("ingestion_jobs").select("*", { count: "exact", head: true }).eq("status", "failed");
-      if (q4.error) { console.error("get_system_status: ingestion_jobs failed query error:", q4.error.message); errors.push({ table: "ingestion_jobs", query: "count failed", error_message: q4.error.message }); }
+      const q4 = await supabase
+        .from("ingestion_jobs")
+        .select("*", { count: "exact", head: true })
+        .eq("status", "failed");
+      if (q4.error) {
+        console.error("get_system_status: ingestion_jobs failed query error:", q4.error.message);
+        errors.push({ table: "ingestion_jobs", query: "count failed", error_message: q4.error.message });
+      }
 
       const oneHourAgo = new Date(Date.now() - 60 * 60 * 1000).toISOString();
-      const q5 = await supabase.from("tool_execution_logs").select("*", { count: "exact", head: true }).gte("started_at", oneHourAgo);
-      if (q5.error) { console.error("get_system_status: tool_execution_logs query error:", q5.error.message); errors.push({ table: "tool_execution_logs", query: "count recent 1h", error_message: q5.error.message }); }
+      const q5 = await supabase
+        .from("tool_execution_logs")
+        .select("*", { count: "exact", head: true })
+        .gte("started_at", oneHourAgo);
+      if (q5.error) {
+        console.error("get_system_status: tool_execution_logs query error:", q5.error.message);
+        errors.push({ table: "tool_execution_logs", query: "count recent 1h", error_message: q5.error.message });
+      }
 
       const modelResult = await getActiveModel(context?.chatId);
 
@@ -1196,12 +1320,14 @@ const AGENT_TOOLS: ToolDef[] = [
         .eq("status", "pending")
         .order("created_at", { ascending: false })
         .limit(10);
-      return JSON.stringify(pending?.map((p: any) => ({
-        id: p.id,
-        file_name: (p.documents as any)?.file_name,
-        client: (p.clients as any)?.name,
-        observation_count: p.observation_count,
-      })) || []);
+      return JSON.stringify(
+        pending?.map((p: any) => ({
+          id: p.id,
+          file_name: (p.documents as any)?.file_name,
+          client: (p.clients as any)?.name,
+          observation_count: p.observation_count,
+        })) || [],
+      );
     },
   },
   {
@@ -1216,19 +1342,25 @@ const AGENT_TOOLS: ToolDef[] = [
         .eq("status", "failed")
         .order("completed_at", { ascending: false })
         .limit(10);
-      return JSON.stringify(failed?.map((j: any) => ({
-        id: j.id,
-        file_name: (j.documents as any)?.file_name,
-        client: (j.clients as any)?.name,
-        attempt_count: j.attempt_count,
-        last_error: j.last_error,
-      })) || []);
+      return JSON.stringify(
+        failed?.map((j: any) => ({
+          id: j.id,
+          file_name: (j.documents as any)?.file_name,
+          client: (j.clients as any)?.name,
+          attempt_count: j.attempt_count,
+          last_error: j.last_error,
+        })) || [],
+      );
     },
   },
   {
     name: "retry_failed_job",
     description: "Retry a specific failed ingestion job by re-queuing it and triggering processing. Requires job_id.",
-    parameters: { type: "object", properties: { job_id: { type: "string", description: "The UUID of the failed job to retry" } }, required: ["job_id"] },
+    parameters: {
+      type: "object",
+      properties: { job_id: { type: "string", description: "The UUID of the failed job to retry" } },
+      required: ["job_id"],
+    },
     destructive: true,
     execute: async (args: any) => {
       const { data: job, error } = await supabase
@@ -1238,7 +1370,10 @@ const AGENT_TOOLS: ToolDef[] = [
         .single();
       if (error || !job) return "â Job not found.";
       if (job.status !== "failed") return `Job is currently ${job.status}, can only retry failed jobs.`;
-      await supabase.from("ingestion_jobs").update({ status: "queued", last_error: null, started_at: null, completed_at: null }).eq("id", args.job_id);
+      await supabase
+        .from("ingestion_jobs")
+        .update({ status: "queued", last_error: null, started_at: null, completed_at: null })
+        .eq("id", args.job_id);
       if (job.document_id) await supabase.from("documents").update({ status: "pending" }).eq("id", job.document_id);
       try {
         const ANON_KEY = Deno.env.get("SUPABASE_PUBLISHABLE_KEY") || SUPABASE_SERVICE_ROLE_KEY;
@@ -1247,7 +1382,9 @@ const AGENT_TOOLS: ToolDef[] = [
           headers: { "Content-Type": "application/json", Authorization: `Bearer ${ANON_KEY}` },
           body: JSON.stringify({ job_id: args.job_id }),
         });
-      } catch (e) { console.error("Retry trigger failed:", e); }
+      } catch (e) {
+        console.error("Retry trigger failed:", e);
+      }
       const doc = job.documents as any;
       return `Retry initiated for "${doc?.file_name || "Unknown"}".`;
     },
@@ -1255,51 +1392,100 @@ const AGENT_TOOLS: ToolDef[] = [
   {
     name: "archive_job",
     description: "Archive a job so it won't be retried. Requires job_id.",
-    parameters: { type: "object", properties: { job_id: { type: "string", description: "The UUID of the job to archive" } }, required: ["job_id"] },
+    parameters: {
+      type: "object",
+      properties: { job_id: { type: "string", description: "The UUID of the job to archive" } },
+      required: ["job_id"],
+    },
     destructive: true,
     execute: async (args: any) => {
-      const { data: job, error } = await supabase.from("ingestion_jobs").select("*, documents(file_name)").eq("id", args.job_id).single();
+      const { data: job, error } = await supabase
+        .from("ingestion_jobs")
+        .select("*, documents(file_name)")
+        .eq("id", args.job_id)
+        .single();
       if (error || !job) return "â Job not found.";
-      await supabase.from("ingestion_jobs").update({ status: "archived", completed_at: new Date().toISOString() }).eq("id", args.job_id);
+      await supabase
+        .from("ingestion_jobs")
+        .update({ status: "archived", completed_at: new Date().toISOString() })
+        .eq("id", args.job_id);
       return `Archived "${(job.documents as any)?.file_name || "Unknown"}".`;
     },
   },
   {
     name: "approve_document",
     description: "Approve a pending document, verifying all its observations. Requires queue_id.",
-    parameters: { type: "object", properties: { queue_id: { type: "string", description: "The UUID of the approval queue entry" } }, required: ["queue_id"] },
+    parameters: {
+      type: "object",
+      properties: { queue_id: { type: "string", description: "The UUID of the approval queue entry" } },
+      required: ["queue_id"],
+    },
     destructive: true,
     execute: async (args: any) => {
-      const { data: queue, error } = await supabase.from("telegram_approval_queue").select("*").eq("id", args.queue_id).single();
+      const { data: queue, error } = await supabase
+        .from("telegram_approval_queue")
+        .select("*")
+        .eq("id", args.queue_id)
+        .single();
       if (error || !queue) return "â Approval record not found.";
       if (queue.status !== "pending") return "Already processed.";
       const now = new Date().toISOString();
-      await supabase.from("observations").update({ is_verified: true, verified_at: now, verified_via: "telegram" }).eq("document_id", queue.document_id).eq("client_id", queue.client_id);
-      await supabase.from("telegram_approval_queue").update({ status: "approved", resolved_at: now }).eq("id", args.queue_id);
+      await supabase
+        .from("observations")
+        .update({ is_verified: true, verified_at: now, verified_via: "telegram" })
+        .eq("document_id", queue.document_id)
+        .eq("client_id", queue.client_id);
+      await supabase
+        .from("telegram_approval_queue")
+        .update({ status: "approved", resolved_at: now })
+        .eq("id", args.queue_id);
       return `Approved: ${queue.observation_count} observations verified.`;
     },
   },
   {
     name: "reject_document",
     description: "Reject a pending document, leaving observations unverified. Requires queue_id.",
-    parameters: { type: "object", properties: { queue_id: { type: "string", description: "The UUID of the approval queue entry" } }, required: ["queue_id"] },
+    parameters: {
+      type: "object",
+      properties: { queue_id: { type: "string", description: "The UUID of the approval queue entry" } },
+      required: ["queue_id"],
+    },
     destructive: true,
     execute: async (args: any) => {
-      const { data: queue, error } = await supabase.from("telegram_approval_queue").select("*").eq("id", args.queue_id).single();
+      const { data: queue, error } = await supabase
+        .from("telegram_approval_queue")
+        .select("*")
+        .eq("id", args.queue_id)
+        .single();
       if (error || !queue) return "â Approval record not found.";
       if (queue.status !== "pending") return "Already processed.";
-      await supabase.from("telegram_approval_queue").update({ status: "rejected", resolved_at: new Date().toISOString() }).eq("id", args.queue_id);
+      await supabase
+        .from("telegram_approval_queue")
+        .update({ status: "rejected", resolved_at: new Date().toISOString() })
+        .eq("id", args.queue_id);
       return `Rejected. Observations remain unverified for manual review.`;
     },
   },
   {
     name: "switch_ai_model",
-    description: "Switch the active AI model. Allowed: claude, chatgpt, gemini, grok. This is only allowed when the user explicitly requests a switch.",
-    parameters: { type: "object", properties: { model: { type: "string", enum: ["claude", "chatgpt", "gemini", "grok"], description: "The model to switch to" } }, required: ["model"] },
+    description:
+      "Switch the active AI model. Allowed: claude, chatgpt, gemini, grok. This is only allowed when the user explicitly requests a switch.",
+    parameters: {
+      type: "object",
+      properties: {
+        model: { type: "string", enum: ["claude", "chatgpt", "gemini", "grok"], description: "The model to switch to" },
+      },
+      required: ["model"],
+    },
     destructive: true,
     execute: async (args: any) => {
       const nextModel = normalizeBotModel(args.model);
-      await supabase.from("bot_settings").upsert({ setting_key: "ai_model", setting_value: nextModel, updated_at: new Date().toISOString() }, { onConflict: "setting_key" });
+      await supabase
+        .from("bot_settings")
+        .upsert(
+          { setting_key: "ai_model", setting_value: nextModel, updated_at: new Date().toISOString() },
+          { onConflict: "setting_key" },
+        );
       return `Switched to ${nextModel}.`;
     },
   },
@@ -1310,13 +1496,24 @@ const AGENT_TOOLS: ToolDef[] = [
     destructive: false,
     execute: async () => {
       const projects = await getConnectedProjects();
-      return JSON.stringify(projects.map((p: any) => ({ name: p.name, description: p.description, is_active: p.is_active })));
+      return JSON.stringify(
+        projects.map((p: any) => ({ name: p.name, description: p.description, is_active: p.is_active })),
+      );
     },
   },
   {
     name: "get_project_stats",
     description: "Get table record counts from a connected project. Provide project_name or leave empty for all.",
-    parameters: { type: "object", properties: { project_name: { type: "string", description: "Name of the project (partial match). Leave empty for all projects." } }, required: [] },
+    parameters: {
+      type: "object",
+      properties: {
+        project_name: {
+          type: "string",
+          description: "Name of the project (partial match). Leave empty for all projects.",
+        },
+      },
+      required: [],
+    },
     destructive: false,
     execute: async (args: any) => {
       const projects = await getConnectedProjects();
@@ -1336,7 +1533,11 @@ const AGENT_TOOLS: ToolDef[] = [
   {
     name: "get_recent_documents",
     description: "Get recently processed documents with their details.",
-    parameters: { type: "object", properties: { limit: { type: "number", description: "Number of documents to fetch (max 20)" } }, required: [] },
+    parameters: {
+      type: "object",
+      properties: { limit: { type: "number", description: "Number of documents to fetch (max 20)" } },
+      required: [],
+    },
     destructive: false,
     execute: async (args: any) => {
       const limit = Math.min(args.limit || 5, 20);
@@ -1345,15 +1546,23 @@ const AGENT_TOOLS: ToolDef[] = [
         .select("id, file_name, doc_type, bureau, status, created_at, clients(name)")
         .order("updated_at", { ascending: false })
         .limit(limit);
-      return JSON.stringify(docs?.map((d: any) => ({
-        id: d.id, file_name: d.file_name, doc_type: d.doc_type, bureau: d.bureau,
-        status: d.status, client: (d.clients as any)?.name, created_at: d.created_at,
-      })) || []);
+      return JSON.stringify(
+        docs?.map((d: any) => ({
+          id: d.id,
+          file_name: d.file_name,
+          doc_type: d.doc_type,
+          bureau: d.bureau,
+          status: d.status,
+          client: (d.clients as any)?.name,
+          created_at: d.created_at,
+        })) || [],
+      );
     },
   },
   {
     name: "trigger_drive_sync",
-    description: "Trigger a Google Drive sync to scan for new or updated files in the shared Drive folder. This will discover new documents and queue them for processing.",
+    description:
+      "Trigger a Google Drive sync to scan for new or updated files in the shared Drive folder. This will discover new documents and queue them for processing.",
     parameters: { type: "object", properties: {}, required: [] },
     destructive: false,
     execute: async () => {
@@ -1377,24 +1586,45 @@ const AGENT_TOOLS: ToolDef[] = [
   },
   {
     name: "list_drive_files",
-    description: "List files stored in the system from Google Drive, optionally filtered by client name. Shows file name, status, type, and client.",
-    parameters: { type: "object", properties: { client_name: { type: "string", description: "Filter by client name (partial match). Leave empty for all." }, status: { type: "string", description: "Filter by status: pending, processing, completed, failed. Leave empty for all." }, limit: { type: "number", description: "Number of files to return (max 50)" } }, required: [] },
+    description:
+      "List files stored in the system from Google Drive, optionally filtered by client name. Shows file name, status, type, and client.",
+    parameters: {
+      type: "object",
+      properties: {
+        client_name: { type: "string", description: "Filter by client name (partial match). Leave empty for all." },
+        status: {
+          type: "string",
+          description: "Filter by status: pending, processing, completed, failed. Leave empty for all.",
+        },
+        limit: { type: "number", description: "Number of files to return (max 50)" },
+      },
+      required: [],
+    },
     destructive: false,
     execute: async (args: any) => {
       const limit = Math.min(args.limit || 20, 50);
       let query = supabase
         .from("documents")
-        .select("id, file_name, doc_type, bureau, status, mime_type, drive_file_id, created_at, updated_at, clients(name)")
+        .select(
+          "id, file_name, doc_type, bureau, status, mime_type, drive_file_id, created_at, updated_at, clients(name)",
+        )
         .eq("is_deleted", false)
         .order("updated_at", { ascending: false })
         .limit(limit);
       if (args.status) query = query.eq("status", args.status);
       const { data: docs } = await query;
-      let results = docs?.map((d: any) => ({
-        id: d.id, file_name: d.file_name, doc_type: d.doc_type, bureau: d.bureau,
-        status: d.status, mime_type: d.mime_type, client: (d.clients as any)?.name,
-        created_at: d.created_at, updated_at: d.updated_at,
-      })) || [];
+      let results =
+        docs?.map((d: any) => ({
+          id: d.id,
+          file_name: d.file_name,
+          doc_type: d.doc_type,
+          bureau: d.bureau,
+          status: d.status,
+          mime_type: d.mime_type,
+          client: (d.clients as any)?.name,
+          created_at: d.created_at,
+          updated_at: d.updated_at,
+        })) || [];
       if (args.client_name) {
         results = results.filter((r: any) => r.client?.toLowerCase().includes(args.client_name.toLowerCase()));
       }
@@ -1415,9 +1645,15 @@ const AGENT_TOOLS: ToolDef[] = [
       if (!clients || clients.length === 0) return "No clients found.";
       const summaries = [];
       for (const client of clients) {
-        const { data: docs } = await supabase.from("documents").select("id, status").eq("client_id", client.id).eq("is_deleted", false);
+        const { data: docs } = await supabase
+          .from("documents")
+          .select("id, status")
+          .eq("client_id", client.id)
+          .eq("is_deleted", false);
         const statusCounts: Record<string, number> = {};
-        (docs || []).forEach((d: any) => { statusCounts[d.status] = (statusCounts[d.status] || 0) + 1; });
+        (docs || []).forEach((d: any) => {
+          statusCounts[d.status] = (statusCounts[d.status] || 0) + 1;
+        });
         summaries.push({ name: client.name, total_documents: docs?.length || 0, by_status: statusCounts });
       }
       return JSON.stringify(summaries);
@@ -1426,11 +1662,16 @@ const AGENT_TOOLS: ToolDef[] = [
 
   {
     name: "get_active_jobs_summary",
-    description: "Get a structured breakdown of active (processing/queued) ingestion jobs: counts by status, job type, age buckets, top errors, and example rows. Use when the user asks 'what are the active jobs', 'describe the jobs', or 'summarize the N jobs'.",
+    description:
+      "Get a structured breakdown of active (processing/queued) ingestion jobs: counts by status, job type, age buckets, top errors, and example rows. Use when the user asks 'what are the active jobs', 'describe the jobs', or 'summarize the N jobs'.",
     parameters: {
       type: "object",
       properties: {
-        status_filter: { type: "string", enum: ["processing", "queued", "failed", "archived"], description: "Filter to a specific status. Default: shows processing+queued." },
+        status_filter: {
+          type: "string",
+          enum: ["processing", "queued", "failed", "archived"],
+          description: "Filter to a specific status. Default: shows processing+queued.",
+        },
         hours_back: { type: "number", description: "Only include jobs created in the last N hours. Default: 24." },
         limit: { type: "number", description: "Max example rows to return. Default: 50, max: 50." },
       },
@@ -1442,14 +1683,14 @@ const AGENT_TOOLS: ToolDef[] = [
       const limit = Math.min(args.limit ?? 50, 50);
       const cutoff = new Date(Date.now() - hoursBack * 60 * 60 * 1000).toISOString();
 
-      const statusFilter: string[] = args.status_filter
-        ? [args.status_filter]
-        : ["processing", "queued"];
+      const statusFilter: string[] = args.status_filter ? [args.status_filter] : ["processing", "queued"];
 
       // Main query â fetch rows (capped at limit)
       const { data: jobs, error } = await supabase
         .from("ingestion_jobs")
-        .select("id, job_type, status, attempt_count, started_at, heartbeat_at, completed_at, created_at, drive_file_id, document_id, last_error")
+        .select(
+          "id, job_type, status, attempt_count, started_at, heartbeat_at, completed_at, created_at, drive_file_id, document_id, last_error",
+        )
         .in("status", statusFilter)
         .gte("created_at", cutoff)
         .order("created_at", { ascending: false })
@@ -1477,11 +1718,15 @@ const AGENT_TOOLS: ToolDef[] = [
 
       // by_status
       const byStatus: Record<string, number> = { processing: 0, queued: 0, failed: 0, archived: 0 };
-      for (const j of allJobs) { byStatus[j.status] = (byStatus[j.status] || 0) + 1; }
+      for (const j of allJobs) {
+        byStatus[j.status] = (byStatus[j.status] || 0) + 1;
+      }
 
       // by_job_type
       const jobTypeCounts: Record<string, number> = {};
-      for (const j of allJobs) { jobTypeCounts[j.job_type] = (jobTypeCounts[j.job_type] || 0) + 1; }
+      for (const j of allJobs) {
+        jobTypeCounts[j.job_type] = (jobTypeCounts[j.job_type] || 0) + 1;
+      }
       const byJobType = Object.entries(jobTypeCounts).map(([job_type, count]) => ({ job_type, count }));
 
       // age_buckets based on COALESCE(heartbeat_at, started_at, created_at)
@@ -1513,14 +1758,19 @@ const AGENT_TOOLS: ToolDef[] = [
 
       // examples (first 5 rows)
       const examples = allJobs.slice(0, 5).map((j: any) => ({
-        id: j.id, job_type: j.job_type, status: j.status,
-        attempt_count: j.attempt_count, started_at: j.started_at,
-        heartbeat_at: j.heartbeat_at, completed_at: j.completed_at,
-        drive_file_id: j.drive_file_id, document_id: j.document_id,
+        id: j.id,
+        job_type: j.job_type,
+        status: j.status,
+        attempt_count: j.attempt_count,
+        started_at: j.started_at,
+        heartbeat_at: j.heartbeat_at,
+        completed_at: j.completed_at,
+        drive_file_id: j.drive_file_id,
+        document_id: j.document_id,
       }));
 
       return JSON.stringify({
-        active_definition: "status IN (" + statusFilter.map(s => `'${s}'`).join(",") + ")",
+        active_definition: "status IN (" + statusFilter.map((s) => `'${s}'`).join(",") + ")",
         hours_back: hoursBack,
         total,
         by_status: byStatus,
@@ -1535,8 +1785,16 @@ const AGENT_TOOLS: ToolDef[] = [
   // âââ Instagram Messaging Tools ââââââââââââââââââââââââââââââââ
   {
     name: "instagram_send_dm",
-    description: "Send an Instagram Direct Message to a user. Requires recipient_id (Instagram-scoped user ID) and message text. [DESTRUCTIVE - requires user confirmation]",
-    parameters: { type: "object", properties: { recipient_id: { type: "string", description: "Instagram-scoped user ID (IGSID) of the recipient" }, message: { type: "string", description: "The message text to send" } }, required: ["recipient_id", "message"] },
+    description:
+      "Send an Instagram Direct Message to a user. Requires recipient_id (Instagram-scoped user ID) and message text. [DESTRUCTIVE - requires user confirmation]",
+    parameters: {
+      type: "object",
+      properties: {
+        recipient_id: { type: "string", description: "Instagram-scoped user ID (IGSID) of the recipient" },
+        message: { type: "string", description: "The message text to send" },
+      },
+      required: ["recipient_id", "message"],
+    },
     destructive: true,
     execute: async (args: any) => {
       const ANON_KEY = Deno.env.get("SUPABASE_PUBLISHABLE_KEY") || SUPABASE_SERVICE_ROLE_KEY;
@@ -1552,8 +1810,16 @@ const AGENT_TOOLS: ToolDef[] = [
   },
   {
     name: "instagram_reply_comment",
-    description: "Reply to a comment on an Instagram post. Requires comment_id and reply_text. [DESTRUCTIVE - requires user confirmation]",
-    parameters: { type: "object", properties: { comment_id: { type: "string", description: "The ID of the Instagram comment to reply to" }, reply_text: { type: "string", description: "The reply text" } }, required: ["comment_id", "reply_text"] },
+    description:
+      "Reply to a comment on an Instagram post. Requires comment_id and reply_text. [DESTRUCTIVE - requires user confirmation]",
+    parameters: {
+      type: "object",
+      properties: {
+        comment_id: { type: "string", description: "The ID of the Instagram comment to reply to" },
+        reply_text: { type: "string", description: "The reply text" },
+      },
+      required: ["comment_id", "reply_text"],
+    },
     destructive: true,
     execute: async (args: any) => {
       const ANON_KEY = Deno.env.get("SUPABASE_PUBLISHABLE_KEY") || SUPABASE_SERVICE_ROLE_KEY;
@@ -1569,8 +1835,16 @@ const AGENT_TOOLS: ToolDef[] = [
   },
   {
     name: "instagram_reply_story_mention",
-    description: "Reply to someone who mentioned you in their Instagram story via DM. Requires recipient_id and message. [DESTRUCTIVE - requires user confirmation]",
-    parameters: { type: "object", properties: { recipient_id: { type: "string", description: "Instagram-scoped user ID of the person who mentioned you" }, message: { type: "string", description: "The reply message" } }, required: ["recipient_id", "message"] },
+    description:
+      "Reply to someone who mentioned you in their Instagram story via DM. Requires recipient_id and message. [DESTRUCTIVE - requires user confirmation]",
+    parameters: {
+      type: "object",
+      properties: {
+        recipient_id: { type: "string", description: "Instagram-scoped user ID of the person who mentioned you" },
+        message: { type: "string", description: "The reply message" },
+      },
+      required: ["recipient_id", "message"],
+    },
     destructive: true,
     execute: async (args: any) => {
       const ANON_KEY = Deno.env.get("SUPABASE_PUBLISHABLE_KEY") || SUPABASE_SERVICE_ROLE_KEY;
@@ -1642,7 +1916,7 @@ const AGENT_TOOLS: ToolDef[] = [
       const resp = await fetch(INGEST_URL, {
         method: "POST",
         headers: {
-          "Authorization": `Bearer ${Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")}`,
+          Authorization: `Bearer ${Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")}`,
           "Content-Type": "application/json",
         },
         body: JSON.stringify({ client_name: args.client_name }),
@@ -1676,7 +1950,8 @@ const AGENT_TOOLS: ToolDef[] = [
         },
         client_id: {
           type: "string",
-          description: "Fairway client UUID — required for get_client_detail, get_documents; optional filter for get_recent_activity.",
+          description:
+            "Fairway client UUID — required for get_client_detail, get_documents; optional filter for get_recent_activity.",
         },
         session_id: {
           type: "string",
@@ -1686,12 +1961,7 @@ const AGENT_TOOLS: ToolDef[] = [
       },
       required: ["action"],
     },
-    execute: async (args: {
-      action: string;
-      client_id?: string;
-      session_id?: string;
-      limit?: number;
-    }) => {
+    execute: async (args: { action: string; client_id?: string; session_id?: string; limit?: number }) => {
       const cid = args.client_id || args.session_id;
       let body: Record<string, unknown>;
 
@@ -1765,12 +2035,7 @@ const AGENT_TOOLS: ToolDef[] = [
       required: ["action"],
     },
     destructive: false,
-    execute: async (params: {
-      action: string;
-      client_name?: string;
-      client_id?: string;
-      assessment_id?: string;
-    }) => {
+    execute: async (params: { action: string; client_name?: string; client_id?: string; assessment_id?: string }) => {
       const { action, client_name, client_id, assessment_id } = params;
 
       // Compass-hosted dispute-letter functions live at separate endpoints
@@ -1809,13 +2074,15 @@ const AGENT_TOOLS: ToolDef[] = [
       try {
         const resp = await fetchCreditCompass(body);
         const text = await resp.text();
-        console.log(JSON.stringify({
-          ts: Date.now(),
-          event: "credit_compass_routing",
-          action: compassAction,
-          status: resp.status,
-          latency_ms: Date.now() - startedAt,
-        }));
+        console.log(
+          JSON.stringify({
+            ts: Date.now(),
+            event: "credit_compass_routing",
+            action: compassAction,
+            status: resp.status,
+            latency_ms: Date.now() - startedAt,
+          }),
+        );
         if (!resp.ok) {
           return JSON.stringify({
             error: `Credit Compass returned ${resp.status}`,
@@ -1826,12 +2093,14 @@ const AGENT_TOOLS: ToolDef[] = [
         return text;
       } catch (err: unknown) {
         const msg = err instanceof Error ? err.message : String(err);
-        console.log(JSON.stringify({
-          ts: Date.now(),
-          event: "credit_compass_exception",
-          action: compassAction,
-          message: msg,
-        }));
+        console.log(
+          JSON.stringify({
+            ts: Date.now(),
+            event: "credit_compass_exception",
+            action: compassAction,
+            message: msg,
+          }),
+        );
         return JSON.stringify({
           error: `Failed to reach Credit Compass: ${msg}`,
           action: compassAction,
@@ -1877,12 +2146,7 @@ const AGENT_TOOLS: ToolDef[] = [
       required: ["action"],
     },
     destructive: false,
-    execute: async (params: {
-      action: string;
-      tax_year?: number;
-      status_filter?: string;
-      limit?: number;
-    }) => {
+    execute: async (params: { action: string; tax_year?: number; status_filter?: string; limit?: number }) => {
       const { action, tax_year, status_filter, limit } = params;
       const CC_TAX_URL = Deno.env.get("CC_TAX_URL");
       if (!CC_TAX_URL) {
@@ -1943,16 +2207,18 @@ const AGENT_TOOLS: ToolDef[] = [
     execute: async (args: { tax_years?: number[]; client_name?: string }, ctx?: ToolExecuteContext) => {
       const ANON_KEY = Deno.env.get("SUPABASE_PUBLISHABLE_KEY") || SUPABASE_SERVICE_ROLE_KEY;
       const fromMsgClient = ctx?.userMessage ? extractClientNameForTaxCommand(ctx.userMessage) : null;
-      const clientNameForResolve = (fromMsgClient && fromMsgClient.trim()) ||
-        (args.client_name ?? "").trim();
+      const clientNameForResolve = (fromMsgClient && fromMsgClient.trim()) || (args.client_name ?? "").trim();
       const resolved = await resolveClientIdForTaxGeneration(clientNameForResolve);
       if (!resolved.ok) {
         return JSON.stringify({ error: resolved.message });
       }
       const fromMsgYears = ctx?.userMessage ? extractTaxYearsFromText(ctx.userMessage) : [];
-      const mergedYears = (Array.isArray(args.tax_years) && args.tax_years.length > 0)
-        ? args.tax_years
-        : (fromMsgYears.length > 0 ? fromMsgYears : null);
+      const mergedYears =
+        Array.isArray(args.tax_years) && args.tax_years.length > 0
+          ? args.tax_years
+          : fromMsgYears.length > 0
+            ? fromMsgYears
+            : null;
       const allYears = mergedYears ?? [new Date().getFullYear()];
       const batchSize = 2;
       const mergedResults: Record<string, any> = {};
@@ -1984,7 +2250,7 @@ const AGENT_TOOLS: ToolDef[] = [
           } catch (_) {
             throw new Error(`Failed to parse tax response for years ${batch.join(",")}: ${raw.slice(0, 400)}`);
           }
-        })
+        }),
       );
 
       for (const batchResult of batchResponses) {
@@ -2020,7 +2286,7 @@ const AGENT_TOOLS: ToolDef[] = [
           summary += `\n⚠️ No Drive document analysis available`;
         }
         summary += `\n• AGI: $${(r.agi ?? rec?.agi ?? 0).toLocaleString()}`;
-        summary += `\n• Recommended filing method: ${(rec?.method && rec.method !== "Undecided") ? rec.method : ((r.agi ?? 0) <= 85000 ? "IRS Free File / TurboTax (TXF)" : "TurboTax/paid software + mail-in IRS PDF drafts")}`;
+        summary += `\n• Recommended filing method: ${rec?.method && rec.method !== "Undecided" ? rec.method : (r.agi ?? 0) <= 85000 ? "IRS Free File / TurboTax (TXF)" : "TurboTax/paid software + mail-in IRS PDF drafts"}`;
         summary += `\n• Filing readiness: ${readiness?.score ?? readiness?.percentage ?? "N/A"}/100 ${readiness?.ready_to_file ? "✅" : "⚠️"}`;
         summary += `\n• Missing items: ${readiness?.missing_items?.length ? readiness.missing_items.join(", ") : "None"}`;
         summary += `\n• Documents generated: ${docList.join(", ")}`;
@@ -2037,7 +2303,7 @@ const AGENT_TOOLS: ToolDef[] = [
         return summary;
       });
       const fishing = formatDeductionFishingBlock(resolved.name, allYears);
-      return `Tax prep documents generated for ${years.join(", ")}:\n\n${summaries.join("\n\n")}\n\n${fishing}\n\n⚠️ Disclaimer: These are preparation documents only — not a tax filing. Review all figures before submitting.`
+      return `Tax prep documents generated for ${years.join(", ")}:\n\n${summaries.join("\n\n")}\n\n${fishing}\n\n⚠️ Disclaimer: These are preparation documents only — not a tax filing. Review all figures before submitting.`;
     },
   },
   {
@@ -2069,7 +2335,7 @@ const AGENT_TOOLS: ToolDef[] = [
       const resolved = await resolveClientIdForTaxGeneration(args.client_name?.trim());
       if (!resolved.ok) return JSON.stringify({ error: resolved.message });
       const tr = await getTaxReturn(supabase, resolved.id, args.tax_year);
-      const js = ((tr?.json_summary ?? {}) as Record<string, unknown>);
+      const js = (tr?.json_summary ?? {}) as Record<string, unknown>;
       const manual_income = Array.isArray(js.manual_income) ? [...(js.manual_income as unknown[])] : [];
       manual_income.push({
         id: crypto.randomUUID(),
@@ -2105,7 +2371,10 @@ const AGENT_TOOLS: ToolDef[] = [
         category: { type: "string", enum: [...MANUAL_DEDUCTION_CATEGORIES] as string[] },
         amount: { type: "number" },
         description: { type: "string" },
-        miles: { type: "number", description: "Business miles (car_truck_expenses) — amount overridden by miles × $0.585 when set" },
+        miles: {
+          type: "number",
+          description: "Business miles (car_truck_expenses) — amount overridden by miles × $0.585 when set",
+        },
       },
       required: ["client_name", "tax_year", "category", "amount"],
     },
@@ -2125,10 +2394,8 @@ const AGENT_TOOLS: ToolDef[] = [
         amount = Math.round(args.miles * 0.585 * 100) / 100;
       }
       const tr = await getTaxReturn(supabase, resolved.id, args.tax_year);
-      const js = ((tr?.json_summary ?? {}) as Record<string, unknown>);
-      const manual_deductions = Array.isArray(js.manual_deductions)
-        ? [...(js.manual_deductions as unknown[])]
-        : [];
+      const js = (tr?.json_summary ?? {}) as Record<string, unknown>;
+      const manual_deductions = Array.isArray(js.manual_deductions) ? [...(js.manual_deductions as unknown[])] : [];
       manual_deductions.push({
         id: crypto.randomUUID(),
         category: args.category,
@@ -2170,7 +2437,7 @@ const AGENT_TOOLS: ToolDef[] = [
     execute: async (args: { client_name: string; current_year: number; prior_year?: number }) => {
       const resolved = await resolveClientIdForTaxGeneration(args.client_name?.trim());
       if (!resolved.ok) return JSON.stringify({ error: resolved.message });
-      const py = args.prior_year ?? (args.current_year - 1);
+      const py = args.prior_year ?? args.current_year - 1;
       const { data, error } = await supabase
         .from("tax_returns")
         .select("id, tax_year, filing_status, agi, total_income, json_summary")
@@ -2197,7 +2464,8 @@ const AGENT_TOOLS: ToolDef[] = [
   },
   {
     name: "scan_drive_overview" as const,
-    description: "Read-only scan of Google Drive client folders. Returns client names, file counts, and file types â does NOT read file contents. Call this first in autonomous mode to understand what's in Drive. Safe to call without approval.",
+    description:
+      "Read-only scan of Google Drive client folders. Returns client names, file counts, and file types â does NOT read file contents. Call this first in autonomous mode to understand what's in Drive. Safe to call without approval.",
     destructive: false,
     parameters: {
       type: "object" as const,
@@ -2212,7 +2480,7 @@ const AGENT_TOOLS: ToolDef[] = [
         : rawFolder;
       const q = `'${rootFolderId}' in parents and mimeType = 'application/vnd.google-apps.folder' and trashed = false`;
       const foldersResp = await fetch(
-        `https://www.googleapis.com/drive/v3/files?q=${encodeURIComponent(q)}&fields=files(id,name)&key=${GOOGLE_API_KEY}`
+        `https://www.googleapis.com/drive/v3/files?q=${encodeURIComponent(q)}&fields=files(id,name)&key=${GOOGLE_API_KEY}`,
       );
       if (!foldersResp.ok) throw new Error(`Drive API error: ${foldersResp.status}`);
       const { files: clientFolders } = await foldersResp.json();
@@ -2220,21 +2488,25 @@ const AGENT_TOOLS: ToolDef[] = [
       for (const folder of (clientFolders || []).slice(0, 30)) {
         const filesQ = `'${folder.id}' in parents and trashed = false`;
         const filesResp = await fetch(
-          `https://www.googleapis.com/drive/v3/files?q=${encodeURIComponent(filesQ)}&fields=files(id,name,mimeType)&key=${GOOGLE_API_KEY}`
+          `https://www.googleapis.com/drive/v3/files?q=${encodeURIComponent(filesQ)}&fields=files(id,name,mimeType)&key=${GOOGLE_API_KEY}`,
         );
         const { files } = await filesResp.json();
         const fileList: any[] = files || [];
         const mimeShort = (m: string) =>
-          m.includes("google-apps.document") ? "Google Doc"
-          : m.includes("google-apps.spreadsheet") ? "Sheet"
-          : m.includes("pdf") ? "PDF"
-          : m.includes("word") ? "Word"
-          : "Other";
+          m.includes("google-apps.document")
+            ? "Google Doc"
+            : m.includes("google-apps.spreadsheet")
+              ? "Sheet"
+              : m.includes("pdf")
+                ? "PDF"
+                : m.includes("word")
+                  ? "Word"
+                  : "Other";
         overview.push({
           client: folder.name,
           folder_id: folder.id,
           file_count: fileList.length,
-          file_types: [...new Set(fileList.map(f => mimeShort(f.mimeType)))] as string[],
+          file_types: [...new Set(fileList.map((f) => mimeShort(f.mimeType)))] as string[],
         });
       }
       return JSON.stringify({ total_clients: clientFolders?.length ?? 0, clients: overview });
@@ -2242,7 +2514,8 @@ const AGENT_TOOLS: ToolDef[] = [
   },
   {
     name: "propose_plan" as const,
-    description: "MANDATORY before any write operation in autonomous mode. Presents a step-by-step plan to the user via Telegram and waits for approval. After calling this you MUST stop â do not call any write tools until the user sends an approval word in their next message.",
+    description:
+      "MANDATORY before any write operation in autonomous mode. Presents a step-by-step plan to the user via Telegram and waits for approval. After calling this you MUST stop â do not call any write tools until the user sends an approval word in their next message.",
     destructive: false,
     parameters: {
       type: "object" as const,
@@ -2299,17 +2572,23 @@ const AGENT_TOOLS: ToolDef[] = [
       await supabase.from("bot_settings").upsert(
         {
           setting_key: `pending_plan:${planId}`,
-          setting_value: JSON.stringify({ goal: args.goal, steps: args.steps, planId, created_at: new Date().toISOString() }),
+          setting_value: JSON.stringify({
+            goal: args.goal,
+            steps: args.steps,
+            planId,
+            created_at: new Date().toISOString(),
+          }),
           updated_at: new Date().toISOString(),
         },
-        { onConflict: "setting_key" }
+        { onConflict: "setting_key" },
       );
       return JSON.stringify({
         plan_presented: true,
         plan_id: planId,
         telegram_message: planMsg,
         awaiting_approval: true,
-        instruction: "Send telegram_message to the user via sendMessage and STOP. Do NOT call any write tools. Wait for user approval.",
+        instruction:
+          "Send telegram_message to the user via sendMessage and STOP. Do NOT call any write tools. Wait for user approval.",
       });
     },
   },
@@ -2384,9 +2663,10 @@ const AGENT_TOOLS: ToolDef[] = [
       const result = await callFanFuelHub("pitch-status", { track_name: args?.track_name ?? "" });
       const entries = result?.entries ?? [];
       if (!Array.isArray(entries) || entries.length === 0) return "No pitches logged yet.";
-      const lines = entries.slice(0, 25).map((p: any) =>
-        `• ${p.playlist_id} — ${p.track_name} — ${p.status} (${p.method ?? "?"})`
-      ).join("\n");
+      const lines = entries
+        .slice(0, 25)
+        .map((p: any) => `• ${p.playlist_id} — ${p.track_name} — ${p.status} (${p.method ?? "?"})`)
+        .join("\n");
       const cap = result?.summary?.email_pitches_last_24h;
       const capLine = typeof cap === "number" ? `\nEmail pitches (last 24h): ${cap}/10` : "";
       return `Pitch log (${entries.length} shown):\n\n${lines}${capLine}`;
@@ -2394,7 +2674,8 @@ const AGENT_TOOLS: ToolDef[] = [
   },
   {
     name: "send_playlist_pitch",
-    description: "Execute one pitch for a playlist via FanFuel Hub (email or instructions). Pass playlist_id and track_name.",
+    description:
+      "Execute one pitch for a playlist via FanFuel Hub (email or instructions). Pass playlist_id and track_name.",
     parameters: {
       type: "object",
       properties: {
@@ -2464,7 +2745,9 @@ const AGENT_TOOLS: ToolDef[] = [
       try {
         const parsed = JSON.parse(raw);
         if (parsed.needsVerification && parsed.message) return parsed.message;
-      } catch (_) { /* non-JSON response, return as-is */ }
+      } catch (_) {
+        /* non-JSON response, return as-is */
+      }
       return raw;
     },
   },
@@ -2486,7 +2769,12 @@ const AGENT_TOOLS: ToolDef[] = [
       const resp = await fetch(`${SUPABASE_URL}/functions/v1/generate-dispute-letters`, {
         method: "POST",
         headers: { "Content-Type": "application/json", Authorization: `Bearer ${ANON_KEY}` },
-        body: JSON.stringify({ action: "generate", client_id: args.client_id, dispute_item: args.dispute_item, analysis_id: args.analysis_id }),
+        body: JSON.stringify({
+          action: "generate",
+          client_id: args.client_id,
+          dispute_item: args.dispute_item,
+          analysis_id: args.analysis_id,
+        }),
       });
       const raw = await resp.text();
       if (!resp.ok) throw new Error(`generate-dispute-letters failed (${resp.status}): ${raw.slice(0, 400)}`);
@@ -2593,7 +2881,8 @@ const AGENT_TOOLS: ToolDef[] = [
   },
   {
     name: "analyze_client_credit",
-    description: "Sync Google Drive files for a client and run the full credit analysis pipeline. Use when Fendi asks to analyze, check, process, or run credit reports for a client like Nicholas, Corey, or Lamonze.",
+    description:
+      "Sync Google Drive files for a client and run the full credit analysis pipeline. Use when Fendi asks to analyze, check, process, or run credit reports for a client like Nicholas, Corey, or Lamonze.",
     parameters: {
       client_name: { type: "string", description: "Client name (e.g. 'Nicholas', 'Corey', 'Lamonze')" },
     },
@@ -2615,7 +2904,9 @@ const AGENT_TOOLS: ToolDef[] = [
         .ilike("name", "%" + client_name + "%")
         .limit(5);
       if (!clients || clients.length === 0) {
-        return JSON.stringify({ error: "No client found matching '" + client_name + "'. Drive sync ran: " + JSON.stringify(syncResult) });
+        return JSON.stringify({
+          error: "No client found matching '" + client_name + "'. Drive sync ran: " + JSON.stringify(syncResult),
+        });
       }
       const client = clients[0];
       // 3. Count and trigger process-document for queued jobs
@@ -2652,13 +2943,19 @@ const AGENT_TOOLS: ToolDef[] = [
         processing_jobs_triggered: processed,
         jobs_queued_before_sync: queuedCount || 0,
         total_observations_on_file: obsCount || 0,
-        recent_documents: (docs || []).map((d: any) => ({ name: d.file_name, status: d.status, bureau: d.bureau, type: d.doc_type })),
+        recent_documents: (docs || []).map((d: any) => ({
+          name: d.file_name,
+          status: d.status,
+          bureau: d.bureau,
+          type: d.doc_type,
+        })),
       });
     },
   },
   {
     name: "get_client_report",
-    description: "Get a full credit analysis summary for a client - negative tradelines, hard inquiries, public records, bureaus covered. Use when asked to show, read, or summarize a client's credit data.",
+    description:
+      "Get a full credit analysis summary for a client - negative tradelines, hard inquiries, public records, bureaus covered. Use when asked to show, read, or summarize a client's credit data.",
     parameters: {
       type: "object" as const,
       properties: {
@@ -2676,7 +2973,9 @@ const AGENT_TOOLS: ToolDef[] = [
         .ilike("name", "%" + client_name + "%")
         .limit(3);
       if (!clients || clients.length === 0) {
-        return JSON.stringify({ error: "No client found matching '" + client_name + "'. Run analyze_client_credit first." });
+        return JSON.stringify({
+          error: "No client found matching '" + client_name + "'. Run analyze_client_credit first.",
+        });
       }
       const client = clients[0];
       let docsQuery = supabase
@@ -2691,7 +2990,9 @@ const AGENT_TOOLS: ToolDef[] = [
         .select("object_key, field_name, field_value_text, evidence_snippet")
         .eq("client_id", client.id)
         .eq("object_type", "tradeline")
-        .or("field_value_text.ilike.%late%,field_value_text.ilike.%charge off%,field_value_text.ilike.%collection%,field_value_text.ilike.%derogatory%,field_value_text.ilike.%past due%")
+        .or(
+          "field_value_text.ilike.%late%,field_value_text.ilike.%charge off%,field_value_text.ilike.%collection%,field_value_text.ilike.%derogatory%,field_value_text.ilike.%past due%",
+        )
         .limit(40);
       const { count: hardInqCount } = await supabase
         .from("observations")
@@ -2716,7 +3017,9 @@ const AGENT_TOOLS: ToolDef[] = [
         documents_processed: docs?.length || 0,
         bureaus_covered: [...new Set((docs || []).map((d: any) => d.bureau).filter(Boolean))],
         negative_tradeline_count: Object.keys(negByAccount).length,
-        negative_tradelines: Object.entries(negByAccount).slice(0, 20).map(([key, items]) => ({ account: key, issues: items })),
+        negative_tradelines: Object.entries(negByAccount)
+          .slice(0, 20)
+          .map(([key, items]) => ({ account: key, issues: items })),
         hard_inquiries: hardInqCount || 0,
         public_records_count: pubRecs?.length || 0,
         public_record_details: pubRecs || [],
@@ -2726,10 +3029,14 @@ const AGENT_TOOLS: ToolDef[] = [
   },
   {
     name: "generate_dispute_letters",
-    description: "Generate professional FCRA-compliant credit dispute letters for a client based on their analyzed credit data. Creates one letter per bureau targeting all negative items found.",
+    description:
+      "Generate professional FCRA-compliant credit dispute letters for a client based on their analyzed credit data. Creates one letter per bureau targeting all negative items found.",
     parameters: {
       client_name: { type: "string", description: "Client name (e.g. 'Nicholas', 'Corey', 'Lamonze')" },
-      bureau: { type: "string", description: "Optional: target one bureau - equifax, experian, transunion. Leave blank for all bureaus." },
+      bureau: {
+        type: "string",
+        description: "Optional: target one bureau - equifax, experian, transunion. Leave blank for all bureaus.",
+      },
     },
     destructive: false,
     execute: async (params: any) => {
@@ -2756,7 +3063,9 @@ const AGENT_TOOLS: ToolDef[] = [
         .select("object_key, field_name, field_value_text, document_id")
         .eq("client_id", client.id)
         .eq("object_type", "tradeline")
-        .or("field_value_text.ilike.%late%,field_value_text.ilike.%charge off%,field_value_text.ilike.%collection%,field_value_text.ilike.%derogatory%,field_value_text.ilike.%past due%")
+        .or(
+          "field_value_text.ilike.%late%,field_value_text.ilike.%charge off%,field_value_text.ilike.%collection%,field_value_text.ilike.%derogatory%,field_value_text.ilike.%past due%",
+        )
         .limit(60);
       const { data: creditDocs } = await supabase
         .from("documents")
@@ -2774,7 +3083,9 @@ const AGENT_TOOLS: ToolDef[] = [
         byBureau[b][obs.object_key].push(obs.field_name + ": " + obs.field_value_text);
       }
       if (Object.keys(byBureau).length === 0) {
-        return JSON.stringify({ error: "No negative items found. Run analyze_client_credit first to process credit files." });
+        return JSON.stringify({
+          error: "No negative items found. Run analyze_client_credit first to process credit files.",
+        });
       }
       const bureauAddresses: Record<string, string> = {
         equifax: "Equifax Information Services LLC\nP.O. Box 740256\nAtlanta, GA 30374-0256",
@@ -2789,8 +3100,22 @@ const AGENT_TOOLS: ToolDef[] = [
         const clientName = personalInfo.full_name || client.name;
         const clientAddress = personalInfo.address || "[Client Address]";
         const today = new Date().toLocaleDateString("en-US", { year: "numeric", month: "long", day: "numeric" });
-        const prompt = "Generate a professional credit dispute letter.\n\nClient: " + clientName + "\nClient Address: " + clientAddress + "\nDate: " + today + "\n\nBureau: " + bur.toUpperCase() + "\nBureau Address:\n" + (bureauAddresses[bur] || "[Bureau Address]") + "\n\nNegative items to dispute:\n" + disputeItems + "\n\nInstructions: Write a firm, professional dispute letter citing the Fair Credit Reporting Act (FCRA) Section 611. State that each item is being disputed as inaccurate or unverifiable. Request investigation and removal or correction of each item. Request written response within 30 days. Format as a complete ready-to-send letter.";
-        const geminiUrl = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=" + GEMINI_KEY;
+        const prompt =
+          "Generate a professional credit dispute letter.\n\nClient: " +
+          clientName +
+          "\nClient Address: " +
+          clientAddress +
+          "\nDate: " +
+          today +
+          "\n\nBureau: " +
+          bur.toUpperCase() +
+          "\nBureau Address:\n" +
+          (bureauAddresses[bur] || "[Bureau Address]") +
+          "\n\nNegative items to dispute:\n" +
+          disputeItems +
+          "\n\nInstructions: Write a firm, professional dispute letter citing the Fair Credit Reporting Act (FCRA) Section 611. State that each item is being disputed as inaccurate or unverifiable. Request investigation and removal or correction of each item. Request written response within 30 days. Format as a complete ready-to-send letter.";
+        const geminiUrl =
+          "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=" + GEMINI_KEY;
         const geminiResp = await fetch(geminiUrl, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
@@ -2810,7 +3135,6 @@ const AGENT_TOOLS: ToolDef[] = [
       return JSON.stringify({ client: client.name, letters_generated: letters.length, letters });
     },
   },
-
 ];
 
 // âââ Build tool schemas for AI models âââââââââââââââââââââââââââ
@@ -2822,10 +3146,8 @@ function getToolsForWorkflow(workflowKey: string): ToolDef[] {
 }
 
 function getGeminiToolDeclarations(allowedToolNames?: string[]) {
-  const tools = allowedToolNames
-    ? AGENT_TOOLS.filter(t => allowedToolNames.includes(t.name))
-    : AGENT_TOOLS;
-  return tools.map(t => ({
+  const tools = allowedToolNames ? AGENT_TOOLS.filter((t) => allowedToolNames.includes(t.name)) : AGENT_TOOLS;
+  return tools.map((t) => ({
     name: t.name,
     description: t.description + (t.destructive ? " [DESTRUCTIVE - requires user confirmation]" : ""),
     parameters: t.parameters,
@@ -2833,10 +3155,8 @@ function getGeminiToolDeclarations(allowedToolNames?: string[]) {
 }
 
 function getGrokToolSchemas(allowedToolNames?: string[]) {
-  const tools = allowedToolNames
-    ? AGENT_TOOLS.filter(t => allowedToolNames.includes(t.name))
-    : AGENT_TOOLS;
-  return tools.map(t => ({
+  const tools = allowedToolNames ? AGENT_TOOLS.filter((t) => allowedToolNames.includes(t.name)) : AGENT_TOOLS;
+  return tools.map((t) => ({
     type: "function" as const,
     function: {
       name: t.name,
@@ -2850,11 +3170,14 @@ function getGrokToolSchemas(allowedToolNames?: string[]) {
 // We'll store pending actions in bot_settings with a special key pattern
 
 async function storePendingAction(actionId: string, toolName: string, args: any) {
-  await supabase.from("bot_settings").upsert({
-    setting_key: `pending_action:${actionId}`,
-    setting_value: JSON.stringify({ tool: toolName, args }),
-    updated_at: new Date().toISOString(),
-  }, { onConflict: "setting_key" });
+  await supabase.from("bot_settings").upsert(
+    {
+      setting_key: `pending_action:${actionId}`,
+      setting_value: JSON.stringify({ tool: toolName, args }),
+      updated_at: new Date().toISOString(),
+    },
+    { onConflict: "setting_key" },
+  );
 }
 
 async function getPendingAction(actionId: string): Promise<{ tool: string; args: any } | null> {
@@ -2864,7 +3187,11 @@ async function getPendingAction(actionId: string): Promise<{ tool: string; args:
     .eq("setting_key", `pending_action:${actionId}`)
     .single();
   if (!data) return null;
-  try { return JSON.parse(data.setting_value); } catch { return null; }
+  try {
+    return JSON.parse(data.setting_value);
+  } catch {
+    return null;
+  }
 }
 
 async function deletePendingAction(actionId: string) {
@@ -2931,7 +3258,9 @@ async function getCreditClientBinding(chatId: string): Promise<CreditClientBindi
   try {
     const p = JSON.parse(data.setting_value) as CreditClientBinding;
     if (p && typeof p.cg_client_id === "string" && typeof p.display_name === "string") return p;
-  } catch { /* ignore */ }
+  } catch {
+    /* ignore */
+  }
   return null;
 }
 
@@ -2948,8 +3277,10 @@ async function setCreditClientBinding(chatId: string, state: CreditClientBinding
 
 function isShortCreditAffirmation(raw: string): boolean {
   const t = raw.trim().toLowerCase();
-  return /^(yes|y|ok|yeah|yep|sure|please|proceed|go ahead|that's it|thats it|do it|run it|confirm|continue)\b/i.test(t) ||
-    /^(yes|y|ok)\s*[!.]*$/i.test(t);
+  return (
+    /^(yes|y|ok|yeah|yep|sure|please|proceed|go ahead|that's it|thats it|do it|run it|confirm|continue)\b/i.test(t) ||
+    /^(yes|y|ok)\s*[!.]*$/i.test(t)
+  );
 }
 
 // ─── Last playlist research (pitch report / pitch N) ─────────────────
@@ -2995,7 +3326,9 @@ async function getLastPlaylistResearch(chatId: string): Promise<LastPlaylistRese
     if (p && typeof p.track_name === "string" && Array.isArray(p.ranked_playlist_ids)) {
       return p as LastPlaylistResearch;
     }
-  } catch { /* ignore */ }
+  } catch {
+    /* ignore */
+  }
   return null;
 }
 
@@ -3023,7 +3356,9 @@ async function getPendingPitchBulk(chatId: string): Promise<PendingPitchBulk | n
   try {
     const p = JSON.parse(data.setting_value);
     if (p?.track_name && Array.isArray(p.playlist_ids)) return p as PendingPitchBulk;
-  } catch { /* ignore */ }
+  } catch {
+    /* ignore */
+  }
   return null;
 }
 
@@ -3052,7 +3387,9 @@ async function getPendingPitchTier3(chatId: string): Promise<PendingPitchTier3 |
   try {
     const p = JSON.parse(data.setting_value);
     if (p?.playlist_id && p?.track_name) return p as PendingPitchTier3;
-  } catch { /* ignore */ }
+  } catch {
+    /* ignore */
+  }
   return null;
 }
 
@@ -3149,18 +3486,14 @@ function extractPlaylistTrackName(userMessage: string, conversationContext: stri
     if (t.length >= 1 && t.length <= 120) return t;
   }
   // "... for Meditate" / "for TRACK" (end of line, comma, or before by)
-  const forMatch = userMessage.match(
-    /(?:for|about)\s+["']?([^"'\n]+?)["']?(?:\s+by|\s*$|,)/i,
-  );
+  const forMatch = userMessage.match(/(?:for|about)\s+["']?([^"'\n]+?)["']?(?:\s+by|\s*$|,)/i);
   if (forMatch) {
     let t = forMatch[1].trim();
     // Normalize common casual phrasing: "for my new song Meditate" -> "Meditate"
     t = t.replace(/^(my|our)\s+(new\s+)?(song|track)\s+/i, "").trim();
     if (t.length >= 1 && t.length <= 120 && !/^(me|the|a|an)$/i.test(t)) return t;
   }
-  const opp = combined.match(
-    /playlist\s+opportunities?\s+for\s+["']?([^"'\n]+?)["']?(?:\s+by|\s*$|,|\s+)/i,
-  );
+  const opp = combined.match(/playlist\s+opportunities?\s+for\s+["']?([^"'\n]+?)["']?(?:\s+by|\s*$|,|\s+)/i);
   if (opp) {
     const t = opp[1].trim();
     if (t.length >= 1 && t.length <= 120) return t;
@@ -3185,9 +3518,7 @@ function extractClientNameForCreditCommand(userMessage: string, conversationCont
     if (name.length >= 2 && name.length <= 80 && !/^(credit|report|dispute|client)$/i.test(name)) return name;
   }
 
-  const reportFor = userMessage.match(
-    /\b(?:credit\s+)?report\s+for\s+["']?([A-Za-z][A-Za-z0-9\s.'-]{1,78})/i,
-  );
+  const reportFor = userMessage.match(/\b(?:credit\s+)?report\s+for\s+["']?([A-Za-z][A-Za-z0-9\s.'-]{1,78})/i);
   if (reportFor?.[1]) {
     const name = reportFor[1].replace(/\b(the|a|my|our)\b/gi, "").trim();
     if (name.length >= 2 && name.length <= 80) return name;
@@ -3229,9 +3560,7 @@ function extractClientNameForDriveCommand(userMessage: string, conversationConte
     const name = findCredit[1].replace(/^["']|["']$/g, "").trim();
     if (name.length >= 2 && name.length <= 80) return name;
   }
-  const forMatch = userMessage.match(
-    /\b(?:for|sync|ingest|folder|client)\s+([A-Za-z][A-Za-z0-9\s.'-]{1,78})\b/i,
-  );
+  const forMatch = userMessage.match(/\b(?:for|sync|ingest|folder|client)\s+([A-Za-z][A-Za-z0-9\s.'-]{1,78})\b/i);
   if (forMatch?.[1]) {
     const name = forMatch[1].replace(/\b(the|a|my|our)\b/gi, "").trim();
     if (name.length >= 2 && name.length <= 80) return name;
@@ -3350,7 +3679,7 @@ ${conversationContext}`;
         toolConfig: { functionCallingConfig: { mode: "AUTO" } },
         generationConfig: { maxOutputTokens: 1024 },
       }),
-    }
+    },
   );
 
   if (!resp.ok) {
@@ -3470,7 +3799,9 @@ async function agenticGrokCall(
   if (choice?.message?.tool_calls) {
     for (const tc of choice.message.tool_calls) {
       let args = {};
-      try { args = JSON.parse(tc.function.arguments || "{}"); } catch {}
+      try {
+        args = JSON.parse(tc.function.arguments || "{}");
+      } catch {}
       toolCalls.push({ name: tc.function.name, args });
     }
   }
@@ -3487,9 +3818,7 @@ async function agenticClaudeCall(
   workflowKey?: string,
 ): Promise<{ text: string; toolCalls: Array<{ name: string; args: any }> }> {
   const systemPrompt = buildAgenticOrchestratorSystemPrompt(docContext, conversationContext, workflowKey);
-  const tools = allowedToolNames?.length
-    ? AGENT_TOOLS.filter((t) => allowedToolNames.includes(t.name))
-    : AGENT_TOOLS;
+  const tools = allowedToolNames?.length ? AGENT_TOOLS.filter((t) => allowedToolNames.includes(t.name)) : AGENT_TOOLS;
   try {
     logEvent({
       event: "claude_orchestrator_call",
@@ -3523,49 +3852,42 @@ async function agenticCallByModel(
   // Policy: Claude/ChatGPT preference -> Gemini fallback; Grok remains last-resort.
   if (model === "claude" || model === "chatgpt") {
     if (anthropicApiKeyConfigured()) {
-      return await agenticClaudeCall(
-        userMessage,
-        docContext,
-        conversationContext,
-        allowedToolNames,
-        workflowKey,
-      );
+      return await agenticClaudeCall(userMessage, docContext, conversationContext, allowedToolNames, workflowKey);
     }
-    return await agenticGeminiCall(
-      userMessage,
-      docContext,
-      conversationContext,
-      allowedToolNames,
-      workflowKey,
-    );
+    return await agenticGeminiCall(userMessage, docContext, conversationContext, allowedToolNames, workflowKey);
   }
   if (model === "grok") {
     return await (anthropicApiKeyConfigured()
       ? agenticClaudeCall(userMessage, docContext, conversationContext, allowedToolNames, workflowKey)
       : agenticGrokCall(userMessage, docContext, conversationContext, allowedToolNames, workflowKey));
   }
-  return await agenticGeminiCall(
-    userMessage,
-    docContext,
-    conversationContext,
-    allowedToolNames,
-    workflowKey,
-  );
+  return await agenticGeminiCall(userMessage, docContext, conversationContext, allowedToolNames, workflowKey);
 }
 
 // âââ Execution logging helpers âââââââââââââââââââââââââââââââââ
 
-async function logToolAttempt(requestId: string, toolName: string, args: any, model: string, chatId: string, userMessage: string): Promise<string> {
-  const { data, error } = await supabase.from("tool_execution_logs").insert({
-    request_id: requestId,
-    tool_name: toolName,
-    args,
-    status: "attempted",
-    model,
-    chat_id: chatId,
-    user_message: userMessage,
-    started_at: new Date().toISOString(),
-  }).select("id").single();
+async function logToolAttempt(
+  requestId: string,
+  toolName: string,
+  args: any,
+  model: string,
+  chatId: string,
+  userMessage: string,
+): Promise<string> {
+  const { data, error } = await supabase
+    .from("tool_execution_logs")
+    .insert({
+      request_id: requestId,
+      tool_name: toolName,
+      args,
+      status: "attempted",
+      model,
+      chat_id: chatId,
+      user_message: userMessage,
+      started_at: new Date().toISOString(),
+    })
+    .select("id")
+    .single();
   if (error || !data) {
     console.error("FATAL: Failed to create tool_execution_logs row", error);
     throw new Error(`Execution logging failed for ${toolName}: no log row created`);
@@ -3576,24 +3898,34 @@ async function logToolAttempt(requestId: string, toolName: string, args: any, mo
 async function logToolSuccess(logId: string, result: string, startedAt: number, httpStatus?: number) {
   const elapsed = Date.now() - startedAt;
   let responseJson: any = null;
-  try { responseJson = JSON.parse(result); } catch { responseJson = { text: result.slice(0, 2000) }; }
-  await supabase.from("tool_execution_logs").update({
-    status: "succeeded",
-    elapsed_ms: elapsed,
-    completed_at: new Date().toISOString(),
-    http_status: httpStatus ?? 200,
-    response_json: responseJson,
-  }).eq("id", logId);
+  try {
+    responseJson = JSON.parse(result);
+  } catch {
+    responseJson = { text: result.slice(0, 2000) };
+  }
+  await supabase
+    .from("tool_execution_logs")
+    .update({
+      status: "succeeded",
+      elapsed_ms: elapsed,
+      completed_at: new Date().toISOString(),
+      http_status: httpStatus ?? 200,
+      response_json: responseJson,
+    })
+    .eq("id", logId);
 }
 
 async function logToolFailure(logId: string, error: string, startedAt: number) {
   const elapsed = Date.now() - startedAt;
-  await supabase.from("tool_execution_logs").update({
-    status: "failed",
-    elapsed_ms: elapsed,
-    completed_at: new Date().toISOString(),
-    error: error.slice(0, 5000),
-  }).eq("id", logId);
+  await supabase
+    .from("tool_execution_logs")
+    .update({
+      status: "failed",
+      elapsed_ms: elapsed,
+      completed_at: new Date().toISOString(),
+      error: error.slice(0, 5000),
+    })
+    .eq("id", logId);
 }
 
 // âââ Structured log helper âââââââââââââââââââââââââââââââââââââ
@@ -3678,12 +4010,26 @@ async function executeAgenticLoop(
 
   // ââ HARD EXECUTION GUARD ââ
   if ((opts.lane !== "lane1_do" && opts.lane !== "lane3_autonomous") || opts.allowTools !== true) {
-    console.error(JSON.stringify({ ts: Date.now(), event: "tools_blocked", taskId: opts.taskId, lane: opts.lane, allowTools: opts.allowTools }));
+    console.error(
+      JSON.stringify({
+        ts: Date.now(),
+        event: "tools_blocked",
+        taskId: opts.taskId,
+        lane: opts.lane,
+        allowTools: opts.allowTools,
+      }),
+    );
     throw new Error("TOOLS_BLOCKED: agentic loop cannot run outside /do execution lane");
   }
 
   // ââ EXECUTION CONTEXT ASSERTION ââ
-  logEvent({ event: "execution_context", lane: opts.lane, allowTools: opts.allowTools, workflowKey: opts.workflowKey, taskId: opts.taskId });
+  logEvent({
+    event: "execution_context",
+    lane: opts.lane,
+    allowTools: opts.allowTools,
+    workflowKey: opts.workflowKey,
+    taskId: opts.taskId,
+  });
 
   if (opts.lane !== "lane1_do" && opts.lane !== "lane3_autonomous") {
     throw new Error("EXECUTION_CONTEXT_INVALID_LANE");
@@ -3720,49 +4066,146 @@ async function executeAgenticLoop(
     throw new Error("TASK_LOCK_NOT_ACQUIRED");
   }
 
-  logEvent({ event: "lane1_execution_start", workflow: opts.workflowKey, taskId: opts.taskId, model: opts.sessionModel, lockId });
+  logEvent({
+    event: "lane1_execution_start",
+    workflow: opts.workflowKey,
+    taskId: opts.taskId,
+    model: opts.sessionModel,
+    lockId,
+  });
 
   // ââ LOAD TOOLS FROM WORKFLOW ââ
   const workflows = await fetchWorkflowRegistry();
-  let matchedWorkflow = workflows.find(w => w.key === opts.workflowKey);
+  let matchedWorkflow = workflows.find((w) => w.key === opts.workflowKey);
 
   // Allow known implemented workflows when registry doesn't have them (e.g. find_playlist_opportunities in Lovable)
-  if (!matchedWorkflow && opts.workflowKey === "find_playlist_opportunities" && IMPLEMENTED_WORKFLOW_KEYS.has("find_playlist_opportunities")) {
+  if (
+    !matchedWorkflow &&
+    opts.workflowKey === "find_playlist_opportunities" &&
+    IMPLEMENTED_WORKFLOW_KEYS.has("find_playlist_opportunities")
+  ) {
     matchedWorkflow = SYNTHETIC_FIND_PLAYLIST_OPPORTUNITIES;
-    console.log(JSON.stringify({ ts: Date.now(), event: "workflow_synthetic_fallback", key: opts.workflowKey, taskId: opts.taskId }));
+    console.log(
+      JSON.stringify({
+        ts: Date.now(),
+        event: "workflow_synthetic_fallback",
+        key: opts.workflowKey,
+        taskId: opts.taskId,
+      }),
+    );
   }
-  if (!matchedWorkflow && opts.workflowKey === "analyze_credit_strategy" && IMPLEMENTED_WORKFLOW_KEYS.has("analyze_credit_strategy")) {
+  if (
+    !matchedWorkflow &&
+    opts.workflowKey === "analyze_credit_strategy" &&
+    IMPLEMENTED_WORKFLOW_KEYS.has("analyze_credit_strategy")
+  ) {
     matchedWorkflow = SYNTHETIC_ANALYZE_CREDIT_STRATEGY;
-    console.log(JSON.stringify({ ts: Date.now(), event: "workflow_synthetic_fallback", key: opts.workflowKey, taskId: opts.taskId }));
+    console.log(
+      JSON.stringify({
+        ts: Date.now(),
+        event: "workflow_synthetic_fallback",
+        key: opts.workflowKey,
+        taskId: opts.taskId,
+      }),
+    );
   }
-  if (!matchedWorkflow && opts.workflowKey === "playlist_pitch_workflow" && IMPLEMENTED_WORKFLOW_KEYS.has("playlist_pitch_workflow")) {
+  if (
+    !matchedWorkflow &&
+    opts.workflowKey === "playlist_pitch_workflow" &&
+    IMPLEMENTED_WORKFLOW_KEYS.has("playlist_pitch_workflow")
+  ) {
     matchedWorkflow = SYNTHETIC_PLAYLIST_PITCH_WORKFLOW;
-    console.log(JSON.stringify({ ts: Date.now(), event: "workflow_synthetic_fallback", key: opts.workflowKey, taskId: opts.taskId }));
+    console.log(
+      JSON.stringify({
+        ts: Date.now(),
+        event: "workflow_synthetic_fallback",
+        key: opts.workflowKey,
+        taskId: opts.taskId,
+      }),
+    );
   }
-  if (!matchedWorkflow && opts.workflowKey === "query_credit_compass" && IMPLEMENTED_WORKFLOW_KEYS.has("query_credit_compass")) {
+  if (
+    !matchedWorkflow &&
+    opts.workflowKey === "query_credit_compass" &&
+    IMPLEMENTED_WORKFLOW_KEYS.has("query_credit_compass")
+  ) {
     matchedWorkflow = SYNTHETIC_QUERY_CREDIT_COMPASS;
-    console.log(JSON.stringify({ ts: Date.now(), event: "workflow_synthetic_fallback", key: opts.workflowKey, taskId: opts.taskId }));
+    console.log(
+      JSON.stringify({
+        ts: Date.now(),
+        event: "workflow_synthetic_fallback",
+        key: opts.workflowKey,
+        taskId: opts.taskId,
+      }),
+    );
   }
   if (!matchedWorkflow && opts.workflowKey === "query_cc_tax" && IMPLEMENTED_WORKFLOW_KEYS.has("query_cc_tax")) {
     matchedWorkflow = SYNTHETIC_QUERY_CC_TAX;
-    console.log(JSON.stringify({ ts: Date.now(), event: "workflow_synthetic_fallback", key: opts.workflowKey, taskId: opts.taskId }));
+    console.log(
+      JSON.stringify({
+        ts: Date.now(),
+        event: "workflow_synthetic_fallback",
+        key: opts.workflowKey,
+        taskId: opts.taskId,
+      }),
+    );
   }
-  if (!matchedWorkflow && opts.workflowKey === "generate_tax_docs" && IMPLEMENTED_WORKFLOW_KEYS.has("generate_tax_docs")) {
+  if (
+    !matchedWorkflow &&
+    opts.workflowKey === "generate_tax_docs" &&
+    IMPLEMENTED_WORKFLOW_KEYS.has("generate_tax_docs")
+  ) {
     matchedWorkflow = SYNTHETIC_GENERATE_TAX_DOCS;
-    console.log(JSON.stringify({ ts: Date.now(), event: "workflow_synthetic_fallback", key: opts.workflowKey, taskId: opts.taskId }));
+    console.log(
+      JSON.stringify({
+        ts: Date.now(),
+        event: "workflow_synthetic_fallback",
+        key: opts.workflowKey,
+        taskId: opts.taskId,
+      }),
+    );
   }
-  if (!matchedWorkflow && opts.workflowKey === "credit_analysis_and_disputes" && IMPLEMENTED_WORKFLOW_KEYS.has("credit_analysis_and_disputes")) {
+  if (
+    !matchedWorkflow &&
+    opts.workflowKey === "credit_analysis_and_disputes" &&
+    IMPLEMENTED_WORKFLOW_KEYS.has("credit_analysis_and_disputes")
+  ) {
     matchedWorkflow = SYNTHETIC_CREDIT_ANALYSIS_AND_DISPUTES;
-    console.log(JSON.stringify({ ts: Date.now(), event: "workflow_synthetic_fallback", key: opts.workflowKey, taskId: opts.taskId }));
+    console.log(
+      JSON.stringify({
+        ts: Date.now(),
+        event: "workflow_synthetic_fallback",
+        key: opts.workflowKey,
+        taskId: opts.taskId,
+      }),
+    );
   }
   if (!matchedWorkflow && opts.workflowKey === "drive_ingest" && IMPLEMENTED_WORKFLOW_KEYS.has("drive_ingest")) {
     matchedWorkflow = SYNTHETIC_DRIVE_INGEST;
-    console.log(JSON.stringify({ ts: Date.now(), event: "workflow_synthetic_fallback", key: opts.workflowKey, taskId: opts.taskId }));
+    console.log(
+      JSON.stringify({
+        ts: Date.now(),
+        event: "workflow_synthetic_fallback",
+        key: opts.workflowKey,
+        taskId: opts.taskId,
+      }),
+    );
   }
   // Synthetic fallback - if registry missing analyze_client_credit, use analyze_credit_strategy
-  if (!matchedWorkflow && opts.workflowKey === "analyze_client_credit" && IMPLEMENTED_WORKFLOW_KEYS.has("analyze_credit_strategy")) {
+  if (
+    !matchedWorkflow &&
+    opts.workflowKey === "analyze_client_credit" &&
+    IMPLEMENTED_WORKFLOW_KEYS.has("analyze_credit_strategy")
+  ) {
     matchedWorkflow = SYNTHETIC_ANALYZE_CREDIT_STRATEGY as any;
-    console.log(JSON.stringify({ ts: Date.now(), event: "workflow_synthetic_fallback", key: opts.workflowKey, taskId: opts.taskId }));
+    console.log(
+      JSON.stringify({
+        ts: Date.now(),
+        event: "workflow_synthetic_fallback",
+        key: opts.workflowKey,
+        taskId: opts.taskId,
+      }),
+    );
   }
 
   // ââ VALIDATE WORKFLOW EXISTS ââ
@@ -3771,11 +4214,14 @@ async function executeAgenticLoop(
     throw new Error("WORKFLOW_NOT_FOUND_IN_REGISTRY");
   }
 
-  const workflowToolNames: string[] | undefined = matchedWorkflow.tools?.length
-    ? matchedWorkflow.tools
-    : undefined;
+  const workflowToolNames: string[] | undefined = matchedWorkflow.tools?.length ? matchedWorkflow.tools : undefined;
 
-  logEvent({ event: "workflow_tools_loaded", workflow: opts.workflowKey, tools: workflowToolNames || "all", taskId: opts.taskId });
+  logEvent({
+    event: "workflow_tools_loaded",
+    workflow: opts.workflowKey,
+    tools: workflowToolNames || "all",
+    taskId: opts.taskId,
+  });
 
   const model: BotModel = normalizeBotModel(opts.sessionModel);
   let docContext = await getRecentDocContext();
@@ -3917,10 +4363,12 @@ async function executeAgenticLoop(
       });
       result = {
         text: "",
-        toolCalls: [{
-          name: "ingest_drive_clients",
-          args: { client_name: aliasRes.key ?? inferredClient },
-        }],
+        toolCalls: [
+          {
+            name: "ingest_drive_clients",
+            args: { client_name: aliasRes.key ?? inferredClient },
+          },
+        ],
       };
     } else if (cgExplicit) {
       const d = inferCreditWorkflowKey(userMessage.toLowerCase());
@@ -3947,7 +4395,7 @@ async function executeAgenticLoop(
           "",
           "Example: `Add Jabril to Credit Guardian` or `Ingest Zeus into Credit Guardian`.",
           "",
-          "If the Drive folder uses a different name, set `DRIVE_CLIENT_FOLDER_ALIASES_JSON` (e.g. `{\"jabril\":\"zeus\"}`).",
+          'If the Drive folder uses a different name, set `DRIVE_CLIENT_FOLDER_ALIASES_JSON` (e.g. `{"jabril":"zeus"}`).',
         ].join("\n"),
         toolCalls: [],
       };
@@ -3973,13 +4421,15 @@ async function executeAgenticLoop(
       });
       result = {
         text: "",
-        toolCalls: [{
-          name: "generate_tax_docs",
-          args: {
-            client_name: inferredClient,
-            ...(inferredYears.length ? { tax_years: inferredYears } : {}),
+        toolCalls: [
+          {
+            name: "generate_tax_docs",
+            args: {
+              client_name: inferredClient,
+              ...(inferredYears.length ? { tax_years: inferredYears } : {}),
+            },
           },
-        }],
+        ],
       };
     } else {
       result = await agenticCallByModel(
@@ -4001,8 +4451,20 @@ async function executeAgenticLoop(
       opts.workflowKey,
     );
   }
-  logEvent({ event: "ai_response", taskId: opts.taskId, workflow: opts.workflowKey, model, toolCalls: result.toolCalls.length, hasText: !!result.text });
-  await supabase.from("tasks").update({ result_json: { progress_step: "E_ai_done", tool_count: result.toolCalls.length, execution_lock: lockId } }).eq("id", opts.taskId);
+  logEvent({
+    event: "ai_response",
+    taskId: opts.taskId,
+    workflow: opts.workflowKey,
+    model,
+    toolCalls: result.toolCalls.length,
+    hasText: !!result.text,
+  });
+  await supabase
+    .from("tasks")
+    .update({
+      result_json: { progress_step: "E_ai_done", tool_count: result.toolCalls.length, execution_lock: lockId },
+    })
+    .eq("id", opts.taskId);
 
   // Step 2: If no tool calls, just send the text response
   if (result.toolCalls.length === 0) {
@@ -4011,8 +4473,9 @@ async function executeAgenticLoop(
       opts.workflowKey === "drive_ingest" &&
       opts.explicitCreditGuardianIngest === true &&
       (responseText.includes("client name required") || responseText.includes("Could not extract"));
-    const creditWorkflowNoToolReceipt =
-      Boolean(opts.workflowKey && isCreditWorkflowForSummary(opts.workflowKey) && !explicitCgBadExtraction);
+    const creditWorkflowNoToolReceipt = Boolean(
+      opts.workflowKey && isCreditWorkflowForSummary(opts.workflowKey) && !explicitCgBadExtraction,
+    );
     const finalUserText = creditWorkflowNoToolReceipt
       ? `${responseText}\n\n_⚠️ No credit tools ran on this turn — name the client, confirm a prior match, or use a short reply like "yes" if we already picked someone._`
       : responseText;
@@ -4039,29 +4502,32 @@ async function executeAgenticLoop(
     }
 
     const executionDuration = Date.now() - executionStart;
-    await supabase.from("tasks").update({
-      status: "succeeded",
-      selected_tools: [],
-      result_json: {
-        execution_complete: !(explicitCgBadExtraction || creditWorkflowNoToolReceipt),
-        workflow: opts.workflowKey,
-        text_response: finalUserText.slice(0, 2000),
-        model_used: opts.sessionModel,
-        execution_duration_ms: executionDuration,
-        execution_lock: null,
-        execution_lock_released_ts: Date.now(),
-        ...(explicitCgBadExtraction
-          ? {
-            credit_routing: {
-              final_outcome: "blocked_bad_extraction",
-              selected_workflow: "drive_ingest",
-              routing_branch: "deterministic_direct",
-            },
-          }
-          : {}),
-        ...(creditWorkflowNoToolReceipt ? { credit_execution_incomplete: true } : {}),
-      },
-    }).eq("id", opts.taskId);
+    await supabase
+      .from("tasks")
+      .update({
+        status: "succeeded",
+        selected_tools: [],
+        result_json: {
+          execution_complete: !(explicitCgBadExtraction || creditWorkflowNoToolReceipt),
+          workflow: opts.workflowKey,
+          text_response: finalUserText.slice(0, 2000),
+          model_used: opts.sessionModel,
+          execution_duration_ms: executionDuration,
+          execution_lock: null,
+          execution_lock_released_ts: Date.now(),
+          ...(explicitCgBadExtraction
+            ? {
+                credit_routing: {
+                  final_outcome: "blocked_bad_extraction",
+                  selected_workflow: "drive_ingest",
+                  routing_branch: "deterministic_direct",
+                },
+              }
+            : {}),
+          ...(creditWorkflowNoToolReceipt ? { credit_execution_incomplete: true } : {}),
+        },
+      })
+      .eq("id", opts.taskId);
     await sendMessage(chatId, `â Done: \`${opts.taskId}\``, {}, `task:${opts.taskId}:done`);
     return;
   }
@@ -4073,12 +4539,20 @@ async function executeAgenticLoop(
   for (const tc of result.toolCalls) {
     // WORKFLOW-SCOPED GUARDRAIL: block tools not in this workflow's declared tool list
     if (workflowToolNames && !workflowToolNames.includes(tc.name)) {
-      console.error(JSON.stringify({ ts: Date.now(), event: "workflow_tool_blocked", tool: tc.name, workflow: opts.workflowKey, taskId: opts.taskId }));
+      console.error(
+        JSON.stringify({
+          ts: Date.now(),
+          event: "workflow_tool_blocked",
+          tool: tc.name,
+          workflow: opts.workflowKey,
+          taskId: opts.taskId,
+        }),
+      );
       toolResults.push(`ð« Tool '${tc.name}' is not allowed for workflow '${opts.workflowKey}'.`);
       continue;
     }
 
-    const tool = AGENT_TOOLS.find(t => t.name === tc.name);
+    const tool = AGENT_TOOLS.find((t) => t.name === tc.name);
     if (!tool) {
       console.error(`GUARDRAIL: AI tried to call unregistered tool '${tc.name}' â blocked.`);
       toolResults.push(`ð« Tool '${tc.name}' is not in the tool registry. Run /workflows to see available commands.`);
@@ -4088,7 +4562,9 @@ async function executeAgenticLoop(
     // HARD BLOCK: switch_ai_model is NEVER allowed inside the agentic loop.
     // Model switching is handled exclusively by /model command before the loop runs.
     if (tc.name === "switch_ai_model") {
-      toolResults.push("ð Model switching is blocked inside the execution loop. Use `/model claude`, `/model chatgpt`, `/model gemini`, or `/model grok` explicitly.");
+      toolResults.push(
+        "ð Model switching is blocked inside the execution loop. Use `/model claude`, `/model chatgpt`, `/model gemini`, or `/model grok` explicitly.",
+      );
       continue;
     }
 
@@ -4109,7 +4585,7 @@ async function executeAgenticLoop(
       const actionId = crypto.randomUUID().slice(0, 8);
       await storePendingAction(actionId, tc.name, tc.args);
 
-      const label = tc.name.replace(/_/g, " ").replace(/\b\w/g, c => c.toUpperCase());
+      const label = tc.name.replace(/_/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
       const targetId = tc.args.job_id || tc.args.queue_id || "";
       const shortId = targetId.slice(0, 8);
       confirmationButtons.push(
@@ -4126,7 +4602,16 @@ async function executeAgenticLoop(
         const output = await tool.execute(tc.args, { chatId, userMessage, conversationContext });
         const toolDuration = Date.now() - toolStart;
         await logToolSuccess(logId, output, startedAt);
-        console.log(JSON.stringify({ event: "tool_execution", tool: tc.name, workflow: opts.workflowKey, duration_ms: toolDuration, taskId: opts.taskId, ts: Date.now() }));
+        console.log(
+          JSON.stringify({
+            event: "tool_execution",
+            tool: tc.name,
+            workflow: opts.workflowKey,
+            duration_ms: toolDuration,
+            taskId: opts.taskId,
+            ts: Date.now(),
+          }),
+        );
         toolResults.push(output);
         if (tc.name === "analyze_credit_strategy") {
           try {
@@ -4149,20 +4634,32 @@ async function executeAgenticLoop(
                 updated_at: new Date().toISOString(),
               });
             }
-          } catch { /* non-JSON tool output */ }
+          } catch {
+            /* non-JSON tool output */
+          }
         }
       } catch (e) {
         const toolDuration = Date.now() - toolStart;
         const errStr = e instanceof Error ? e.message : String(e);
         await logToolFailure(logId, errStr, startedAt);
-        console.error(JSON.stringify({ event: "tool_execution_failed", tool: tc.name, workflow: opts.workflowKey, taskId: opts.taskId, duration_ms: toolDuration, error: errStr, ts: Date.now() }));
+        console.error(
+          JSON.stringify({
+            event: "tool_execution_failed",
+            tool: tc.name,
+            workflow: opts.workflowKey,
+            taskId: opts.taskId,
+            duration_ms: toolDuration,
+            error: errStr,
+            ts: Date.now(),
+          }),
+        );
         toolResults.push(`â Error executing ${tc.name}: ${errStr}`);
       }
     }
   }
 
   // Step 4: If we have tool results, feed them back to AI for a final summary
-  const executedToolNames = result.toolCalls.map(tc => tc.name);
+  const executedToolNames = result.toolCalls.map((tc) => tc.name);
 
   /** Explicit CG + ingest_drive_clients: fully deterministic operator messages (no LLM), including success. */
   if (opts.explicitCreditGuardianIngest === true && confirmationButtons.length === 0) {
@@ -4204,29 +4701,32 @@ async function executeAgenticLoop(
         at: new Date().toISOString(),
       });
       const executionDuration = Date.now() - executionStart;
-      await supabase.from("tasks").update({
-        status: "succeeded",
-        selected_tools: executedToolNames,
-        result_json: {
-          execution_complete: true,
-          workflow: opts.workflowKey,
-          text_response: resolved.operatorMessage.slice(0, 2000),
-          model_used: opts.sessionModel,
-          execution_duration_ms: executionDuration,
-          execution_lock: null,
-          execution_lock_released_ts: Date.now(),
-          credit_routing: {
-            final_outcome: resolved.final_outcome,
-            ingest_result_count: resolved.ingest_result_count,
-            has_alias_suggestions: resolved.has_alias_suggestions,
-            client_name_extracted: requestedLabel,
-            used_alias_match: explicitCgIngestAliasMeta?.usedAlias ?? false,
-            resolved_folder_key: explicitCgIngestAliasMeta?.resolvedFolderKey ?? requestedLabel,
-            operator_requested_name: explicitCgIngestAliasMeta?.operatorRequestedName ?? requestedLabel,
-            routing_branch: "deterministic_direct",
+      await supabase
+        .from("tasks")
+        .update({
+          status: "succeeded",
+          selected_tools: executedToolNames,
+          result_json: {
+            execution_complete: true,
+            workflow: opts.workflowKey,
+            text_response: resolved.operatorMessage.slice(0, 2000),
+            model_used: opts.sessionModel,
+            execution_duration_ms: executionDuration,
+            execution_lock: null,
+            execution_lock_released_ts: Date.now(),
+            credit_routing: {
+              final_outcome: resolved.final_outcome,
+              ingest_result_count: resolved.ingest_result_count,
+              has_alias_suggestions: resolved.has_alias_suggestions,
+              client_name_extracted: requestedLabel,
+              used_alias_match: explicitCgIngestAliasMeta?.usedAlias ?? false,
+              resolved_folder_key: explicitCgIngestAliasMeta?.resolvedFolderKey ?? requestedLabel,
+              operator_requested_name: explicitCgIngestAliasMeta?.operatorRequestedName ?? requestedLabel,
+              routing_branch: "deterministic_direct",
+            },
           },
-        },
-      }).eq("id", opts.taskId);
+        })
+        .eq("id", opts.taskId);
       await sendMessage(chatId, `✅ Done: \`${opts.taskId}\``, {}, `task:${opts.taskId}:done`);
       await flushTelegramOutbox(chatId, 10);
       return;
@@ -4242,8 +4742,7 @@ ${result.toolCalls.map((tc, i) => `- ${tc.name}: ${toolResults[i]}`).join("\n")}
 
 Now provide a clear, concise summary for the user based on the results. Use markdown formatting.`;
 
-    const taxDocSummarySystem =
-      `You are the ${SYSTEM_IDENTITY}. Summarize tax tool results with strict factual accuracy.
+    const taxDocSummarySystem = `You are the ${SYSTEM_IDENTITY}. Summarize tax tool results with strict factual accuracy.
 
 RULES:
 - Copy tax years, AGI, and deliverables EXACTLY as stated in the tool output. Never claim a different tax year than the tool ran for.
@@ -4252,29 +4751,26 @@ RULES:
 - No jokey "time warp" or "wrong year glitch" language. Do not contradict the tool output.
 - Stay neutral and tax-focused for this message (no pivot to music marketing).`;
 
-    const defaultSummarySystem =
-      `You are the ${SYSTEM_IDENTITY}. Summarize tool results concisely. Be witty and direct.\n\n${ARTIST_GROWTH_MISSION}\nWhen summarizing, highlight practical next moves that best serve the north star when the results relate to growth, fans, or releases.`;
+    const defaultSummarySystem = `You are the ${SYSTEM_IDENTITY}. Summarize tool results concisely. Be witty and direct.\n\n${ARTIST_GROWTH_MISSION}\nWhen summarizing, highlight practical next moves that best serve the north star when the results relate to growth, fans, or releases.`;
 
-    const summarySystemForRun = opts.workflowKey === "generate_tax_docs"
-      ? taxDocSummarySystem
-      : isCreditWorkflowForSummary(opts.workflowKey)
-      ? CREDIT_TOOL_SUMMARY_SYSTEM
-      : defaultSummarySystem;
+    const summarySystemForRun =
+      opts.workflowKey === "generate_tax_docs"
+        ? taxDocSummarySystem
+        : isCreditWorkflowForSummary(opts.workflowKey)
+          ? CREDIT_TOOL_SUMMARY_SYSTEM
+          : defaultSummarySystem;
 
-    const geminiDefaultSummaryInstruction =
-      `You are the ${SYSTEM_IDENTITY}. Summarize tool results concisely and clearly.\n\n${ARTIST_GROWTH_MISSION}\nWhen summarizing, highlight practical next moves that best serve the north star when the results relate to growth, fans, or releases.`;
+    const geminiDefaultSummaryInstruction = `You are the ${SYSTEM_IDENTITY}. Summarize tool results concisely and clearly.\n\n${ARTIST_GROWTH_MISSION}\nWhen summarizing, highlight practical next moves that best serve the north star when the results relate to growth, fans, or releases.`;
 
     let summary: string;
-    const useClaudeForTaxSummary =
-      opts.workflowKey === "generate_tax_docs" && anthropicApiKeyConfigured();
+    const useClaudeForTaxSummary = opts.workflowKey === "generate_tax_docs" && anthropicApiKeyConfigured();
     if (useClaudeForTaxSummary) {
       try {
         summary = await callClaude(taxDocSummarySystem, summaryPrompt, 2048);
       } catch (e) {
         const msg = e instanceof Error ? e.message : String(e);
         console.error(JSON.stringify({ ts: Date.now(), event: "tax_summary_claude_failed", error: msg }));
-        summary =
-          `Could not generate AI summary (${msg.slice(0, 180)}). Here is the raw tool output:\n\n${toolResults.join("\n\n")}`;
+        summary = `Could not generate AI summary (${msg.slice(0, 180)}). Here is the raw tool output:\n\n${toolResults.join("\n\n")}`;
       }
     } else if (model === "grok") {
       const resp = await fetch("https://api.x.ai/v1/chat/completions", {
@@ -4303,17 +4799,20 @@ RULES:
           body: JSON.stringify({
             contents: [{ role: "user", parts: [{ text: summaryPrompt }] }],
             systemInstruction: {
-              parts: [{
-                text: opts.workflowKey === "generate_tax_docs"
-                  ? taxDocSummarySystem
-                  : isCreditWorkflowForSummary(opts.workflowKey)
-                  ? CREDIT_TOOL_SUMMARY_SYSTEM
-                  : geminiDefaultSummaryInstruction,
-              }],
+              parts: [
+                {
+                  text:
+                    opts.workflowKey === "generate_tax_docs"
+                      ? taxDocSummarySystem
+                      : isCreditWorkflowForSummary(opts.workflowKey)
+                        ? CREDIT_TOOL_SUMMARY_SYSTEM
+                        : geminiDefaultSummaryInstruction,
+                },
+              ],
             },
             generationConfig: { maxOutputTokens: 1024 },
           }),
-        }
+        },
       );
       const data = await resp.json();
       summary = data.candidates?.[0]?.content?.parts?.[0]?.text || toolResults.join("\n\n");
@@ -4331,40 +4830,52 @@ RULES:
 
     // ââ TASK LIFECYCLE: mark succeeded with duration ââ
     const executionDuration = Date.now() - executionStart;
-    await supabase.from("tasks").update({
-      status: "succeeded",
-      selected_tools: executedToolNames,
-      result_json: {
-        execution_complete: true,
-        workflow: opts.workflowKey,
-        progress_step: "F_succeeded",
-        summary: summary.slice(0, 2000),
-        toolResults: toolResults.map((r) => r.slice(0, 500)),
-        model_used: opts.sessionModel,
-        execution_duration_ms: executionDuration,
-        execution_lock: null,
-        execution_lock_released_ts: Date.now(),
-      },
-    }).eq("id", opts.taskId);
-    logEvent({ event: "task_succeeded", taskId: opts.taskId, workflow: opts.workflowKey, execution_duration_ms: executionDuration });
-      await flushTelegramOutbox(chatId, 10);
-    const hasToolErrors = toolResults.some((r: string) =>
-      r.startsWith("\xe2\x9d\x8c") || r.includes("Error executing") || r.includes("failed (")
+    await supabase
+      .from("tasks")
+      .update({
+        status: "succeeded",
+        selected_tools: executedToolNames,
+        result_json: {
+          execution_complete: true,
+          workflow: opts.workflowKey,
+          progress_step: "F_succeeded",
+          summary: summary.slice(0, 2000),
+          toolResults: toolResults.map((r) => r.slice(0, 500)),
+          model_used: opts.sessionModel,
+          execution_duration_ms: executionDuration,
+          execution_lock: null,
+          execution_lock_released_ts: Date.now(),
+        },
+      })
+      .eq("id", opts.taskId);
+    logEvent({
+      event: "task_succeeded",
+      taskId: opts.taskId,
+      workflow: opts.workflowKey,
+      execution_duration_ms: executionDuration,
+    });
+    await flushTelegramOutbox(chatId, 10);
+    const hasToolErrors = toolResults.some(
+      (r: string) => r.startsWith("\xe2\x9d\x8c") || r.includes("Error executing") || r.includes("failed ("),
     );
     if (hasToolErrors) {
-      await sendMessage(chatId, `\xe2\x9a\xa0\xef\xb8\x8f Completed with errors: \`${opts.taskId}\``, {}, `task:${opts.taskId}:done`);
+      await sendMessage(
+        chatId,
+        `\xe2\x9a\xa0\xef\xb8\x8f Completed with errors: \`${opts.taskId}\``,
+        {},
+        `task:${opts.taskId}:done`,
+      );
     } else {
       await sendMessage(chatId, `â Done: \`${opts.taskId}\``, {}, `task:${opts.taskId}:done`);
     }
-
   } else if (confirmationButtons.length > 0) {
     // Has destructive actions needing confirmation
-    const nonDestructiveResults = toolResults.filter(r => !r.startsWith("â³"));
+    const nonDestructiveResults = toolResults.filter((r) => !r.startsWith("â³"));
     let message = "";
 
     if (result.text) message += result.text + "\n\n";
     if (nonDestructiveResults.length > 0) message += nonDestructiveResults.join("\n\n") + "\n\n";
-    message += toolResults.filter(r => r.startsWith("â³")).join("\n");
+    message += toolResults.filter((r) => r.startsWith("â³")).join("\n");
 
     // Group confirmation buttons into rows of 2
     const keyboard: Array<Array<{ text: string; callback_data: string }>> = [];
@@ -4373,9 +4884,14 @@ RULES:
     }
 
     const confirmationMessage = formatAssistantMessage(model, message.trim());
-    await sendMessage(chatId, confirmationMessage, {
-      reply_markup: { inline_keyboard: keyboard },
-    }, `task:${opts.taskId}:confirm`);
+    await sendMessage(
+      chatId,
+      confirmationMessage,
+      {
+        reply_markup: { inline_keyboard: keyboard },
+      },
+      `task:${opts.taskId}:confirm`,
+    );
     await appendConversationTurn(chatId, {
       role: "assistant",
       content: confirmationMessage,
@@ -4385,23 +4901,45 @@ RULES:
 
     // ââ TASK LIFECYCLE: mark succeeded (awaiting user confirmation for destructive actions) ââ
     const executionDuration = Date.now() - executionStart;
-    await supabase.from("tasks").update({
-      status: "succeeded",
-      selected_tools: executedToolNames,
-      result_json: { execution_complete: true, workflow: opts.workflowKey, awaiting_confirmation: true, toolResults: toolResults.map(r => r.slice(0, 500)), model_used: opts.sessionModel, execution_duration_ms: executionDuration, execution_lock: null, execution_lock_released_ts: Date.now() },
-    }).eq("id", opts.taskId);
-      await flushTelegramOutbox(chatId, 10);
+    await supabase
+      .from("tasks")
+      .update({
+        status: "succeeded",
+        selected_tools: executedToolNames,
+        result_json: {
+          execution_complete: true,
+          workflow: opts.workflowKey,
+          awaiting_confirmation: true,
+          toolResults: toolResults.map((r) => r.slice(0, 500)),
+          model_used: opts.sessionModel,
+          execution_duration_ms: executionDuration,
+          execution_lock: null,
+          execution_lock_released_ts: Date.now(),
+        },
+      })
+      .eq("id", opts.taskId);
+    await flushTelegramOutbox(chatId, 10);
     await sendMessage(chatId, `â Done: \`${opts.taskId}\``, {}, `task:${opts.taskId}:done`);
-
   } else {
     // No tool calls at all â mark succeeded with text-only result
     const executionDuration = Date.now() - executionStart;
-    await supabase.from("tasks").update({
-      status: "succeeded",
-      selected_tools: [],
-      result_json: { execution_complete: true, workflow: opts.workflowKey, text_response: (result.text || "").slice(0, 2000), model_used: opts.sessionModel, execution_duration_ms: executionDuration, execution_lock: null, execution_lock_released_ts: Date.now() },
-    }).eq("id", opts.taskId);
-      await flushTelegramOutbox(chatId, 10);
+    await supabase
+      .from("tasks")
+      .update({
+        status: "succeeded",
+        selected_tools: [],
+        result_json: {
+          execution_complete: true,
+          workflow: opts.workflowKey,
+          text_response: (result.text || "").slice(0, 2000),
+          model_used: opts.sessionModel,
+          execution_duration_ms: executionDuration,
+          execution_lock: null,
+          execution_lock_released_ts: Date.now(),
+        },
+      })
+      .eq("id", opts.taskId);
+    await flushTelegramOutbox(chatId, 10);
     await sendMessage(chatId, `â Done: \`${opts.taskId}\``, {}, `task:${opts.taskId}:done`);
   }
 }
@@ -4412,14 +4950,14 @@ async function handleAgentConfirm(actionId: string): Promise<string> {
   const pending = await getPendingAction(actionId);
   if (!pending) return "â Action expired or not found.";
 
-  const tool = AGENT_TOOLS.find(t => t.name === pending.tool);
+  const tool = AGENT_TOOLS.find((t) => t.name === pending.tool);
   if (!tool) return "â Unknown action.";
 
   await deletePendingAction(actionId);
 
   try {
     const result = await tool.execute(pending.args);
-    const label = pending.tool.replace(/_/g, " ").replace(/\b\w/g, c => c.toUpperCase());
+    const label = pending.tool.replace(/_/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
     return `â *${SYSTEM_IDENTITY} â ${label} Executed*\n\n${result}`;
   } catch (e) {
     console.error("Agent confirm execution error:", e);
@@ -4464,12 +5002,12 @@ async function handleApproval(queueId: string, approved: boolean) {
 }
 
 async function handleRetry(jobId: string): Promise<string> {
-  const tool = AGENT_TOOLS.find(t => t.name === "retry_failed_job")!;
+  const tool = AGENT_TOOLS.find((t) => t.name === "retry_failed_job")!;
   return await tool.execute({ job_id: jobId });
 }
 
 async function handleArchive(jobId: string): Promise<string> {
-  const tool = AGENT_TOOLS.find(t => t.name === "archive_job")!;
+  const tool = AGENT_TOOLS.find((t) => t.name === "archive_job")!;
   return await tool.execute({ job_id: jobId });
 }
 
@@ -4490,16 +5028,29 @@ async function handleExplainMore(jobId: string): Promise<string> {
     const resp = await fetch("https://api.x.ai/v1/chat/completions", {
       method: "POST",
       headers: { Authorization: `Bearer ${GROK_KEY}`, "Content-Type": "application/json" },
-      body: JSON.stringify({ model: "grok-3-mini-fast", messages: [{ role: "system", content: `You are the ${SYSTEM_IDENTITY}.` }, { role: "user", content: prompt }], max_tokens: 1024 }),
+      body: JSON.stringify({
+        model: "grok-3-mini-fast",
+        messages: [
+          { role: "system", content: `You are the ${SYSTEM_IDENTITY}.` },
+          { role: "user", content: prompt },
+        ],
+        max_tokens: 1024,
+      }),
     });
     const data = await resp.json();
     response = data.choices?.[0]?.message?.content || "No response.";
   } else {
-    const resp = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${GEMINI_KEY}`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ contents: [{ role: "user", parts: [{ text: prompt }] }], generationConfig: { maxOutputTokens: 1024 } }),
-    });
+    const resp = await fetch(
+      `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${GEMINI_KEY}`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          contents: [{ role: "user", parts: [{ text: prompt }] }],
+          generationConfig: { maxOutputTokens: 1024 },
+        }),
+      },
+    );
     const data = await resp.json();
     response = data.candidates?.[0]?.content?.parts?.[0]?.text || "No response.";
   }
@@ -4636,7 +5187,7 @@ serve(async (req) => {
 
   let update: Record<string, unknown>;
   try {
-    update = await req.json() as Record<string, unknown>;
+    update = (await req.json()) as Record<string, unknown>;
   } catch {
     logTelegramSecurityEvent({
       event: "telegram_webhook_denied",
@@ -4680,12 +5231,14 @@ serve(async (req) => {
     .insert({ update_id: updateId });
 
   if (idemError?.code === "23505") {
-    console.log(JSON.stringify({
-      event: "telegram_webhook_duplicate_ignored",
-      source: "telegram-webhook",
-      update_id: updateId,
-      at: new Date().toISOString(),
-    }));
+    console.log(
+      JSON.stringify({
+        event: "telegram_webhook_duplicate_ignored",
+        source: "telegram-webhook",
+        update_id: updateId,
+        at: new Date().toISOString(),
+      }),
+    );
     return new Response("ok");
   }
 
@@ -4698,9 +5251,9 @@ serve(async (req) => {
 
   try {
     logTelegramWebhookAccepted(update, updateId);
-  // Correlation ID for the entire request lifecycle. Propagated to downstream
-  // Guardian/Compass fetches and structured routing logs.
-  const correlationId = `tg_${updateId}`;
+    // Correlation ID for the entire request lifecycle. Propagated to downstream
+    // Guardian/Compass fetches and structured routing logs.
+    const correlationId = `tg_${updateId}`;
     _currentTaskId = null;
 
     // ââ Callback queries (inline button presses) ââ
@@ -4729,15 +5282,32 @@ serve(async (req) => {
       let result: string;
 
       switch (action) {
-        case "approve": result = await handleApproval(targetId, true); break;
-        case "reject": result = await handleApproval(targetId, false); break;
-        case "retry": result = await handleRetry(targetId); break;
-        case "archive": result = await handleArchive(targetId); break;
-        case "explain": result = await handleExplainMore(targetId); break;
-        case "agent_confirm": result = await handleAgentConfirm(targetId); break;
-        case "agent_cancel": result = await handleAgentCancel(targetId); break;
-        case "clar": result = await handleRouteClarification(targetId); break;
-        default: result = "â Unknown action.";
+        case "approve":
+          result = await handleApproval(targetId, true);
+          break;
+        case "reject":
+          result = await handleApproval(targetId, false);
+          break;
+        case "retry":
+          result = await handleRetry(targetId);
+          break;
+        case "archive":
+          result = await handleArchive(targetId);
+          break;
+        case "explain":
+          result = await handleExplainMore(targetId);
+          break;
+        case "agent_confirm":
+          result = await handleAgentConfirm(targetId);
+          break;
+        case "agent_cancel":
+          result = await handleAgentCancel(targetId);
+          break;
+        case "clar":
+          result = await handleRouteClarification(targetId);
+          break;
+        default:
+          result = "â Unknown action.";
       }
 
       if (cb.message != null) {
@@ -4745,7 +5315,10 @@ serve(async (req) => {
       }
       await sendMessage(cbChatId, result);
       if (_currentTaskId) {
-        await supabase.from("tasks").update({ status: "succeeded", result_json: { action: `callback:${action}` } }).eq("id", _currentTaskId);
+        await supabase
+          .from("tasks")
+          .update({ status: "succeeded", result_json: { action: `callback:${action}` } })
+          .eq("id", _currentTaskId);
       }
       _currentTaskId = null;
       return new Response("ok");
@@ -4755,17 +5328,11 @@ serve(async (req) => {
     // Routed BEFORE the text-only early-return because attachment-only messages
     // have `caption` but no `text`. See _shared/telegramAttachmentHandler.ts.
     {
-      const m = update.message as
-        | { photo?: unknown[]; document?: { file_id?: string }; caption?: string }
-        | undefined;
-      const hasAttachment = !!(m?.document?.file_id) || !!(m?.photo && m.photo.length > 0);
+      const m = update.message as { photo?: unknown[]; document?: { file_id?: string }; caption?: string } | undefined;
+      const hasAttachment = !!m?.document?.file_id || !!(m?.photo && m.photo.length > 0);
       if (hasAttachment) {
         const attSession = await resolveSession(tgChatId);
-        const attTaskId = await createTaskRow(
-          attSession.id,
-          `attachment:${m?.caption ?? "(no caption)"}`,
-          null,
-        );
+        const attTaskId = await createTaskRow(attSession.id, `attachment:${m?.caption ?? "(no caption)"}`, null);
         _currentTaskId = attTaskId;
         try {
           const deps = buildLiveAttachmentDeps({
@@ -4773,10 +5340,7 @@ serve(async (req) => {
             supabase,
             chatId: tgChatId,
           });
-          const outcome = await handleTelegramAttachment(
-            update as unknown as TelegramAttachmentUpdate,
-            deps,
-          );
+          const outcome = await handleTelegramAttachment(update as unknown as TelegramAttachmentUpdate, deps);
           if (outcome.kind === "no_attachment") {
             // Defensive — extractAttachmentSource agrees with hasAttachment, but in
             // case of a future divergence, fall through rather than crash.
@@ -4791,19 +5355,53 @@ serve(async (req) => {
                   correlation_id: outcome.correlationId,
                   ...(outcome.kind === "logged"
                     ? {
-                      drive_path: outcome.drivePath,
-                      drive_file_name: outcome.driveFileName,
-                      drive_file_id: outcome.driveFileId,
-                      already_existed: outcome.alreadyExisted,
-                      client: outcome.matchedClient,
-                      bureau_canonical: outcome.parsed.bureauCanonical,
-                      round: outcome.parsed.round,
-                      source_message_disposition: outcome.sourceMessageDisposition,
-                    }
+                        drive_path: outcome.drivePath,
+                        drive_file_name: outcome.driveFileName,
+                        drive_file_id: outcome.driveFileId,
+                        already_existed: outcome.alreadyExisted,
+                        client: outcome.matchedClient,
+                        bureau_canonical: outcome.parsed.bureauCanonical,
+                        round: outcome.parsed.round,
+                        source_message_disposition: outcome.sourceMessageDisposition,
+                      }
                     : {}),
                 },
               })
               .eq("id", attTaskId);
+
+            // Structured audit log for drive_unconfigured early-exit.
+            // Wrapped in try/catch — observability must never break the response path.
+            if (outcome.kind === "drive_unconfigured") {
+              try {
+                const captionName = (m?.caption ?? "").split("|")[0]?.trim() || null;
+                const matchedName = (outcome as { matchedName?: string }).matchedName ?? null;
+                const tokens = (matchedName ?? "").trim().toUpperCase().split(/\s+/).filter(Boolean);
+                const parsedFirst = tokens[0] ?? null;
+                const parsedLast = tokens.length > 1 ? tokens[tokens.length - 1] : null;
+                const attemptedPermutations =
+                  (outcome as { attemptedPermutations?: string[] }).attemptedPermutations ?? [];
+                await supabase.from("audit_logs").insert({
+                  user_id: "00000000-0000-0000-0000-000000000000",
+                  client_id: null,
+                  action: "telegram_drive_unconfigured",
+                  details: {
+                    caption_name: captionName,
+                    matched_name: matchedName,
+                    parsed_first: parsedFirst,
+                    parsed_last: parsedLast,
+                    attempted_permutations: attemptedPermutations,
+                    cause: outcome.cause,
+                    telegram_chat_id: tgChatId,
+                    telegram_message_id: (m as { message_id?: number })?.message_id ?? null,
+                    correlation_id: outcome.correlationId,
+                  },
+                });
+              } catch (auditErr) {
+                console.error("[telegram-webhook] audit_logs insert failed:", auditErr);
+                // Swallow — observability must not break the main response path.
+              }
+            }
+
             _currentTaskId = null;
             return new Response("ok");
           }
@@ -4811,9 +5409,7 @@ serve(async (req) => {
           console.error("[telegram-webhook] attachment handler crashed:", attErr);
           await sendMessage(
             tgChatId,
-            `📎 Internal error processing the attachment: ${
-              attErr instanceof Error ? attErr.message : String(attErr)
-            }`,
+            `📎 Internal error processing the attachment: ${attErr instanceof Error ? attErr.message : String(attErr)}`,
           );
           await supabase
             .from("tasks")
@@ -4883,7 +5479,10 @@ serve(async (req) => {
         await sendMessage(chatId, `📋 Queued: \`${taskId}\``, {}, `task:${taskId}:queued`);
         await clearPendingPitchBulk(chatId);
         await sendMessage(chatId, "Bulk pitch cancelled.", {}, `task:${taskId}:bulk-cancel`);
-        await supabase.from("tasks").update({ status: "succeeded", result_json: { shortcut: "pitch_bulk_cancel" } }).eq("id", taskId);
+        await supabase
+          .from("tasks")
+          .update({ status: "succeeded", result_json: { shortcut: "pitch_bulk_cancel" } })
+          .eq("id", taskId);
         await sendMessage(chatId, `✅ Done: \`${taskId}\``, {}, `task:${taskId}:done`);
         _currentTaskId = null;
         return new Response("ok");
@@ -4911,13 +5510,21 @@ serve(async (req) => {
             await sendMessage(chatId, formatAssistantMessage(modelForPitch, msg), {}, `task:${taskId}:bulk-pitch`);
           } catch (e) {
             const errStr = e instanceof Error ? e.message : String(e);
-            await sendMessage(chatId, formatAssistantMessage(modelForPitch, `❌ ${errStr}`), {}, `task:${taskId}:bulk-pitch-err`);
+            await sendMessage(
+              chatId,
+              formatAssistantMessage(modelForPitch, `❌ ${errStr}`),
+              {},
+              `task:${taskId}:bulk-pitch-err`,
+            );
           }
         }
-        await supabase.from("tasks").update({
-          status: "succeeded",
-          result_json: { shortcut: "pitch_bulk_done", count: ids.length },
-        }).eq("id", taskId);
+        await supabase
+          .from("tasks")
+          .update({
+            status: "succeeded",
+            result_json: { shortcut: "pitch_bulk_done", count: ids.length },
+          })
+          .eq("id", taskId);
         await sendMessage(chatId, `✅ Done: \`${taskId}\``, {}, `task:${taskId}:done`);
         _currentTaskId = null;
         return new Response("ok");
@@ -4945,7 +5552,10 @@ serve(async (req) => {
         await sendMessage(chatId, `📋 Queued: \`${taskId}\``, {}, `task:${taskId}:queued`);
         await clearPendingPitchTier3(chatId);
         await sendMessage(chatId, "Tier-3 pitch cancelled.", {}, `task:${taskId}:t3-cancel`);
-        await supabase.from("tasks").update({ status: "succeeded", result_json: { shortcut: "pitch_t3_cancel" } }).eq("id", taskId);
+        await supabase
+          .from("tasks")
+          .update({ status: "succeeded", result_json: { shortcut: "pitch_t3_cancel" } })
+          .eq("id", taskId);
         await sendMessage(chatId, `✅ Done: \`${taskId}\``, {}, `task:${taskId}:done`);
         _currentTaskId = null;
         return new Response("ok");
@@ -4971,9 +5581,17 @@ serve(async (req) => {
           await sendMessage(chatId, formatAssistantMessage(modelForPitch, msg), {}, `task:${taskId}:t3-pitch`);
         } catch (e) {
           const errStr = e instanceof Error ? e.message : String(e);
-          await sendMessage(chatId, formatAssistantMessage(modelForPitch, `❌ ${errStr}`), {}, `task:${taskId}:t3-pitch-err`);
+          await sendMessage(
+            chatId,
+            formatAssistantMessage(modelForPitch, `❌ ${errStr}`),
+            {},
+            `task:${taskId}:t3-pitch-err`,
+          );
         }
-        await supabase.from("tasks").update({ status: "succeeded", result_json: { shortcut: "pitch_tier3_confirmed" } }).eq("id", taskId);
+        await supabase
+          .from("tasks")
+          .update({ status: "succeeded", result_json: { shortcut: "pitch_tier3_confirmed" } })
+          .eq("id", taskId);
         await sendMessage(chatId, `✅ Done: \`${taskId}\``, {}, `task:${taskId}:done`);
         _currentTaskId = null;
         return new Response("ok");
@@ -4989,91 +5607,115 @@ serve(async (req) => {
       // Otherwise any non-cancel text is treated as a "vibe" and never reaches manual tax routing.
       if (looksLikeManualTaxCommand(text)) {
         await clearPlaylistConfirm(chatId);
-        console.log(JSON.stringify({
-          ts: Date.now(),
-          event: "manual_tax_clears_playlist_confirm",
-          chatId,
-        }));
+        console.log(
+          JSON.stringify({
+            ts: Date.now(),
+            event: "manual_tax_clears_playlist_confirm",
+            chatId,
+          }),
+        );
       } else {
-      const lower = text.toLowerCase().trim();
-      const clearAndContinue =
-        lower.startsWith("/do ") ||
-        lower === "/start" ||
-        lower.startsWith("/workflows") ||
-        lower.startsWith("/metrics") ||
-        lower.startsWith("/triage") ||
-        lower.startsWith("/status") ||
-        lower.startsWith("/help") ||
-        lower === "/ping" ||
-        lower.startsWith("/resend") ||
-        lower.startsWith("/model") ||
-        lower.startsWith("/tax ");
+        const lower = text.toLowerCase().trim();
+        const clearAndContinue =
+          lower.startsWith("/do ") ||
+          lower === "/start" ||
+          lower.startsWith("/workflows") ||
+          lower.startsWith("/metrics") ||
+          lower.startsWith("/triage") ||
+          lower.startsWith("/status") ||
+          lower.startsWith("/help") ||
+          lower === "/ping" ||
+          lower.startsWith("/resend") ||
+          lower.startsWith("/model") ||
+          lower.startsWith("/tax ");
 
-      if (clearAndContinue) {
-        await clearPlaylistConfirm(chatId);
-        // fall through: one task + normal routing
-      } else if (lower === "cancel" || lower === "no" || lower === "/playlist_cancel") {
-        try {
-          taskId = await createTaskRow(session.id, text, requestedModel);
-          _currentTaskId = taskId;
-        } catch (taskErr) {
-          console.error("FATAL: task creation failed:", taskErr);
-          await sendMessage(chatId, `ð¨ *${SYSTEM_IDENTITY}* â Task creation failed: ${String(taskErr)}`);
+        if (clearAndContinue) {
+          await clearPlaylistConfirm(chatId);
+          // fall through: one task + normal routing
+        } else if (lower === "cancel" || lower === "no" || lower === "/playlist_cancel") {
+          try {
+            taskId = await createTaskRow(session.id, text, requestedModel);
+            _currentTaskId = taskId;
+          } catch (taskErr) {
+            console.error("FATAL: task creation failed:", taskErr);
+            await sendMessage(chatId, `ð¨ *${SYSTEM_IDENTITY}* â Task creation failed: ${String(taskErr)}`);
+            return new Response("ok");
+          }
+          await sendMessage(chatId, `ð Queued: \`${taskId}\``, {}, `task:${taskId}:queued`);
+          await clearPlaylistConfirm(chatId);
+          await sendMessage(chatId, `ð§ Playlist search cancelled.`, {}, `task:${taskId}:playlist-cancel`);
+          await supabase
+            .from("tasks")
+            .update({ status: "succeeded", result_json: { shortcut: "playlist_confirm_cancel" } })
+            .eq("id", taskId);
+          await sendMessage(chatId, `â Done: \`${taskId}\``, {}, `task:${taskId}:done`);
+          _currentTaskId = null;
           return new Response("ok");
-        }
-        await sendMessage(chatId, `ð Queued: \`${taskId}\``, {}, `task:${taskId}:queued`);
-        await clearPlaylistConfirm(chatId);
-        await sendMessage(chatId, `ð§ Playlist search cancelled.`, {}, `task:${taskId}:playlist-cancel`);
-        await supabase.from("tasks").update({ status: "succeeded", result_json: { shortcut: "playlist_confirm_cancel" } }).eq("id", taskId);
-        await sendMessage(chatId, `â Done: \`${taskId}\``, {}, `task:${taskId}:done`);
-        _currentTaskId = null;
-        return new Response("ok");
-      } else {
-        const isYes = /^(yes|y|confirm|ok|go|approve)$/i.test(text.trim());
-        const userVibe = isYes ? pendingPlaylistEarly.inferred_vibe : text.trim();
-        try {
-          taskId = await createTaskRow(session.id, text, requestedModel);
-          _currentTaskId = taskId;
-        } catch (taskErr) {
-          console.error("FATAL: task creation failed:", taskErr);
-          await sendMessage(chatId, `ð¨ *${SYSTEM_IDENTITY}* â Task creation failed: ${String(taskErr)}`);
-          return new Response("ok");
-        }
-        await sendMessage(chatId, `ð Queued: \`${taskId}\``, {}, `task:${taskId}:queued`);
-        if (!userVibe) {
-          await sendMessage(chatId, "Reply *yes* to use the suggested vibe, or type your own vibe. Send *cancel* to abort.");
-          await supabase.from("tasks").update({ status: "succeeded", result_json: { shortcut: "playlist_confirm_prompt" } }).eq("id", taskId);
+        } else {
+          const isYes = /^(yes|y|confirm|ok|go|approve)$/i.test(text.trim());
+          const userVibe = isYes ? pendingPlaylistEarly.inferred_vibe : text.trim();
+          try {
+            taskId = await createTaskRow(session.id, text, requestedModel);
+            _currentTaskId = taskId;
+          } catch (taskErr) {
+            console.error("FATAL: task creation failed:", taskErr);
+            await sendMessage(chatId, `ð¨ *${SYSTEM_IDENTITY}* â Task creation failed: ${String(taskErr)}`);
+            return new Response("ok");
+          }
+          await sendMessage(chatId, `ð Queued: \`${taskId}\``, {}, `task:${taskId}:queued`);
+          if (!userVibe) {
+            await sendMessage(
+              chatId,
+              "Reply *yes* to use the suggested vibe, or type your own vibe. Send *cancel* to abort.",
+            );
+            await supabase
+              .from("tasks")
+              .update({ status: "succeeded", result_json: { shortcut: "playlist_confirm_prompt" } })
+              .eq("id", taskId);
+            await sendMessage(chatId, `â Done: \`${taskId}\``, {}, `task:${taskId}:done`);
+            _currentTaskId = null;
+            return new Response("ok");
+          }
+          await clearPlaylistConfirm(chatId);
+          const modelForPlaylist = normalizeBotModel(session.active_model);
+          try {
+            const out = await runPlaylistHubResearch(pendingPlaylistEarly.track_name, userVibe, chatId);
+            await sendMessage(
+              chatId,
+              formatAssistantMessage(modelForPlaylist, out),
+              {},
+              `task:${taskId}:playlist-result`,
+            );
+          } catch (e) {
+            const errStr = e instanceof Error ? e.message : String(e);
+            await sendMessage(
+              chatId,
+              formatAssistantMessage(modelForPlaylist, `â ${errStr}`),
+              {},
+              `task:${taskId}:playlist-err`,
+            );
+          }
+          await appendConversationTurn(chatId, {
+            role: "user",
+            content: text,
+            model: modelForPlaylist,
+            at: new Date().toISOString(),
+          });
+          await supabase
+            .from("tasks")
+            .update({
+              status: "succeeded",
+              result_json: {
+                shortcut: "playlist_confirm_execute",
+                track: pendingPlaylistEarly.track_name,
+                user_vibe: userVibe,
+              },
+            })
+            .eq("id", taskId);
           await sendMessage(chatId, `â Done: \`${taskId}\``, {}, `task:${taskId}:done`);
           _currentTaskId = null;
           return new Response("ok");
         }
-        await clearPlaylistConfirm(chatId);
-        const modelForPlaylist = normalizeBotModel(session.active_model);
-        try {
-          const out = await runPlaylistHubResearch(pendingPlaylistEarly.track_name, userVibe, chatId);
-          await sendMessage(chatId, formatAssistantMessage(modelForPlaylist, out), {}, `task:${taskId}:playlist-result`);
-        } catch (e) {
-          const errStr = e instanceof Error ? e.message : String(e);
-          await sendMessage(chatId, formatAssistantMessage(modelForPlaylist, `â ${errStr}`), {}, `task:${taskId}:playlist-err`);
-        }
-        await appendConversationTurn(chatId, {
-          role: "user",
-          content: text,
-          model: modelForPlaylist,
-          at: new Date().toISOString(),
-        });
-        await supabase.from("tasks").update({
-          status: "succeeded",
-          result_json: {
-            shortcut: "playlist_confirm_execute",
-            track: pendingPlaylistEarly.track_name,
-            user_vibe: userVibe,
-          },
-        }).eq("id", taskId);
-        await sendMessage(chatId, `â Done: \`${taskId}\``, {}, `task:${taskId}:done`);
-        _currentTaskId = null;
-        return new Response("ok");
-      }
       }
     }
 
@@ -5081,7 +5723,7 @@ serve(async (req) => {
     let lowerText = text.toLowerCase().trim();
 
     // "show pitch report"
-    if (lowerText === 'show pitch report' || lowerText === 'pitch report') {
+    if (lowerText === "show pitch report" || lowerText === "pitch report") {
       const research = await getLastPlaylistResearch(chatId);
       if (!research) {
         await sendMessage(chatId, "No playlist research found. Run 'find playlist opportunities for [track]' first.");
@@ -5090,11 +5732,11 @@ serve(async (req) => {
         if (!playlists.length) {
           await sendMessage(chatId, "Could not load playlist details. Try running research again.");
         } else {
-          let report = "Pitch Report for \"" + research.track_name + "\":\n\n";
+          let report = 'Pitch Report for "' + research.track_name + '":\n\n';
           playlists.forEach((p: any, i: number) => {
             const tier = p.tier || (i < 5 ? 1 : i < 12 ? 2 : 3);
             const tierLabel = tier === 1 ? "Tier 1" : tier === 2 ? "Tier 2" : "Tier 3";
-            report += (i + 1) + ". " + (p.name || p.playlist_id) + " [" + tierLabel + "]";
+            report += i + 1 + ". " + (p.name || p.playlist_id) + " [" + tierLabel + "]";
             if (p.followers) report += " (" + p.followers + " followers)";
             if (p.pitch_status) report += " - " + p.pitch_status;
             report += "\n";
@@ -5124,17 +5766,31 @@ serve(async (req) => {
       const p = playlists[0];
       const tier = p?.tier || (idx < 5 ? 1 : idx < 12 ? 2 : 3);
       if (tier === 3) {
-        await setPendingPitchTier3(chatId, { playlist_id: playlistId, track_name: research.track_name, ts: new Date().toISOString() });
-        await sendMessage(chatId, "Playlist #" + (idx + 1) + " (" + (p?.name || playlistId) + ") is Tier 3. These have lower acceptance rates. Type 'confirm' to pitch anyway, or choose a different number.");
+        await setPendingPitchTier3(chatId, {
+          playlist_id: playlistId,
+          track_name: research.track_name,
+          ts: new Date().toISOString(),
+        });
+        await sendMessage(
+          chatId,
+          "Playlist #" +
+            (idx + 1) +
+            " (" +
+            (p?.name || playlistId) +
+            ") is Tier 3. These have lower acceptance rates. Type 'confirm' to pitch anyway, or choose a different number.",
+        );
         return new Response("ok");
       }
-      const result = await callFanFuelHub("execute-pitch", { playlist_id: playlistId, track_name: research.track_name });
-      await sendMessage(chatId, result?.message || ("Pitch sent to " + (p?.name || playlistId)));
+      const result = await callFanFuelHub("execute-pitch", {
+        playlist_id: playlistId,
+        track_name: research.track_name,
+      });
+      await sendMessage(chatId, result?.message || "Pitch sent to " + (p?.name || playlistId));
       return new Response("ok");
     }
 
     // "pitch all tier 1"
-    if (lowerText === 'pitch all tier 1') {
+    if (lowerText === "pitch all tier 1") {
       const research = await getLastPlaylistResearch(chatId);
       if (!research) {
         await sendMessage(chatId, "No playlist research found. Run research first.");
@@ -5147,16 +5803,22 @@ serve(async (req) => {
         return new Response("ok");
       }
       const tier1Ids = tier1.map((p: any) => p.playlist_id || p.id);
-      await setPendingPitchBulk(chatId, { track_name: research.track_name, playlist_ids: tier1Ids, ts: new Date().toISOString() });
-      let msg = "Ready to pitch " + tier1.length + " Tier 1 playlists for \"" + research.track_name + "\":\n";
-      tier1.forEach((p: any, i: number) => { msg += (i + 1) + ". " + (p.name || p.playlist_id) + "\n"; });
+      await setPendingPitchBulk(chatId, {
+        track_name: research.track_name,
+        playlist_ids: tier1Ids,
+        ts: new Date().toISOString(),
+      });
+      let msg = "Ready to pitch " + tier1.length + ' Tier 1 playlists for "' + research.track_name + '":\n';
+      tier1.forEach((p: any, i: number) => {
+        msg += i + 1 + ". " + (p.name || p.playlist_id) + "\n";
+      });
       msg += "\nType 'confirm all' to send all pitches.";
       await sendMessage(chatId, msg);
       return new Response("ok");
     }
 
     // "confirm all" â execute bulk pitch
-    if (lowerText === 'confirm all') {
+    if (lowerText === "confirm all") {
       const pending = await getPendingPitchBulk(chatId);
       if (!pending) {
         await sendMessage(chatId, "Nothing pending. Use 'pitch all tier 1' first.");
@@ -5168,22 +5830,30 @@ serve(async (req) => {
         try {
           await callFanFuelHub("execute-pitch", { playlist_id: pid, track_name: pending.track_name });
           sent++;
-        } catch (e) { console.error("Pitch failed for", pid, e); }
+        } catch (e) {
+          console.error("Pitch failed for", pid, e);
+        }
       }
-      await sendMessage(chatId, "Pitched " + sent + "/" + pending.playlist_ids.length + " Tier 1 playlists for \"" + pending.track_name + "\".");
+      await sendMessage(
+        chatId,
+        "Pitched " + sent + "/" + pending.playlist_ids.length + ' Tier 1 playlists for "' + pending.track_name + '".',
+      );
       return new Response("ok");
     }
 
     // "confirm" â confirm tier 3 single pitch
-    if (lowerText === 'confirm') {
+    if (lowerText === "confirm") {
       const pending = await getPendingPitchTier3(chatId);
       if (!pending) {
         await sendMessage(chatId, "Nothing pending to confirm.");
         return new Response("ok");
       }
       await clearPendingPitchTier3(chatId);
-      const result = await callFanFuelHub("execute-pitch", { playlist_id: pending.playlist_id, track_name: pending.track_name });
-      await sendMessage(chatId, result?.message || ("Pitch sent to " + pending.playlist_id));
+      const result = await callFanFuelHub("execute-pitch", {
+        playlist_id: pending.playlist_id,
+        track_name: pending.track_name,
+      });
+      await sendMessage(chatId, result?.message || "Pitch sent to " + pending.playlist_id);
       return new Response("ok");
     }
 
@@ -5193,11 +5863,10 @@ serve(async (req) => {
       const playlistName = statusMatch[1];
       const newStatus = statusMatch[2];
       const result = await callFanFuelHub("update-pitch-status", { playlist_name: playlistName, status: newStatus });
-      await sendMessage(chatId, result?.message || ("Updated pitch status for " + playlistName + " to " + newStatus));
+      await sendMessage(chatId, result?.message || "Updated pitch status for " + playlistName + " to " + newStatus);
       return new Response("ok");
     }
     // ââ End pitch routing ââââââââââââââââââââââââââââââââââââââ
-
 
     try {
       taskId = await createTaskRow(session.id, text, requestedModel);
@@ -5231,16 +5900,19 @@ serve(async (req) => {
           body: JSON.stringify({ run_id: run.id }),
         });
         const snap = await runner.json().catch(() => ({}));
-        await supabase.from("tasks").update({
-          status: "succeeded",
-          selected_workflow: "workflow-runner",
-          result_json: {
-            execution_lane: "workflow_engine",
-            workflow_run_id: run.id,
-            workflow_intent: wfIntent.intent,
-            workflow_snapshot: snap,
-          },
-        }).eq("id", taskId);
+        await supabase
+          .from("tasks")
+          .update({
+            status: "succeeded",
+            selected_workflow: "workflow-runner",
+            result_json: {
+              execution_lane: "workflow_engine",
+              workflow_run_id: run.id,
+              workflow_intent: wfIntent.intent,
+              workflow_snapshot: snap,
+            },
+          })
+          .eq("id", taskId);
         const body = snap as Record<string, unknown>;
         const runRow = body.run as Record<string, unknown> | undefined;
         const payload = formatWorkflowUserPayload(runRow ?? run, body);
@@ -5262,17 +5934,15 @@ serve(async (req) => {
       } catch (e) {
         const errMsg = e instanceof Error ? e.message : String(e);
         console.error("[workflow-engine] failed:", errMsg);
-        await sendMessage(
-          chatId,
-          `Workflow failed: ${errMsg.slice(0, 500)}`,
-          {},
-          `task:${taskId}:workflow-error`,
-        );
-        await supabase.from("tasks").update({
-          status: "failed",
-          error: errMsg.slice(0, 500),
-          result_json: { execution_lane: "workflow_engine", error: errMsg.slice(0, 300) },
-        }).eq("id", taskId);
+        await sendMessage(chatId, `Workflow failed: ${errMsg.slice(0, 500)}`, {}, `task:${taskId}:workflow-error`);
+        await supabase
+          .from("tasks")
+          .update({
+            status: "failed",
+            error: errMsg.slice(0, 500),
+            result_json: { execution_lane: "workflow_engine", error: errMsg.slice(0, 300) },
+          })
+          .eq("id", taskId);
         await sendMessage(chatId, `❌ Failed: \`${taskId}\``, {}, `task:${taskId}:done`);
         _currentTaskId = null;
         return new Response("ok");
@@ -5295,11 +5965,17 @@ serve(async (req) => {
       if (!trackForStatus) {
         await sendMessage(
           chatId,
-          formatAssistantMessage(modelPitch, "No recent research — run *find playlist opportunities for [track]* first."),
+          formatAssistantMessage(
+            modelPitch,
+            "No recent research — run *find playlist opportunities for [track]* first.",
+          ),
           {},
           `task:${taskId}:pitch-status-no-track`,
         );
-        await supabase.from("tasks").update({ status: "succeeded", result_json: { shortcut: "pitch_status_no_track" } }).eq("id", taskId);
+        await supabase
+          .from("tasks")
+          .update({ status: "succeeded", result_json: { shortcut: "pitch_status_no_track" } })
+          .eq("id", taskId);
         await sendMessage(chatId, `✅ Done: \`${taskId}\``, {}, `task:${taskId}:done`);
         _currentTaskId = null;
         return new Response("ok");
@@ -5315,9 +5991,17 @@ serve(async (req) => {
         await sendMessage(chatId, formatAssistantMessage(modelPitch, msg), {}, `task:${taskId}:pitch-manual-status`);
       } catch (e) {
         const errStr = e instanceof Error ? e.message : String(e);
-        await sendMessage(chatId, formatAssistantMessage(modelPitch, `❌ ${errStr}`), {}, `task:${taskId}:pitch-manual-err`);
+        await sendMessage(
+          chatId,
+          formatAssistantMessage(modelPitch, `❌ ${errStr}`),
+          {},
+          `task:${taskId}:pitch-manual-err`,
+        );
       }
-      await supabase.from("tasks").update({ status: "succeeded", result_json: { shortcut: "pitch_manual_status" } }).eq("id", taskId);
+      await supabase
+        .from("tasks")
+        .update({ status: "succeeded", result_json: { shortcut: "pitch_manual_status" } })
+        .eq("id", taskId);
       await sendMessage(chatId, `✅ Done: \`${taskId}\``, {}, `task:${taskId}:done`);
       _currentTaskId = null;
       return new Response("ok");
@@ -5329,19 +6013,26 @@ serve(async (req) => {
       if (!lastBulk?.ranked_playlist_ids?.length) {
         await sendMessage(
           chatId,
-          formatAssistantMessage(modelPitch, "No recent research found. Try: *find playlist opportunities for [track name]*"),
+          formatAssistantMessage(
+            modelPitch,
+            "No recent research found. Try: *find playlist opportunities for [track name]*",
+          ),
           {},
           `task:${taskId}:pitch-all-no-research`,
         );
-        await supabase.from("tasks").update({ status: "succeeded", result_json: { shortcut: "pitch_all_no_research" } }).eq("id", taskId);
+        await supabase
+          .from("tasks")
+          .update({ status: "succeeded", result_json: { shortcut: "pitch_all_no_research" } })
+          .eq("id", taskId);
         await sendMessage(chatId, `✅ Done: \`${taskId}\``, {}, `task:${taskId}:done`);
         _currentTaskId = null;
         return new Response("ok");
       }
       const allPl = await hubPlaylistBatch(lastBulk.ranked_playlist_ids);
       const tier1 = allPl
-        .filter((p: { tier?: number; submission_method?: string }) =>
-          p.tier === 1 && !NON_BULK_PITCH_METHODS.has(String(p.submission_method || "").toLowerCase())
+        .filter(
+          (p: { tier?: number; submission_method?: string }) =>
+            p.tier === 1 && !NON_BULK_PITCH_METHODS.has(String(p.submission_method || "").toLowerCase()),
         )
         .slice(0, 5);
       if (!tier1.length) {
@@ -5354,14 +6045,18 @@ serve(async (req) => {
           {},
           `task:${taskId}:pitch-all-empty`,
         );
-        await supabase.from("tasks").update({ status: "succeeded", result_json: { shortcut: "pitch_all_empty" } }).eq("id", taskId);
+        await supabase
+          .from("tasks")
+          .update({ status: "succeeded", result_json: { shortcut: "pitch_all_empty" } })
+          .eq("id", taskId);
         await sendMessage(chatId, `✅ Done: \`${taskId}\``, {}, `task:${taskId}:done`);
         _currentTaskId = null;
         return new Response("ok");
       }
       const lines = tier1
-        .map((p: { playlist_name?: string; playlist_id: string; submission_method?: string }, i: number) =>
-          `${i + 1}. *${p.playlist_name ?? p.playlist_id}* — ${p.submission_method ?? "?"}`
+        .map(
+          (p: { playlist_name?: string; playlist_id: string; submission_method?: string }, i: number) =>
+            `${i + 1}. *${p.playlist_name ?? p.playlist_id}* — ${p.submission_method ?? "?"}`,
         )
         .join("\n");
       await setPendingPitchBulk(chatId, {
@@ -5379,10 +6074,13 @@ serve(async (req) => {
         `Reply *confirm all* to run these pitches sequentially, or *cancel*.`,
       ].join("\n");
       await sendMessage(chatId, formatAssistantMessage(modelPitch, bulkMsg), {}, `task:${taskId}:pitch-all-confirm`);
-      await supabase.from("tasks").update({
-        status: "succeeded",
-        result_json: { shortcut: "pitch_all_await_confirm", count: tier1.length },
-      }).eq("id", taskId);
+      await supabase
+        .from("tasks")
+        .update({
+          status: "succeeded",
+          result_json: { shortcut: "pitch_all_await_confirm", count: tier1.length },
+        })
+        .eq("id", taskId);
       await sendMessage(chatId, `✅ Done: \`${taskId}\``, {}, `task:${taskId}:done`);
       _currentTaskId = null;
       return new Response("ok");
@@ -5394,18 +6092,26 @@ serve(async (req) => {
       if (!lastRep?.ranked_playlist_ids?.length) {
         await sendMessage(
           chatId,
-          formatAssistantMessage(modelPitch, "No recent research found. Try: *find playlist opportunities for [track name]*"),
+          formatAssistantMessage(
+            modelPitch,
+            "No recent research found. Try: *find playlist opportunities for [track name]*",
+          ),
           {},
           `task:${taskId}:pitch-report-empty`,
         );
       } else {
         const playlists = await hubPlaylistBatch(lastRep.ranked_playlist_ids.slice(0, 20));
         const repLines = playlists
-          .map((p: { playlist_name?: string; playlist_id: string; tier?: number; submission_method?: string }, i: number) => {
-            const tier = p.tier != null ? `T${p.tier}` : "?";
-            const method = p.submission_method ?? "—";
-            return `${i + 1}. *${p.playlist_name ?? p.playlist_id}* — ${tier} — ${method}`;
-          })
+          .map(
+            (
+              p: { playlist_name?: string; playlist_id: string; tier?: number; submission_method?: string },
+              i: number,
+            ) => {
+              const tier = p.tier != null ? `T${p.tier}` : "?";
+              const method = p.submission_method ?? "—";
+              return `${i + 1}. *${p.playlist_name ?? p.playlist_id}* — ${tier} — ${method}`;
+            },
+          )
           .join("\n");
         const reportMsg = [
           `📋 *Pitch report* (last search: *${lastRep.track_name}*)`,
@@ -5416,7 +6122,10 @@ serve(async (req) => {
         ].join("\n");
         await sendMessage(chatId, formatAssistantMessage(modelPitch, reportMsg), {}, `task:${taskId}:pitch-report`);
       }
-      await supabase.from("tasks").update({ status: "succeeded", result_json: { shortcut: "pitch_report" } }).eq("id", taskId);
+      await supabase
+        .from("tasks")
+        .update({ status: "succeeded", result_json: { shortcut: "pitch_report" } })
+        .eq("id", taskId);
       await sendMessage(chatId, `✅ Done: \`${taskId}\``, {}, `task:${taskId}:done`);
       _currentTaskId = null;
       return new Response("ok");
@@ -5433,18 +6142,29 @@ serve(async (req) => {
         if (!entries.length) {
           body = "No pitches logged yet.";
         } else {
-          const lines = entries.slice(0, 25).map((p: Record<string, string>) =>
-            `• ${p.playlist_id} — ${p.track_name} — ${p.status} (${p.method ?? "?"})`
-          ).join("\n");
+          const lines = entries
+            .slice(0, 25)
+            .map(
+              (p: Record<string, string>) => `• ${p.playlist_id} — ${p.track_name} — ${p.status} (${p.method ?? "?"})`,
+            )
+            .join("\n");
           body = `*Pitch log* (${entries.length})\n\n${lines}`;
           if (typeof cap === "number") body += `\n\n📧 Email pitches (last 24h): ${cap}/10`;
         }
         await sendMessage(chatId, formatAssistantMessage(modelPitch, body), {}, `task:${taskId}:pitch-status`);
       } catch (e) {
         const errStr = e instanceof Error ? e.message : String(e);
-        await sendMessage(chatId, formatAssistantMessage(modelPitch, `❌ ${errStr}`), {}, `task:${taskId}:pitch-status-err`);
+        await sendMessage(
+          chatId,
+          formatAssistantMessage(modelPitch, `❌ ${errStr}`),
+          {},
+          `task:${taskId}:pitch-status-err`,
+        );
       }
-      await supabase.from("tasks").update({ status: "succeeded", result_json: { shortcut: "pitch_status_cmd" } }).eq("id", taskId);
+      await supabase
+        .from("tasks")
+        .update({ status: "succeeded", result_json: { shortcut: "pitch_status_cmd" } })
+        .eq("id", taskId);
       await sendMessage(chatId, `✅ Done: \`${taskId}\``, {}, `task:${taskId}:done`);
       _currentTaskId = null;
       return new Response("ok");
@@ -5458,11 +6178,17 @@ serve(async (req) => {
       if (!lastOne?.ranked_playlist_ids?.length) {
         await sendMessage(
           chatId,
-          formatAssistantMessage(modelPitch, "No recent research found. Try: *find playlist opportunities for [track name]*"),
+          formatAssistantMessage(
+            modelPitch,
+            "No recent research found. Try: *find playlist opportunities for [track name]*",
+          ),
           {},
           `task:${taskId}:pitch-single-no-research`,
         );
-        await supabase.from("tasks").update({ status: "succeeded", result_json: { shortcut: "pitch_single_no_research" } }).eq("id", taskId);
+        await supabase
+          .from("tasks")
+          .update({ status: "succeeded", result_json: { shortcut: "pitch_single_no_research" } })
+          .eq("id", taskId);
         await sendMessage(chatId, `✅ Done: \`${taskId}\``, {}, `task:${taskId}:done`);
         _currentTaskId = null;
         return new Response("ok");
@@ -5477,7 +6203,10 @@ serve(async (req) => {
             {},
             `task:${taskId}:pitch-bad-index`,
           );
-          await supabase.from("tasks").update({ status: "succeeded", result_json: { shortcut: "pitch_bad_index" } }).eq("id", taskId);
+          await supabase
+            .from("tasks")
+            .update({ status: "succeeded", result_json: { shortcut: "pitch_bad_index" } })
+            .eq("id", taskId);
           await sendMessage(chatId, `✅ Done: \`${taskId}\``, {}, `task:${taskId}:done`);
           _currentTaskId = null;
           return new Response("ok");
@@ -5486,18 +6215,29 @@ serve(async (req) => {
       } else if (pitchNameMatch) {
         const q = pitchNameMatch[1].trim().toLowerCase();
         const allNm = await hubPlaylistBatch(lastOne.ranked_playlist_ids);
-        const hit = allNm.find((p: { playlist_name?: string; playlist_id?: string }) =>
-          String(p.playlist_name ?? "").toLowerCase().includes(q) ||
-          String(p.playlist_id ?? "").toLowerCase().includes(q)
+        const hit = allNm.find(
+          (p: { playlist_name?: string; playlist_id?: string }) =>
+            String(p.playlist_name ?? "")
+              .toLowerCase()
+              .includes(q) ||
+            String(p.playlist_id ?? "")
+              .toLowerCase()
+              .includes(q),
         );
         if (!hit) {
           await sendMessage(
             chatId,
-            formatAssistantMessage(modelPitch, `No playlist in your last results matches "${pitchNameMatch[1].trim()}". Try *show pitch report*.`),
+            formatAssistantMessage(
+              modelPitch,
+              `No playlist in your last results matches "${pitchNameMatch[1].trim()}". Try *show pitch report*.`,
+            ),
             {},
             `task:${taskId}:pitch-name-miss`,
           );
-          await supabase.from("tasks").update({ status: "succeeded", result_json: { shortcut: "pitch_name_miss" } }).eq("id", taskId);
+          await supabase
+            .from("tasks")
+            .update({ status: "succeeded", result_json: { shortcut: "pitch_name_miss" } })
+            .eq("id", taskId);
           await sendMessage(chatId, `✅ Done: \`${taskId}\``, {}, `task:${taskId}:done`);
           _currentTaskId = null;
           return new Response("ok");
@@ -5521,10 +6261,18 @@ serve(async (req) => {
           await sendMessage(chatId, formatAssistantMessage(modelPitch, msg), {}, `task:${taskId}:pitch-one`);
         } catch (e) {
           const errStr = e instanceof Error ? e.message : String(e);
-          await sendMessage(chatId, formatAssistantMessage(modelPitch, `❌ ${errStr}`), {}, `task:${taskId}:pitch-one-err`);
+          await sendMessage(
+            chatId,
+            formatAssistantMessage(modelPitch, `❌ ${errStr}`),
+            {},
+            `task:${taskId}:pitch-one-err`,
+          );
         }
       }
-      await supabase.from("tasks").update({ status: "succeeded", result_json: { shortcut: "pitch_single" } }).eq("id", taskId);
+      await supabase
+        .from("tasks")
+        .update({ status: "succeeded", result_json: { shortcut: "pitch_single" } })
+        .eq("id", taskId);
       await sendMessage(chatId, `✅ Done: \`${taskId}\``, {}, `task:${taskId}:done`);
       _currentTaskId = null;
       return new Response("ok");
@@ -5574,15 +6322,18 @@ serve(async (req) => {
           `Send *cancel* to abort.`,
         ].join("\n");
         await sendMessage(chatId, formatAssistantMessage(modelNl, confirmNl), {}, `task:${taskId}:playlist-nl-confirm`);
-        await supabase.from("tasks").update({
-          status: "succeeded",
-          result_json: {
-            execution_lane: "playlist_nl",
-            shortcut: "playlist_confirm_natural",
-            track: trackNl,
-            inferred_vibe: inferredNl,
-          },
-        }).eq("id", taskId);
+        await supabase
+          .from("tasks")
+          .update({
+            status: "succeeded",
+            result_json: {
+              execution_lane: "playlist_nl",
+              shortcut: "playlist_confirm_natural",
+              track: trackNl,
+              inferred_vibe: inferredNl,
+            },
+          })
+          .eq("id", taskId);
         await sendMessage(chatId, `✅ Done: \`${taskId}\``, {}, `task:${taskId}:done`);
         _currentTaskId = null;
         return new Response("ok");
@@ -5595,10 +6346,13 @@ serve(async (req) => {
         `Example: *Find playlist opportunities for Meditate by Fendi Frost*.`,
       ].join("\n");
       await sendMessage(chatId, formatAssistantMessage(modelNl, needTrack), {}, `task:${taskId}:playlist-need-track`);
-      await supabase.from("tasks").update({
-        status: "succeeded",
-        result_json: { execution_lane: "playlist_nl", shortcut: "playlist_need_track_natural" },
-      }).eq("id", taskId);
+      await supabase
+        .from("tasks")
+        .update({
+          status: "succeeded",
+          result_json: { execution_lane: "playlist_nl", shortcut: "playlist_need_track_natural" },
+        })
+        .eq("id", taskId);
       await sendMessage(chatId, `✅ Done: \`${taskId}\``, {}, `task:${taskId}:done`);
       _currentTaskId = null;
       return new Response("ok");
@@ -5654,18 +6408,21 @@ serve(async (req) => {
         {},
         `task:${taskId}:cg-ingest-missing`,
       );
-      await supabase.from("tasks").update({
-        status: "succeeded",
-        result_json: {
-          execution_lane: "lane1_blocked",
-          credit_routing: {
-            detected_explicit_credit_guardian_command: true,
-            failure_reason: "drive_ingest_not_implemented",
-            final_execution_mode: "blocked",
-            final_outcome: "blocked_unimplemented",
+      await supabase
+        .from("tasks")
+        .update({
+          status: "succeeded",
+          result_json: {
+            execution_lane: "lane1_blocked",
+            credit_routing: {
+              detected_explicit_credit_guardian_command: true,
+              failure_reason: "drive_ingest_not_implemented",
+              final_execution_mode: "blocked",
+              final_outcome: "blocked_unimplemented",
+            },
           },
-        },
-      }).eq("id", taskId);
+        })
+        .eq("id", taskId);
       console.log(
         JSON.stringify({
           ts: Date.now(),
@@ -5690,15 +6447,16 @@ serve(async (req) => {
     // /tax status and /tax forms are shortcut commands — skip intent routing for them
     const isTaxShortcut = lowerText.startsWith("/tax status") || lowerText.startsWith("/tax forms");
     const taxIntent = isTaxShortcut ? false : isTaxIntent(lowerText);
-    const taxDocIntent = isTaxShortcut ? false : (
-      /\bprepare\b.*\btax/i.test(lowerText) ||
-      /\bcomplete\b.*\btax/i.test(lowerText) ||
-      /\bfile\b.*\btax/i.test(lowerText) ||
-      /\bdo\b.*\btax/i.test(lowerText) ||
-      /\bgenerate\b.*\btax\s+doc/i.test(lowerText) ||
-      /\btax\s+preparation\b/i.test(lowerText) ||
-      /\bturbotax\s+export\b/i.test(lowerText) ||
-      /\btax.*(20\d{2})/i.test(lowerText));
+    const taxDocIntent = isTaxShortcut
+      ? false
+      : /\bprepare\b.*\btax/i.test(lowerText) ||
+        /\bcomplete\b.*\btax/i.test(lowerText) ||
+        /\bfile\b.*\btax/i.test(lowerText) ||
+        /\bdo\b.*\btax/i.test(lowerText) ||
+        /\bgenerate\b.*\btax\s+doc/i.test(lowerText) ||
+        /\btax\s+preparation\b/i.test(lowerText) ||
+        /\bturbotax\s+export\b/i.test(lowerText) ||
+        /\btax.*(20\d{2})/i.test(lowerText);
     const manualEntryIntent =
       /\badd\b.*\$?\d+.*\bincome\b/i.test(lowerText) ||
       /\badd\b.*\bincome\b.*\$?\d+/i.test(lowerText) ||
@@ -5803,40 +6561,40 @@ serve(async (req) => {
         taskId,
         track: playlistDirectRedo.track_name,
       });
-      await supabase.from("tasks").update({
-        status: "running",
-        selected_workflow: "find_playlist_opportunities",
-        result_json: { execution_lane: "playlist_redo_direct", progress_step: "hub_research" },
-      }).eq("id", taskId);
+      await supabase
+        .from("tasks")
+        .update({
+          status: "running",
+          selected_workflow: "find_playlist_opportunities",
+          result_json: { execution_lane: "playlist_redo_direct", progress_step: "hub_research" },
+        })
+        .eq("id", taskId);
       try {
-        const out = await runPlaylistHubResearch(
-          playlistDirectRedo.track_name,
-          playlistDirectRedo.user_vibe,
-          chatId,
-        );
+        const out = await runPlaylistHubResearch(playlistDirectRedo.track_name, playlistDirectRedo.user_vibe, chatId);
         await sendMessage(chatId, formatAssistantMessage(modelPitch, out), {}, `task:${taskId}:playlist-redo-direct`);
-        await supabase.from("tasks").update({
-          status: "succeeded",
-          result_json: {
-            execution_lane: "playlist_redo_direct",
-            shortcut: "playlist_redo_direct",
-            track: playlistDirectRedo.track_name,
-            user_vibe: playlistDirectRedo.user_vibe,
-          },
-        }).eq("id", taskId);
+        await supabase
+          .from("tasks")
+          .update({
+            status: "succeeded",
+            result_json: {
+              execution_lane: "playlist_redo_direct",
+              shortcut: "playlist_redo_direct",
+              track: playlistDirectRedo.track_name,
+              user_vibe: playlistDirectRedo.user_vibe,
+            },
+          })
+          .eq("id", taskId);
       } catch (err) {
         const errMsg = (err as Error).message || "unknown";
-        await supabase.from("tasks").update({
-          status: "failed",
-          error: errMsg.slice(0, 300),
-          result_json: { execution_lane: "playlist_redo_direct", error: errMsg.slice(0, 200) },
-        }).eq("id", taskId);
-        await sendMessage(
-          chatId,
-          `❌ Failed: \`${taskId}\` — ${errMsg.slice(0, 200)}`,
-          {},
-          `task:${taskId}:failed`,
-        );
+        await supabase
+          .from("tasks")
+          .update({
+            status: "failed",
+            error: errMsg.slice(0, 300),
+            result_json: { execution_lane: "playlist_redo_direct", error: errMsg.slice(0, 200) },
+          })
+          .eq("id", taskId);
+        await sendMessage(chatId, `❌ Failed: \`${taskId}\` — ${errMsg.slice(0, 200)}`, {}, `task:${taskId}:failed`);
       }
       await sendMessage(chatId, `✅ Done: \`${taskId}\``, {}, `task:${taskId}:done`);
       _currentTaskId = null;
@@ -5846,17 +6604,24 @@ serve(async (req) => {
     if (autoPromotedWorkflow) {
       const dCredit = inferCreditWorkflowKey(lowerText);
       const extractedCgName = extractCreditGuardianClientNameForIngest(text);
-      const aliasProbe = extractedCgName ? resolveDriveIngestFilterKey(extractedCgName) : { key: undefined as string | undefined, usedAlias: false };
+      const aliasProbe = extractedCgName
+        ? resolveDriveIngestFilterKey(extractedCgName)
+        : { key: undefined as string | undefined, usedAlias: false };
       console.log("[AUTO_PROMOTE] Routing to Lane 1", {
         taskId,
         workflowKey: autoPromotedWorkflow.key,
         detected_explicit_credit_guardian_command: explicitCgIngestIntent,
-        routing_branch: explicitCgIngestIntent && autoPromotedWorkflow.key === "drive_ingest" ? "deterministic_direct" : "heuristic_auto",
+        routing_branch:
+          explicitCgIngestIntent && autoPromotedWorkflow.key === "drive_ingest"
+            ? "deterministic_direct"
+            : "heuristic_auto",
         confidence_score: dCredit.confidence,
         client_name_extracted: extractedCgName,
         used_alias_match: aliasProbe.usedAlias,
         final_execution_mode:
-          explicitCgIngestIntent && autoPromotedWorkflow.key === "drive_ingest" ? "deterministic_direct" : "heuristic_auto",
+          explicitCgIngestIntent && autoPromotedWorkflow.key === "drive_ingest"
+            ? "deterministic_direct"
+            : "heuristic_auto",
       });
       console.log(
         JSON.stringify({
@@ -5865,37 +6630,47 @@ serve(async (req) => {
           message_text: text.slice(0, 500),
           detected_explicit_credit_guardian_command: explicitCgIngestIntent,
           selected_workflow: autoPromotedWorkflow.key,
-          routing_branch: explicitCgIngestIntent && autoPromotedWorkflow.key === "drive_ingest" ? "deterministic_direct" : "heuristic_auto",
+          routing_branch:
+            explicitCgIngestIntent && autoPromotedWorkflow.key === "drive_ingest"
+              ? "deterministic_direct"
+              : "heuristic_auto",
           confidence_score: dCredit.confidence,
           client_name_extracted: extractedCgName,
           used_alias_match: aliasProbe.usedAlias,
           final_execution_mode:
-            explicitCgIngestIntent && autoPromotedWorkflow.key === "drive_ingest" ? "deterministic_direct" : "heuristic_auto",
+            explicitCgIngestIntent && autoPromotedWorkflow.key === "drive_ingest"
+              ? "deterministic_direct"
+              : "heuristic_auto",
         }),
       );
-      await supabase.from("tasks").update({
-        status: "running",
-        selected_workflow: autoPromotedWorkflow.key,
-        result_json: {
-          execution_lane: "lane1_do",
-          progress_step: "lane1_auto_promoted",
-          auto_promoted: true,
-          credit_routing: {
-            detected_explicit_credit_guardian_command: explicitCgIngestIntent,
-            selected_workflow: autoPromotedWorkflow.key,
-            routing_branch: explicitCgIngestIntent && autoPromotedWorkflow.key === "drive_ingest" ? "deterministic_direct" : "heuristic_auto",
-            confidence_score: dCredit.confidence,
-            client_name_extracted: extractedCgName,
-            used_alias_match: aliasProbe.usedAlias,
-            final_execution_mode:
-              explicitCgIngestIntent && autoPromotedWorkflow.key === "drive_ingest" ? "deterministic_direct" : "heuristic_auto",
-            final_outcome:
-              explicitCgIngestIntent && autoPromotedWorkflow.key === "drive_ingest"
-                ? null
-                : undefined,
+      await supabase
+        .from("tasks")
+        .update({
+          status: "running",
+          selected_workflow: autoPromotedWorkflow.key,
+          result_json: {
+            execution_lane: "lane1_do",
+            progress_step: "lane1_auto_promoted",
+            auto_promoted: true,
+            credit_routing: {
+              detected_explicit_credit_guardian_command: explicitCgIngestIntent,
+              selected_workflow: autoPromotedWorkflow.key,
+              routing_branch:
+                explicitCgIngestIntent && autoPromotedWorkflow.key === "drive_ingest"
+                  ? "deterministic_direct"
+                  : "heuristic_auto",
+              confidence_score: dCredit.confidence,
+              client_name_extracted: extractedCgName,
+              used_alias_match: aliasProbe.usedAlias,
+              final_execution_mode:
+                explicitCgIngestIntent && autoPromotedWorkflow.key === "drive_ingest"
+                  ? "deterministic_direct"
+                  : "heuristic_auto",
+              final_outcome: explicitCgIngestIntent && autoPromotedWorkflow.key === "drive_ingest" ? null : undefined,
+            },
           },
-        },
-      }).eq("id", taskId);
+        })
+        .eq("id", taskId);
       try {
         await Promise.race([
           executeAgenticLoop(chatId, text, {
@@ -5911,52 +6686,77 @@ serve(async (req) => {
       } catch (err) {
         const errMsg = (err as Error).message || "unknown";
         const failResult = buildFailureResultJson({ execution_lane: "lane1_do" }, errMsg);
-        await supabase.from("tasks").update({ status: "failed", error: errMsg.slice(0, 300), result_json: failResult }).eq("id", taskId);
+        await supabase
+          .from("tasks")
+          .update({ status: "failed", error: errMsg.slice(0, 300), result_json: failResult })
+          .eq("id", taskId);
         await sendMessage(chatId, `❌ Failed: \`${taskId}\` — ${errMsg.slice(0, 200)}`, {}, `task:${taskId}:failed`);
       }
       return new Response("ok");
     }
 
-
     // /start still shows the help menu
     if (text === "/start") {
       await setShortcutAttribution(taskId, "start");
-      await sendMessage(chatId, [
-        `ð¯ *${SYSTEM_IDENTITY} â Online (Two-Lane Mode)*`,
-        ``,
-        `ð¬ *Lane 2 (Default):* Just talk to me â I'll answer, explain, draft, plan.`,
-        `â¡ *Lane 1 (Execute):* Say *run* / *execute* + what you want, or use \`/do <workflow>\`.`,
-        ``,
-        `*Examples:*`,
-        `â¢ "What's broken today?" â I'll explain (Lane 2)`,
-        `â¢ \`/do status\` â Executes system status check (Lane 1)`,
-        `â¢ \`/do retry failed jobs\` â Executes retry workflow (Lane 1)`,
-        `â¢ "How are my projects doing?" â I'll discuss (Lane 2)`,
-        ``,
-        `*Commands:*`,
-        `â¢ /status â System status`,
-        `â¢ /metrics â Metrics + recent tasks`,
-        `â¢ /ping â Connectivity test`,
-        `â¢ /workflows â See all registered workflows`,
-        `â¢ /help â Quick help`,
-        `â¢ /do <workflow> â Execute a workflow`,
-        `â¢ /model â Check or switch AI model`,
-        ``,
-        `ð *Observability:*`,
-        `â¢ /status â health snapshot`,
-        `â¢ /metrics â last 20 tasks + durations`,
-        ``,
-        `ð Tools run when you clearly ask to *run* / *execute* / *start* something, use \`/do\`, or use a shortcut command.`,
-      ].join("\n"));
-      await supabase.from("tasks").update({ status: "succeeded", result_json: { execution_lane: "shortcut", progress_step: "shortcut_start", action: "start_help" } }).eq("id", taskId);
+      await sendMessage(
+        chatId,
+        [
+          `ð¯ *${SYSTEM_IDENTITY} â Online (Two-Lane Mode)*`,
+          ``,
+          `ð¬ *Lane 2 (Default):* Just talk to me â I'll answer, explain, draft, plan.`,
+          `â¡ *Lane 1 (Execute):* Say *run* / *execute* + what you want, or use \`/do <workflow>\`.`,
+          ``,
+          `*Examples:*`,
+          `â¢ "What's broken today?" â I'll explain (Lane 2)`,
+          `â¢ \`/do status\` â Executes system status check (Lane 1)`,
+          `â¢ \`/do retry failed jobs\` â Executes retry workflow (Lane 1)`,
+          `â¢ "How are my projects doing?" â I'll discuss (Lane 2)`,
+          ``,
+          `*Commands:*`,
+          `â¢ /status â System status`,
+          `â¢ /metrics â Metrics + recent tasks`,
+          `â¢ /ping â Connectivity test`,
+          `â¢ /workflows â See all registered workflows`,
+          `â¢ /help â Quick help`,
+          `â¢ /do <workflow> â Execute a workflow`,
+          `â¢ /model â Check or switch AI model`,
+          ``,
+          `ð *Observability:*`,
+          `â¢ /status â health snapshot`,
+          `â¢ /metrics â last 20 tasks + durations`,
+          ``,
+          `ð Tools run when you clearly ask to *run* / *execute* / *start* something, use \`/do\`, or use a shortcut command.`,
+        ].join("\n"),
+      );
+      await supabase
+        .from("tasks")
+        .update({
+          status: "succeeded",
+          result_json: { execution_lane: "shortcut", progress_step: "shortcut_start", action: "start_help" },
+        })
+        .eq("id", taskId);
       await sendMessage(chatId, `â Done: \`${taskId}\``);
       return new Response("ok");
     }
 
     if (text.toLowerCase() === "/model") {
       await setShortcutAttribution(taskId, "model");
-      await sendMessage(chatId, `ð¤ *${SYSTEM_IDENTITY}*\n\nActive model: *${getModelLabel(normalizeBotModel(session.active_model))}*\nð Model switching is locked until you explicitly run /model claude, /model chatgpt, /model gemini, or /model grok.`);
-      await supabase.from("tasks").update({ status: "succeeded", result_json: { execution_lane: "shortcut", progress_step: "shortcut_model", action: "model_check", active_model: session.active_model } }).eq("id", taskId);
+      await sendMessage(
+        chatId,
+        `ð¤ *${SYSTEM_IDENTITY}*\n\nActive model: *${getModelLabel(normalizeBotModel(session.active_model))}*\nð Model switching is locked until you explicitly run /model claude, /model chatgpt, /model gemini, or /model grok.`,
+      );
+      await supabase
+        .from("tasks")
+        .update({
+          status: "succeeded",
+          result_json: {
+            execution_lane: "shortcut",
+            progress_step: "shortcut_model",
+            action: "model_check",
+            active_model: session.active_model,
+          },
+        })
+        .eq("id", taskId);
       await sendMessage(chatId, `â Done: \`${taskId}\``);
       return new Response("ok");
     }
@@ -5965,12 +6765,28 @@ serve(async (req) => {
       await setShortcutAttribution(taskId, "model_switch");
       const reqModel = modelRequestMatch[1].toLowerCase();
       await supabase.from("sessions").update({ active_model: reqModel }).eq("id", session.id);
-      await supabase.from("bot_settings").upsert(
-        { setting_key: "ai_model", setting_value: reqModel, updated_at: new Date().toISOString() },
-        { onConflict: "setting_key" }
+      await supabase
+        .from("bot_settings")
+        .upsert(
+          { setting_key: "ai_model", setting_value: reqModel, updated_at: new Date().toISOString() },
+          { onConflict: "setting_key" },
+        );
+      await sendMessage(
+        chatId,
+        `â *${SYSTEM_IDENTITY}* switched to *${getModelLabel(reqModel as any)}*.\n\nI'll stay on this model until you switch again.`,
       );
-      await sendMessage(chatId, `â *${SYSTEM_IDENTITY}* switched to *${getModelLabel(reqModel as any)}*.\n\nI'll stay on this model until you switch again.`);
-      await supabase.from("tasks").update({ status: "succeeded", result_json: { execution_lane: "shortcut", progress_step: "shortcut_model_switch", action: "model_switch", new_model: reqModel } }).eq("id", taskId);
+      await supabase
+        .from("tasks")
+        .update({
+          status: "succeeded",
+          result_json: {
+            execution_lane: "shortcut",
+            progress_step: "shortcut_model_switch",
+            action: "model_switch",
+            new_model: reqModel,
+          },
+        })
+        .eq("id", taskId);
       await sendMessage(chatId, `â Done: \`${taskId}\``);
       return new Response("ok");
     }
@@ -5979,7 +6795,13 @@ serve(async (req) => {
     if (text.toLowerCase() === "/ping") {
       await setShortcutAttribution(taskId, "ping");
       await sendMessage(chatId, `ð pong`, {}, `task:${taskId}:pong`);
-      await supabase.from("tasks").update({ status: "succeeded", result_json: { execution_lane: "shortcut", progress_step: "shortcut_ping", action: "ping" } }).eq("id", taskId);
+      await supabase
+        .from("tasks")
+        .update({
+          status: "succeeded",
+          result_json: { execution_lane: "shortcut", progress_step: "shortcut_ping", action: "ping" },
+        })
+        .eq("id", taskId);
       await sendMessage(chatId, `â Done: \`${taskId}\``, {}, `task:${taskId}:done`);
       _currentTaskId = null;
       return new Response("ok");
@@ -5990,7 +6812,19 @@ serve(async (req) => {
       await setShortcutAttribution(taskId, "resend_failed");
       const { sent, failed } = await flushTelegramOutbox(chatId, 10);
       await sendMessage(chatId, `ð¤ *Outbox flush:* ${sent} sent, ${failed} failed`, {}, `task:${taskId}:resend`);
-      await supabase.from("tasks").update({ status: "succeeded", result_json: { execution_lane: "shortcut", progress_step: "shortcut_resend_failed", action: "resend_failed", sent, failed } }).eq("id", taskId);
+      await supabase
+        .from("tasks")
+        .update({
+          status: "succeeded",
+          result_json: {
+            execution_lane: "shortcut",
+            progress_step: "shortcut_resend_failed",
+            action: "resend_failed",
+            sent,
+            failed,
+          },
+        })
+        .eq("id", taskId);
       await sendMessage(chatId, `â Done: \`${taskId}\``, {}, `task:${taskId}:done`);
       _currentTaskId = null;
       return new Response("ok");
@@ -6001,7 +6835,7 @@ serve(async (req) => {
       console.log(`[SHORTCUT] Direct status bypass taskId=${taskId}`);
       await setShortcutAttribution(taskId, "status");
       try {
-        const statusTool = AGENT_TOOLS.find(t => t.name === "get_system_status");
+        const statusTool = AGENT_TOOLS.find((t) => t.name === "get_system_status");
         const statusResult = statusTool ? await statusTool.execute({}) : "Tool get_system_status not found";
         const health = systemHealthCheck();
         const model = normalizeBotModel(session.active_model);
@@ -6049,19 +6883,37 @@ serve(async (req) => {
           projectSection = `\n\nâ ï¸ Could not fetch project stats`;
         }
 
-        const reply = formatAssistantMessage(model, `ð *System Status*\n\n${formattedStatus}${projectSection}\n\nð¥ *Health:* uptime=${Math.round(health.uptime_ms / 1000)}s tools=${health.tool_count} workflows=${health.implemented_workflow_count}`);
+        const reply = formatAssistantMessage(
+          model,
+          `ð *System Status*\n\n${formattedStatus}${projectSection}\n\nð¥ *Health:* uptime=${Math.round(health.uptime_ms / 1000)}s tools=${health.tool_count} workflows=${health.implemented_workflow_count}`,
+        );
         await sendMessage(chatId, reply);
-        await supabase.from("tasks").update({
-          status: "succeeded",
-          selected_tools: ["get_system_status"],
-          result_json: { execution_lane: "shortcut", progress_step: "shortcut_status", result: statusResult, health, model_used: session.active_model },
-        }).eq("id", taskId);
+        await supabase
+          .from("tasks")
+          .update({
+            status: "succeeded",
+            selected_tools: ["get_system_status"],
+            result_json: {
+              execution_lane: "shortcut",
+              progress_step: "shortcut_status",
+              result: statusResult,
+              health,
+              model_used: session.active_model,
+            },
+          })
+          .eq("id", taskId);
         await sendMessage(chatId, `â Done: \`${taskId}\``);
       } catch (statusErr) {
         const errMsg = statusErr instanceof Error ? statusErr.message : String(statusErr);
         console.error("Status shortcut error:", statusErr);
-        const failResult = buildFailureResultJson({ execution_lane: "shortcut", progress_step: "shortcut_status_failed", model_used: session.active_model }, errMsg);
-        await supabase.from("tasks").update({ status: "failed", error: errMsg.slice(0, 300), result_json: failResult }).eq("id", taskId);
+        const failResult = buildFailureResultJson(
+          { execution_lane: "shortcut", progress_step: "shortcut_status_failed", model_used: session.active_model },
+          errMsg,
+        );
+        await supabase
+          .from("tasks")
+          .update({ status: "failed", error: errMsg.slice(0, 300), result_json: failResult })
+          .eq("id", taskId);
         await sendMessage(chatId, `â Failed: \`${taskId}\` â ${errMsg.slice(0, 200)}`);
       }
       return new Response("ok");
@@ -6071,11 +6923,18 @@ serve(async (req) => {
     if (text.toLowerCase() === "/workflows") {
       await setShortcutAttribution(taskId, "workflows");
       const workflows = await fetchWorkflowRegistry();
-      const listText = workflows.length > 0
-        ? _formatWorkflowList(workflows)
-        : "â ï¸ Workflow registry unavailable right now. Try /status or try again.";
+      const listText =
+        workflows.length > 0
+          ? _formatWorkflowList(workflows)
+          : "â ï¸ Workflow registry unavailable right now. Try /status or try again.";
       await sendMessage(chatId, listText, {}, `task:${taskId}:workflows`);
-      await supabase.from("tasks").update({ status: "succeeded", result_json: { execution_lane: "shortcut", progress_step: "shortcut_workflows", action: "list_workflows" } }).eq("id", taskId);
+      await supabase
+        .from("tasks")
+        .update({
+          status: "succeeded",
+          result_json: { execution_lane: "shortcut", progress_step: "shortcut_workflows", action: "list_workflows" },
+        })
+        .eq("id", taskId);
       await sendMessage(chatId, `â Done: \`${taskId}\``, {}, `task:${taskId}:done`);
       _currentTaskId = null;
       return new Response("ok");
@@ -6103,7 +6962,13 @@ serve(async (req) => {
         `ð¡ Tip: run \`/metrics\` to inspect recent task runs and durations.`,
       ].join("\n");
       await sendMessage(chatId, helpText, {}, `task:${taskId}:help`);
-      await supabase.from("tasks").update({ status: "succeeded", result_json: { execution_lane: "shortcut", progress_step: "shortcut_help", action: "help" } }).eq("id", taskId);
+      await supabase
+        .from("tasks")
+        .update({
+          status: "succeeded",
+          result_json: { execution_lane: "shortcut", progress_step: "shortcut_help", action: "help" },
+        })
+        .eq("id", taskId);
       await sendMessage(chatId, `â Done: \`${taskId}\``, {}, `task:${taskId}:done`);
       _currentTaskId = null;
       return new Response("ok");
@@ -6114,8 +6979,17 @@ serve(async (req) => {
       try {
         const argsStr = text.replace(/^\/tax\s+status\s*/i, "").trim();
         if (!argsStr) {
-          await sendMessage(chatId, "Usage: `/tax status <client name> [year]`\nExample: `/tax status Sam Higgins 2022`");
-          await supabase.from("tasks").update({ status: "succeeded", result_json: { execution_lane: "shortcut", progress_step: "shortcut_tax_status", action: "show_usage" } }).eq("id", taskId);
+          await sendMessage(
+            chatId,
+            "Usage: `/tax status <client name> [year]`\nExample: `/tax status Sam Higgins 2022`",
+          );
+          await supabase
+            .from("tasks")
+            .update({
+              status: "succeeded",
+              result_json: { execution_lane: "shortcut", progress_step: "shortcut_tax_status", action: "show_usage" },
+            })
+            .eq("id", taskId);
           await sendMessage(chatId, `✅ Done: \`${taskId}\``);
           _currentTaskId = null;
           return new Response("ok");
@@ -6133,14 +7007,22 @@ serve(async (req) => {
         }
         if (!nameArg) {
           await sendMessage(chatId, "Please provide a client name. Example: `/tax status Sam Higgins 2022`");
-          await supabase.from("tasks").update({ status: "succeeded", result_json: { execution_lane: "shortcut", progress_step: "shortcut_tax_status", action: "show_usage" } }).eq("id", taskId);
+          await supabase
+            .from("tasks")
+            .update({
+              status: "succeeded",
+              result_json: { execution_lane: "shortcut", progress_step: "shortcut_tax_status", action: "show_usage" },
+            })
+            .eq("id", taskId);
           await sendMessage(chatId, `✅ Done: \`${taskId}\``);
           _currentTaskId = null;
           return new Response("ok");
         }
         let trQuery = supabase
           .from("tax_returns")
-          .select("id, client_id, client_name, tax_year, status, agi, total_income, total_tax, amount_owed_or_refund, filing_status, filing_method, filing_readiness_score, created_at")
+          .select(
+            "id, client_id, client_name, tax_year, status, agi, total_income, total_tax, amount_owed_or_refund, filing_status, filing_method, filing_readiness_score, created_at",
+          )
           .ilike("client_name", `%${nameArg}%`)
           .order("tax_year", { ascending: false });
         if (yearFilter != null) {
@@ -6150,11 +7032,7 @@ serve(async (req) => {
         if (trErr) throw new Error(`DB error: ${trErr.message}`);
         const yearSuffix = yearFilter != null ? ` (${yearFilter})` : "";
         if (!returns || returns.length === 0) {
-          await sendMessage(
-            chatId,
-            `No tax returns found for "${nameArg}"${yearSuffix}.`,
-            { parse_mode: undefined },
-          );
+          await sendMessage(chatId, `No tax returns found for "${nameArg}"${yearSuffix}.`, { parse_mode: undefined });
         } else {
           // Send as plain text to avoid Markdown entity parse failures on client names/data.
           const plainLines: string[] = [`Tax Returns for "${nameArg}"${yearSuffix}:`, ""];
@@ -6173,12 +7051,28 @@ serve(async (req) => {
           }
           await sendMessage(chatId, plainLines.join("\n"), { parse_mode: undefined });
         }
-        await supabase.from("tasks").update({ status: "succeeded", result_json: { execution_lane: "shortcut", progress_step: "shortcut_tax_status", action: "tax_status", client_search: nameArg, year: yearFilter, results_count: returns?.length ?? 0 } }).eq("id", taskId);
+        await supabase
+          .from("tasks")
+          .update({
+            status: "succeeded",
+            result_json: {
+              execution_lane: "shortcut",
+              progress_step: "shortcut_tax_status",
+              action: "tax_status",
+              client_search: nameArg,
+              year: yearFilter,
+              results_count: returns?.length ?? 0,
+            },
+          })
+          .eq("id", taskId);
         await sendMessage(chatId, `✅ Done: \`${taskId}\``);
       } catch (taxStatusErr) {
         const errMsg = taxStatusErr instanceof Error ? taxStatusErr.message : String(taxStatusErr);
         console.error("Tax status error:", taxStatusErr);
-        await supabase.from("tasks").update({ status: "failed", error: errMsg.slice(0, 300) }).eq("id", taskId);
+        await supabase
+          .from("tasks")
+          .update({ status: "failed", error: errMsg.slice(0, 300) })
+          .eq("id", taskId);
         await sendMessage(chatId, `❌ Failed: \`${taskId}\` — ${errMsg.slice(0, 200)}`);
       }
       _currentTaskId = null;
@@ -6192,7 +7086,13 @@ serve(async (req) => {
         const argsStr = text.replace(/^\/tax\s+forms\s*/i, "").trim();
         if (!argsStr) {
           await sendMessage(chatId, "Usage: `/tax forms <client name> [year]`\nExample: `/tax forms Sam Higgins 2024`");
-          await supabase.from("tasks").update({ status: "succeeded", result_json: { execution_lane: "shortcut", progress_step: "shortcut_tax_forms", action: "show_usage" } }).eq("id", taskId);
+          await supabase
+            .from("tasks")
+            .update({
+              status: "succeeded",
+              result_json: { execution_lane: "shortcut", progress_step: "shortcut_tax_forms", action: "show_usage" },
+            })
+            .eq("id", taskId);
           await sendMessage(chatId, `✅ Done: \`${taskId}\``);
           _currentTaskId = null;
           return new Response("ok");
@@ -6210,7 +7110,13 @@ serve(async (req) => {
         }
         if (!clientSearch) {
           await sendMessage(chatId, "Please provide a client name. Example: `/tax forms Sam 2024`");
-          await supabase.from("tasks").update({ status: "succeeded", result_json: { execution_lane: "shortcut", progress_step: "shortcut_tax_forms", action: "show_usage" } }).eq("id", taskId);
+          await supabase
+            .from("tasks")
+            .update({
+              status: "succeeded",
+              result_json: { execution_lane: "shortcut", progress_step: "shortcut_tax_forms", action: "show_usage" },
+            })
+            .eq("id", taskId);
           await sendMessage(chatId, `✅ Done: \`${taskId}\``);
           _currentTaskId = null;
           return new Response("ok");
@@ -6224,7 +7130,10 @@ serve(async (req) => {
         const { data: returns, error: trErr } = await query;
         if (trErr) throw new Error(`DB error: ${trErr.message}`);
         if (!returns || returns.length === 0) {
-          await sendMessage(chatId, `No tax returns found for "${clientSearch}"${yearFilter ? ` (${yearFilter})` : ""}.`);
+          await sendMessage(
+            chatId,
+            `No tax returns found for "${clientSearch}"${yearFilter ? ` (${yearFilter})` : ""}.`,
+          );
         } else {
           const lines: string[] = [`📄 *Tax Forms for "${clientSearch}"${yearFilter ? ` (${yearFilter})` : ""}*\n`];
           for (const r of returns) {
@@ -6233,30 +7142,44 @@ serve(async (req) => {
             for (const f of forms) {
               let link = f.pdf_url || "";
               if (link && !link.startsWith("http")) {
-                const { data: signedData } = await supabase.storage
-                  .from("tax-documents")
-                  .createSignedUrl(link, 3600);
+                const { data: signedData } = await supabase.storage.from("tax-documents").createSignedUrl(link, 3600);
                 link = signedData?.signedUrl || link;
               }
               const statusEmoji = f.status === "filled" ? "✅" : f.status === "error" ? "❌" : "⏳";
-              lines.push(`  ${statusEmoji} ${f.form_type} (${f.form_year}) — ${f.status}${link ? `\n  [View PDF](${link})` : ""}`);
+              lines.push(
+                `  ${statusEmoji} ${f.form_type} (${f.form_year}) — ${f.status}${link ? `\n  [View PDF](${link})` : ""}`,
+              );
             }
             lines.push("");
           }
           await sendMessage(chatId, lines.join("\n"));
         }
-        await supabase.from("tasks").update({ status: "succeeded", result_json: { execution_lane: "shortcut", progress_step: "shortcut_tax_forms", action: "tax_forms", client_search: clientSearch, year: yearFilter } }).eq("id", taskId);
+        await supabase
+          .from("tasks")
+          .update({
+            status: "succeeded",
+            result_json: {
+              execution_lane: "shortcut",
+              progress_step: "shortcut_tax_forms",
+              action: "tax_forms",
+              client_search: clientSearch,
+              year: yearFilter,
+            },
+          })
+          .eq("id", taskId);
         await sendMessage(chatId, `✅ Done: \`${taskId}\``);
       } catch (taxFormsErr) {
         const errMsg = taxFormsErr instanceof Error ? taxFormsErr.message : String(taxFormsErr);
         console.error("Tax forms error:", taxFormsErr);
-        await supabase.from("tasks").update({ status: "failed", error: errMsg.slice(0, 300) }).eq("id", taskId);
+        await supabase
+          .from("tasks")
+          .update({ status: "failed", error: errMsg.slice(0, 300) })
+          .eq("id", taskId);
         await sendMessage(chatId, `❌ Failed: \`${taskId}\` — ${errMsg.slice(0, 200)}`);
       }
       _currentTaskId = null;
       return new Response("ok");
     }
-
 
     // ââ /metrics â execution metrics ââ
     if (text.toLowerCase().startsWith("/metrics")) {
@@ -6274,7 +7197,7 @@ serve(async (req) => {
           .order("created_at", { ascending: false })
           .limit(metricsLimit);
 
-        const safeTasks = (tasksErr || !rawTasks) ? [] : rawTasks;
+        const safeTasks = tasksErr || !rawTasks ? [] : rawTasks;
 
         const health = systemHealthCheck();
 
@@ -6286,11 +7209,16 @@ serve(async (req) => {
 
         function statusIcon(status: string): string {
           switch (status) {
-            case "succeeded": return "â";
-            case "running": return "â³";
-            case "failed": return "â";
-            case "queued": return "ð";
-            default: return "â¢";
+            case "succeeded":
+              return "â";
+            case "running":
+              return "â³";
+            case "failed":
+              return "â";
+            case "queued":
+              return "ð";
+            default:
+              return "â¢";
           }
         }
 
@@ -6321,17 +7249,16 @@ serve(async (req) => {
           return `${icon} \`${shortId}\` ${t.status} | ${wf} | lock=${lockHeld}${dur} | ${ts}${errCode}`;
         });
 
-        const limitLine = requestedLimit !== metricsLimit
-          ? `*Last ${metricsLimit} Tasks* (requested: ${requestedLimit})`
-          : `*Last ${metricsLimit} Tasks:*`;
+        const limitLine =
+          requestedLimit !== metricsLimit
+            ? `*Last ${metricsLimit} Tasks* (requested: ${requestedLimit})`
+            : `*Last ${metricsLimit} Tasks:*`;
 
         const newestTs = safeTasks[0]?.created_at ? fmtTs(safeTasks[0].created_at) : "";
         const oldestTs = safeTasks[safeTasks.length - 1]?.created_at
           ? fmtTs(safeTasks[safeTasks.length - 1].created_at)
           : "";
-        const rangeLine = newestTs && oldestTs
-          ? `ð°ï¸ *Range:* ${oldestTs} â ${newestTs}`
-          : `ð°ï¸ *Range:* â`;
+        const rangeLine = newestTs && oldestTs ? `ð°ï¸ *Range:* ${oldestTs} â ${newestTs}` : `ð°ï¸ *Range:* â`;
 
         const lines = [
           `ð *${SYSTEM_IDENTITY} â Metrics*`,
@@ -6347,15 +7274,32 @@ serve(async (req) => {
         ];
 
         await sendMessage(chatId, lines.join("\n"), {}, `task:${taskId}:metrics`);
-        await supabase.from("tasks").update({
-          status: "succeeded",
-          result_json: { progress_step: "shortcut_metrics", health, task_count: safeTasks.length, requested_limit: requestedLimit, effective_limit: metricsLimit, status_counts: statusCounts, range: { oldest: oldestTs || null, newest: newestTs || null } },
-        }).eq("id", taskId);
+        await supabase
+          .from("tasks")
+          .update({
+            status: "succeeded",
+            result_json: {
+              progress_step: "shortcut_metrics",
+              health,
+              task_count: safeTasks.length,
+              requested_limit: requestedLimit,
+              effective_limit: metricsLimit,
+              status_counts: statusCounts,
+              range: { oldest: oldestTs || null, newest: newestTs || null },
+            },
+          })
+          .eq("id", taskId);
         await sendMessage(chatId, `â Done: \`${taskId}\``, {}, `task:${taskId}:done`);
       } catch (metricsErr) {
         const errMsg = metricsErr instanceof Error ? metricsErr.message : String(metricsErr);
-        const failResult = buildFailureResultJson({ execution_lane: "shortcut", progress_step: "shortcut_metrics_failed" }, errMsg);
-        await supabase.from("tasks").update({ status: "failed", error: errMsg.slice(0, 300), result_json: failResult }).eq("id", taskId);
+        const failResult = buildFailureResultJson(
+          { execution_lane: "shortcut", progress_step: "shortcut_metrics_failed" },
+          errMsg,
+        );
+        await supabase
+          .from("tasks")
+          .update({ status: "failed", error: errMsg.slice(0, 300), result_json: failResult })
+          .eq("id", taskId);
         await sendMessage(chatId, `â Failed: \`${taskId}\` â ${errMsg.slice(0, 200)}`);
       }
       _currentTaskId = null;
@@ -6372,7 +7316,7 @@ serve(async (req) => {
           .order("created_at", { ascending: false })
           .limit(100);
 
-        const safe = (triageErr || !triageTasks) ? [] : triageTasks;
+        const safe = triageErr || !triageTasks ? [] : triageTasks;
         const failedTasks = safe.filter((t: any) => t.status === "failed");
 
         // Group by error_code
@@ -6402,16 +7346,12 @@ serve(async (req) => {
 
         const newestTs = safe[0]?.created_at ? fmtTs(safe[0].created_at) : "";
         const oldestTs = safe[safe.length - 1]?.created_at ? fmtTs(safe[safe.length - 1].created_at) : "";
-        const rangeLine = newestTs && oldestTs
-          ? `ð°ï¸ *Range:* ${oldestTs} â ${newestTs}`
-          : `ð°ï¸ *Range:* â`;
+        const rangeLine = newestTs && oldestTs ? `ð°ï¸ *Range:* ${oldestTs} â ${newestTs}` : `ð°ï¸ *Range:* â`;
 
         const codeLines = Object.entries(countsByCode)
           .sort(([, a], [, b]) => b - a)
           .map(([code, count]) => {
-            const topWfs = (topWorkflowsByCode[code] || [])
-              .map(w => `\`${w.workflow}\` (${w.count})`)
-              .join(", ");
+            const topWfs = (topWorkflowsByCode[code] || []).map((w) => `\`${w.workflow}\` (${w.count})`).join(", ");
             return `*${code}*: ${count} failures\n  Top: ${topWfs || "â"}`;
           });
 
@@ -6426,15 +7366,32 @@ serve(async (req) => {
         ];
 
         await sendMessage(chatId, lines.join("\n"), {}, `task:${taskId}:triage`);
-        await supabase.from("tasks").update({
-          status: "succeeded",
-          result_json: { execution_lane: "shortcut", progress_step: "shortcut_triage", summary: { countsByCode, topWorkflowsByCode, range: { oldest: oldestTs || null, newest: newestTs || null } } },
-        }).eq("id", taskId);
+        await supabase
+          .from("tasks")
+          .update({
+            status: "succeeded",
+            result_json: {
+              execution_lane: "shortcut",
+              progress_step: "shortcut_triage",
+              summary: {
+                countsByCode,
+                topWorkflowsByCode,
+                range: { oldest: oldestTs || null, newest: newestTs || null },
+              },
+            },
+          })
+          .eq("id", taskId);
         await sendMessage(chatId, `â Done: \`${taskId}\``, {}, `task:${taskId}:done`);
       } catch (triageErr) {
         const errMsg = triageErr instanceof Error ? triageErr.message : String(triageErr);
-        const failResult = buildFailureResultJson({ execution_lane: "shortcut", progress_step: "shortcut_triage_failed" }, errMsg);
-        await supabase.from("tasks").update({ status: "failed", error: errMsg.slice(0, 300), result_json: failResult }).eq("id", taskId);
+        const failResult = buildFailureResultJson(
+          { execution_lane: "shortcut", progress_step: "shortcut_triage_failed" },
+          errMsg,
+        );
+        await supabase
+          .from("tasks")
+          .update({ status: "failed", error: errMsg.slice(0, 300), result_json: failResult })
+          .eq("id", taskId);
         await sendMessage(chatId, `â Failed: \`${taskId}\` â ${errMsg.slice(0, 200)}`);
       }
       _currentTaskId = null;
@@ -6448,20 +7405,46 @@ serve(async (req) => {
     if (text.toLowerCase().startsWith("/do")) {
       const doArg = text.slice(3).trim(); // everything after "/do"
       if (!doArg) {
-        await sendMessage(chatId, `â ï¸ Usage: \`/do <workflow>\`\nRun /workflows to see available commands.`, {}, `task:${taskId}:do-usage`);
-        await supabase.from("tasks").update({ status: "succeeded", result_json: { action: "do_usage" } }).eq("id", taskId);
+        await sendMessage(
+          chatId,
+          `â ï¸ Usage: \`/do <workflow>\`\nRun /workflows to see available commands.`,
+          {},
+          `task:${taskId}:do-usage`,
+        );
+        await supabase
+          .from("tasks")
+          .update({ status: "succeeded", result_json: { action: "do_usage" } })
+          .eq("id", taskId);
         await sendMessage(chatId, `â Done: \`${taskId}\``, {}, `task:${taskId}:done`);
         _currentTaskId = null;
         return new Response("ok");
       }
 
-      await supabase.from("tasks").update({ status: "running", selected_workflow: null, result_json: { execution_lane: "lane1_do", progress_step: "lane1_routing" } }).eq("id", taskId);
+      await supabase
+        .from("tasks")
+        .update({
+          status: "running",
+          selected_workflow: null,
+          result_json: { execution_lane: "lane1_do", progress_step: "lane1_routing" },
+        })
+        .eq("id", taskId);
       const workflows = await fetchWorkflowRegistry();
 
       if (workflows.length === 0) {
-        await sendMessage(chatId, `â ï¸ Workflow registry unavailable right now. Try /status or try again.`, {}, `task:${taskId}:registry-down`);
-        const failResult = buildFailureResultJson({ execution_lane: "lane1_do", progress_step: "lane1_registry_unavailable" }, "registry_unavailable");
-        await supabase.from("tasks").update({ status: "failed", error: "registry_unavailable", result_json: failResult }).eq("id", taskId);
+        await sendMessage(
+          chatId,
+          `â ï¸ Workflow registry unavailable right now. Try /status or try again.`,
+          {},
+          `task:${taskId}:registry-down`,
+        );
+        const failResult = buildFailureResultJson(
+          { execution_lane: "lane1_do", progress_step: "lane1_registry_unavailable" },
+          "registry_unavailable",
+        );
+        await supabase
+          .from("tasks")
+          .update({ status: "failed", error: "registry_unavailable", result_json: failResult })
+          .eq("id", taskId);
         _currentTaskId = null;
         return new Response("ok");
       }
@@ -6470,17 +7453,35 @@ serve(async (req) => {
 
       if (matches.length === 0) {
         const noMatch = _formatNoMatch(workflows);
-        await sendMessage(chatId, `🚫 No executable workflow found for: \`${doArg}\`\n\n${noMatch}`, {}, `task:${taskId}:no-match`);
-        await supabase.from("tasks").update({ status: "succeeded", result_json: { action: "do_no_match", input: doArg } }).eq("id", taskId);
+        await sendMessage(
+          chatId,
+          `🚫 No executable workflow found for: \`${doArg}\`\n\n${noMatch}`,
+          {},
+          `task:${taskId}:no-match`,
+        );
+        await supabase
+          .from("tasks")
+          .update({ status: "succeeded", result_json: { action: "do_no_match", input: doArg } })
+          .eq("id", taskId);
         await sendMessage(chatId, `✅ Done: \`${taskId}\``, {}, `task:${taskId}:done`);
         _currentTaskId = null;
         return new Response("ok");
       }
 
       if (matches.length > 1) {
-        const ambiguous = matches.map((m, i) => `${i + 1}. *${m.name}* (\`${m.key}\`) â try: \`/do ${m.trigger_phrases[0] || m.key}\``).join("\n");
-        await sendMessage(chatId, `ð Multiple workflows match. Be more specific:\n\n${ambiguous}`, {}, `task:${taskId}:ambiguous`);
-        await supabase.from("tasks").update({ status: "succeeded", result_json: { action: "do_ambiguous", matches: matches.map(m => m.key) } }).eq("id", taskId);
+        const ambiguous = matches
+          .map((m, i) => `${i + 1}. *${m.name}* (\`${m.key}\`) â try: \`/do ${m.trigger_phrases[0] || m.key}\``)
+          .join("\n");
+        await sendMessage(
+          chatId,
+          `ð Multiple workflows match. Be more specific:\n\n${ambiguous}`,
+          {},
+          `task:${taskId}:ambiguous`,
+        );
+        await supabase
+          .from("tasks")
+          .update({ status: "succeeded", result_json: { action: "do_ambiguous", matches: matches.map((m) => m.key) } })
+          .eq("id", taskId);
         await sendMessage(chatId, `â Done: \`${taskId}\``, {}, `task:${taskId}:done`);
         _currentTaskId = null;
         return new Response("ok");
@@ -6493,10 +7494,16 @@ serve(async (req) => {
           ``,
           `*Workflow:* \`${chosen!.key}\``,
           `*Tools:* ${(chosen!.tools || []).join(", ") || "â"}`,
-          `*Try:* ${(chosen!.trigger_phrases || []).slice(0, 2).map(t => `\`/do ${t}\``).join(", ")}`,
+          `*Try:* ${(chosen!.trigger_phrases || [])
+            .slice(0, 2)
+            .map((t) => `\`/do ${t}\``)
+            .join(", ")}`,
         ].join("\n");
         await sendMessage(chatId, notImpl, {}, `task:${taskId}:not-impl`);
-        await supabase.from("tasks").update({ status: "succeeded", result_json: { action: "not_implemented", workflow: chosen!.key } }).eq("id", taskId);
+        await supabase
+          .from("tasks")
+          .update({ status: "succeeded", result_json: { action: "not_implemented", workflow: chosen!.key } })
+          .eq("id", taskId);
         await sendMessage(chatId, `â Done: \`${taskId}\``, {}, `task:${taskId}:done`);
         _currentTaskId = null;
         return new Response("ok");
@@ -6504,15 +7511,22 @@ serve(async (req) => {
 
       // Implemented â execute via agentic loop with tools
       // Set workflow attribution BEFORE the loop (so it's always stored even if loop fails)
-      await supabase.from("tasks").update({
-        selected_workflow: chosen!.key,
-        result_json: { execution_lane: "lane1_do", progress_step: "lane1_selected_workflow", selected_workflow: chosen!.key },
-      }).eq("id", taskId);
+      await supabase
+        .from("tasks")
+        .update({
+          selected_workflow: chosen!.key,
+          result_json: {
+            execution_lane: "lane1_do",
+            progress_step: "lane1_selected_workflow",
+            selected_workflow: chosen!.key,
+          },
+        })
+        .eq("id", taskId);
 
       console.log(`[LANE1] Executing workflow '${chosen!.key}' via agentic loop taskId=${taskId}`);
       const LOOP_TIMEOUT_MS = 50_000;
       const timeoutPromise = new Promise<never>((_, reject) =>
-        setTimeout(() => reject(new Error("TIMEOUT")), LOOP_TIMEOUT_MS)
+        setTimeout(() => reject(new Error("TIMEOUT")), LOOP_TIMEOUT_MS),
       );
       const explicitCgForDo = isExplicitCreditGuardianIngestIntent(doArg.toLowerCase());
       try {
@@ -6530,11 +7544,22 @@ serve(async (req) => {
       } catch (loopErr) {
         const errMsg = loopErr instanceof Error ? loopErr.message : String(loopErr);
         console.error(`[LANE1] Execution error taskId=${taskId}: ${errMsg}`);
-        const failResult = buildFailureResultJson({ execution_lane: "lane1_do", progress_step: "lane1_failed", model_used: session.active_model, selected_workflow: chosen!.key }, errMsg);
-        await supabase.from("tasks").update({ status: "failed", error: errMsg.slice(0, 300), result_json: failResult }).eq("id", taskId);
+        const failResult = buildFailureResultJson(
+          {
+            execution_lane: "lane1_do",
+            progress_step: "lane1_failed",
+            model_used: session.active_model,
+            selected_workflow: chosen!.key,
+          },
+          errMsg,
+        );
+        await supabase
+          .from("tasks")
+          .update({ status: "failed", error: errMsg.slice(0, 300), result_json: failResult })
+          .eq("id", taskId);
         await sendMessage(chatId, `â Failed: \`${taskId}\` â ${errMsg.slice(0, 200)}`, {}, `task:${taskId}:failed`);
       }
-    await flushTelegramOutbox(chatId, 10);
+      await flushTelegramOutbox(chatId, 10);
       _currentTaskId = null;
       return new Response("ok");
     }
@@ -6544,21 +7569,34 @@ serve(async (req) => {
     // Open-ended requests â bot reasons, plans, awaits approval, acts
     // ââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââ
     const AUTONOMOUS_TRIGGERS = [
-      "figure out", "figure this out", "handle ",
-      "take care of", "what should i do",
-      "check everything", "review everything",
-      "what's going on with", "deal with", "sort out",
-      "agent mode", "autonomous", "free agent",
-      "look into", "investigate", "assess", "audit",
-      "think about this", "what do you recommend",
-      "what's the best way", "how should i handle",
+      "figure out",
+      "figure this out",
+      "handle ",
+      "take care of",
+      "what should i do",
+      "check everything",
+      "review everything",
+      "what's going on with",
+      "deal with",
+      "sort out",
+      "agent mode",
+      "autonomous",
+      "free agent",
+      "look into",
+      "investigate",
+      "assess",
+      "audit",
+      "think about this",
+      "what do you recommend",
+      "what's the best way",
+      "how should i handle",
     ];
     const isAutonomousRequest =
       !explicitCgIngestIntent &&
       !hasExecutionIntent &&
       !text.toLowerCase().startsWith("/do") &&
       !text.toLowerCase().startsWith("/") &&
-      AUTONOMOUS_TRIGGERS.some(t => lowerText.includes(t));
+      AUTONOMOUS_TRIGGERS.some((t) => lowerText.includes(t));
 
     if (isAutonomousRequest) {
       const autonomousTaskId = taskId;
@@ -6584,19 +7622,20 @@ serve(async (req) => {
             allowTools: true,
             workflowKey: "free_agent",
           }),
-          new Promise<never>((_, reject) =>
-            setTimeout(() => reject(new Error("TIMEOUT")), 110000)
-          ),
+          new Promise<never>((_, reject) => setTimeout(() => reject(new Error("TIMEOUT")), 110000)),
         ]);
         await supabase
           .from("tasks")
-          .update({ status: "succeeded", result_json: { execution_lane: "lane3_autonomous", progress_step: "complete" } })
+          .update({
+            status: "succeeded",
+            result_json: { execution_lane: "lane3_autonomous", progress_step: "complete" },
+          })
           .eq("id", autonomousTaskId);
       } catch (autonomousErr) {
         const errMsg = autonomousErr instanceof Error ? autonomousErr.message : String(autonomousErr);
         const failResult = buildFailureResultJson(
           { execution_lane: "lane3_autonomous", progress_step: "autonomous_failed" },
-          errMsg
+          errMsg,
         );
         await supabase
           .from("tasks")
@@ -6617,7 +7656,9 @@ serve(async (req) => {
       const creditDecisionRescue = inferCreditWorkflowKey(lowerText);
       const noCreditMatch = creditDecisionRescue.reasons.includes("no_credit_match");
       const executionCue =
-        /\b(analyze|dispute|letters?|generate|create|add|sync|ingest|compass|guardian|pull|review|check|equifax|experian|transunion|lexis|innovis|corelogic|sagestream)\b/i.test(lowerText);
+        /\b(analyze|dispute|letters?|generate|create|add|sync|ingest|compass|guardian|pull|review|check|equifax|experian|transunion|lexis|innovis|corelogic|sagestream)\b/i.test(
+          lowerText,
+        );
       if (
         !taxIntentRescue &&
         !isCreditInformationalOnly(lowerText) &&
@@ -6627,25 +7668,30 @@ serve(async (req) => {
       ) {
         const wfRescue = syntheticWorkflowForCreditDecision(creditDecisionRescue);
         if (wfRescue) {
-          console.log(JSON.stringify({
-            ts: Date.now(),
-            event: "credit_lane1_rescue",
-            taskId,
-            workflowKey: wfRescue.key,
-            confidence_score: creditDecisionRescue.confidence,
-            correlation_id: correlationId,
-          }));
-          await supabase.from("tasks").update({
-            status: "running",
-            selected_workflow: wfRescue.key,
-            result_json: {
-              execution_lane: "lane1_do",
-              progress_step: "credit_lane1_rescue",
-              credit_rescue: true,
+          console.log(
+            JSON.stringify({
+              ts: Date.now(),
+              event: "credit_lane1_rescue",
+              taskId,
+              workflowKey: wfRescue.key,
               confidence_score: creditDecisionRescue.confidence,
               correlation_id: correlationId,
-            },
-          }).eq("id", taskId);
+            }),
+          );
+          await supabase
+            .from("tasks")
+            .update({
+              status: "running",
+              selected_workflow: wfRescue.key,
+              result_json: {
+                execution_lane: "lane1_do",
+                progress_step: "credit_lane1_rescue",
+                credit_rescue: true,
+                confidence_score: creditDecisionRescue.confidence,
+                correlation_id: correlationId,
+              },
+            })
+            .eq("id", taskId);
           try {
             await Promise.race([
               executeAgenticLoop(chatId, text, {
@@ -6663,12 +7709,20 @@ serve(async (req) => {
               { execution_lane: "lane1_do", progress_step: "credit_rescue_failed" },
               errMsg,
             );
-            await supabase.from("tasks").update({
-              status: "failed",
-              error: errMsg.slice(0, 300),
-              result_json: failResult,
-            }).eq("id", taskId);
-            await sendMessage(chatId, `\u274c Failed: \`${taskId}\` \u2014 ${errMsg.slice(0, 200)}`, {}, `task:${taskId}:failed`);
+            await supabase
+              .from("tasks")
+              .update({
+                status: "failed",
+                error: errMsg.slice(0, 300),
+                result_json: failResult,
+              })
+              .eq("id", taskId);
+            await sendMessage(
+              chatId,
+              `\u274c Failed: \`${taskId}\` \u2014 ${errMsg.slice(0, 200)}`,
+              {},
+              `task:${taskId}:failed`,
+            );
           }
           _currentTaskId = null;
           return new Response("ok");
@@ -6684,15 +7738,18 @@ serve(async (req) => {
       const nlMatch = await classifyNaturalLanguageIntent(text, nlWorkflows);
       if (nlMatch) {
         console.log(`[NL_CLASSIFY] Auto-promoting to Lane 1: workflow=${nlMatch.key} taskId=${taskId}`);
-        await supabase.from("tasks").update({
-          status: "running",
-          selected_workflow: nlMatch.key,
-          result_json: {
-            execution_lane: "lane1_do",
-            nl_classified: true,
+        await supabase
+          .from("tasks")
+          .update({
+            status: "running",
             selected_workflow: nlMatch.key,
-          },
-        }).eq("id", taskId);
+            result_json: {
+              execution_lane: "lane1_do",
+              nl_classified: true,
+              selected_workflow: nlMatch.key,
+            },
+          })
+          .eq("id", taskId);
 
         try {
           await Promise.race([
@@ -6703,22 +7760,25 @@ serve(async (req) => {
               workflowKey: nlMatch.key,
               sessionModel: normalizeBotModel(session.active_model),
             }),
-            new Promise<never>((_, reject) =>
-              setTimeout(() => reject(new Error("TIMEOUT")), 55000)
-            ),
+            new Promise<never>((_, reject) => setTimeout(() => reject(new Error("TIMEOUT")), 55000)),
           ]);
         } catch (nlErr) {
           const errMsg = nlErr instanceof Error ? nlErr.message : String(nlErr);
-          const failResult = buildFailureResultJson(
-            { execution_lane: "lane1_do", nl_classified: true },
-            errMsg
+          const failResult = buildFailureResultJson({ execution_lane: "lane1_do", nl_classified: true }, errMsg);
+          await supabase
+            .from("tasks")
+            .update({
+              status: "failed",
+              error: errMsg.slice(0, 300),
+              result_json: failResult,
+            })
+            .eq("id", taskId);
+          await sendMessage(
+            chatId,
+            `\u274c Failed: \`${taskId}\` \u2014 ${errMsg.slice(0, 200)}`,
+            {},
+            `task:${taskId}:failed`,
           );
-          await supabase.from("tasks").update({
-            status: "failed",
-            error: errMsg.slice(0, 300),
-            result_json: failResult,
-          }).eq("id", taskId);
-          await sendMessage(chatId, `\u274c Failed: \`${taskId}\` \u2014 ${errMsg.slice(0, 200)}`, {}, `task:${taskId}:failed`);
         }
         _currentTaskId = null;
         return new Response("ok");
@@ -6730,7 +7790,14 @@ serve(async (req) => {
     // ââââââââââââââââââââââââââââââââââââââââââââââââââââââââââ
     console.log(`[LANE2] Assistant mode taskId=${taskId} ts=${Date.now()}`);
     const lane2Start = Date.now();
-    await supabase.from("tasks").update({ status: "running", selected_workflow: "lane2_assistant", result_json: { execution_lane: "lane2_assistant", progress_step: "lane2_start", correlation_id: correlationId } }).eq("id", taskId);
+    await supabase
+      .from("tasks")
+      .update({
+        status: "running",
+        selected_workflow: "lane2_assistant",
+        result_json: { execution_lane: "lane2_assistant", progress_step: "lane2_start", correlation_id: correlationId },
+      })
+      .eq("id", taskId);
 
     const model: BotModel = normalizeBotModel(session.active_model);
     let lane2Status: "succeeded" | "failed" = "succeeded";
@@ -6749,9 +7816,10 @@ serve(async (req) => {
 
       // Fetch workflow registry for context (so assistant can suggest /do commands)
       const workflows = await fetchWorkflowRegistry();
-      const workflowContext = workflows.length > 0
-        ? `\n\nRegistered workflows (many run automatically from plain English; \`/do\` is optional):\n${workflows.map(w => `- ${w.name} (\`${w.key}\`): ${w.trigger_phrases.slice(0, 2).join(", ")}`).join("\n")}`
-        : "";
+      const workflowContext =
+        workflows.length > 0
+          ? `\n\nRegistered workflows (many run automatically from plain English; \`/do\` is optional):\n${workflows.map((w) => `- ${w.name} (\`${w.key}\`): ${w.trigger_phrases.slice(0, 2).join(", ")}`).join("\n")}`
+          : "";
 
       const lane2Mission = isCreditRelatedUserText(text) ? CREDIT_CONVERSATION_ADDENDUM : ARTIST_GROWTH_MISSION;
 
@@ -6782,7 +7850,7 @@ Be concise, professional, and use emoji sparingly.`;
 
       const ASSISTANT_TIMEOUT_MS = 20_000;
       const assistantTimeout = new Promise<never>((_, reject) =>
-        setTimeout(() => reject(new Error("TIMEOUT")), ASSISTANT_TIMEOUT_MS)
+        setTimeout(() => reject(new Error("TIMEOUT")), ASSISTANT_TIMEOUT_MS),
       );
 
       let aiResponse: string;
@@ -6791,7 +7859,46 @@ Be concise, professional, and use emoji sparingly.`;
           aiResponse = await callClaude(assistantSystemPrompt, text, 1024);
         } catch (claudeErr) {
           console.error("[LANE2] Claude failed, trying Gemini fallback:", claudeErr);
-          const resp = await Promise.race([fetch(
+          const resp = await Promise.race([
+            fetch(
+              `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${GEMINI_KEY}`,
+              {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({
+                  contents: [{ role: "user", parts: [{ text }] }],
+                  systemInstruction: { parts: [{ text: assistantSystemPrompt }] },
+                  generationConfig: { maxOutputTokens: 1024 },
+                }),
+              },
+            ),
+            assistantTimeout,
+          ]);
+          const data = await resp.json();
+          aiResponse =
+            data.candidates?.[0]?.content?.parts?.[0]?.text || "I'm not sure how to help with that. Try /workflows.";
+        }
+      } else if (model === "grok") {
+        const resp = await Promise.race([
+          fetch("https://api.x.ai/v1/chat/completions", {
+            method: "POST",
+            headers: { Authorization: `Bearer ${GROK_KEY}`, "Content-Type": "application/json" },
+            body: JSON.stringify({
+              model: "grok-3-mini-fast",
+              messages: [
+                { role: "system", content: assistantSystemPrompt },
+                { role: "user", content: text },
+              ],
+              max_tokens: 1024,
+            }),
+          }),
+          assistantTimeout,
+        ]);
+        const data = await resp.json();
+        aiResponse = data.choices?.[0]?.message?.content || "I'm not sure how to help with that. Try /workflows.";
+      } else {
+        const resp = await Promise.race([
+          fetch(
             `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${GEMINI_KEY}`,
             {
               method: "POST",
@@ -6801,41 +7908,13 @@ Be concise, professional, and use emoji sparingly.`;
                 systemInstruction: { parts: [{ text: assistantSystemPrompt }] },
                 generationConfig: { maxOutputTokens: 1024 },
               }),
-            }
-          ), assistantTimeout]);
-          const data = await resp.json();
-          aiResponse = data.candidates?.[0]?.content?.parts?.[0]?.text || "I'm not sure how to help with that. Try /workflows.";
-        }
-      } else if (model === "grok") {
-        const resp = await Promise.race([fetch("https://api.x.ai/v1/chat/completions", {
-          method: "POST",
-          headers: { Authorization: `Bearer ${GROK_KEY}`, "Content-Type": "application/json" },
-          body: JSON.stringify({
-            model: "grok-3-mini-fast",
-            messages: [
-              { role: "system", content: assistantSystemPrompt },
-              { role: "user", content: text },
-            ],
-            max_tokens: 1024,
-          }),
-        }), assistantTimeout]);
+            },
+          ),
+          assistantTimeout,
+        ]);
         const data = await resp.json();
-        aiResponse = data.choices?.[0]?.message?.content || "I'm not sure how to help with that. Try /workflows.";
-      } else {
-        const resp = await Promise.race([fetch(
-          `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${GEMINI_KEY}`,
-          {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({
-              contents: [{ role: "user", parts: [{ text }] }],
-              systemInstruction: { parts: [{ text: assistantSystemPrompt }] },
-              generationConfig: { maxOutputTokens: 1024 },
-            }),
-          }
-        ), assistantTimeout]);
-        const data = await resp.json();
-        aiResponse = data.candidates?.[0]?.content?.parts?.[0]?.text || "I'm not sure how to help with that. Try /workflows.";
+        aiResponse =
+          data.candidates?.[0]?.content?.parts?.[0]?.text || "I'm not sure how to help with that. Try /workflows.";
       }
 
       assistantReply = formatAssistantMessage(model, aiResponse);
@@ -6858,19 +7937,40 @@ Be concise, professional, and use emoji sparingly.`;
       // HARD GUARANTEE: Lane 2 task always reaches terminal state
       const lane2Duration = Date.now() - lane2Start;
       if (lane2Status === "succeeded") {
-        await supabase.from("tasks").update({
-          status: "succeeded",
-          result_json: { execution_lane: "lane2_assistant", progress_step: "lane2_done", model_used: model, text_response: assistantReply.slice(0, 2000), execution_duration_ms: lane2Duration },
-        }).eq("id", taskId);
+        await supabase
+          .from("tasks")
+          .update({
+            status: "succeeded",
+            result_json: {
+              execution_lane: "lane2_assistant",
+              progress_step: "lane2_done",
+              model_used: model,
+              text_response: assistantReply.slice(0, 2000),
+              execution_duration_ms: lane2Duration,
+            },
+          })
+          .eq("id", taskId);
         await sendMessage(chatId, `â Done: \`${taskId}\``, {}, `task:${taskId}:done`);
       } else {
-        const failResult = buildFailureResultJson({ execution_lane: "lane2_assistant", progress_step: "lane2_failed", model_used: model }, lane2Error || "unknown", lane2Start);
-        await supabase.from("tasks").update({
-          status: "failed",
-          error: (lane2Error || "unknown").slice(0, 300),
-          result_json: failResult,
-        }).eq("id", taskId);
-        await sendMessage(chatId, `â Failed: \`${taskId}\` â ${(lane2Error || "unknown").slice(0, 200)}`, {}, `task:${taskId}:failed`);
+        const failResult = buildFailureResultJson(
+          { execution_lane: "lane2_assistant", progress_step: "lane2_failed", model_used: model },
+          lane2Error || "unknown",
+          lane2Start,
+        );
+        await supabase
+          .from("tasks")
+          .update({
+            status: "failed",
+            error: (lane2Error || "unknown").slice(0, 300),
+            result_json: failResult,
+          })
+          .eq("id", taskId);
+        await sendMessage(
+          chatId,
+          `â Failed: \`${taskId}\` â ${(lane2Error || "unknown").slice(0, 200)}`,
+          {},
+          `task:${taskId}:failed`,
+        );
       }
       _currentTaskId = null;
     }
@@ -6892,8 +7992,8 @@ async function callFanFuelHub(functionName: string, body: any) {
       // FanFuel Hub's `control-center-api` authenticates using `x-api-key`.
       "x-api-key": key,
       // Keep these for compatibility with other deployments/endpoints.
-      "Authorization": `Bearer ${key}`,
-      "apikey": key,
+      Authorization: `Bearer ${key}`,
+      apikey: key,
     },
     body: JSON.stringify(body),
   });
@@ -6906,8 +8006,6 @@ async function callFanFuelHub(functionName: string, body: any) {
     return raw.length ? JSON.parse(raw) : {};
   } catch (e) {
     const preview = raw.slice(0, 120).replace(/\s+/g, " ");
-    throw new Error(
-      `FanFuel Hub returned non-JSON (HTTP ${resp.status}): ${preview}${raw.length > 120 ? "…" : ""}`
-    );
+    throw new Error(`FanFuel Hub returned non-JSON (HTTP ${resp.status}): ${preview}${raw.length > 120 ? "…" : ""}`);
   }
 }
