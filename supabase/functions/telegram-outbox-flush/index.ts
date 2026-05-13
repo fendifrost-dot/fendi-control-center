@@ -19,16 +19,9 @@ serve(async (req) => {
     new Response(JSON.stringify(body), { status, headers: { ...corsHeaders, "Content-Type": "application/json" } });
 
   try {
-    // Auth check
-    const authHeader = req.headers.get("authorization");
-    if (!authHeader) return json({ error: "Unauthorized" }, 401);
-
-    const supabaseAuth = createClient(SUPABASE_URL, Deno.env.get("SUPABASE_ANON_KEY")!, {
-      global: { headers: { Authorization: authHeader } },
-    });
-    const { data: { user }, error: authError } = await supabaseAuth.auth.getUser();
-    if (authError || !user) return json({ error: "Unauthorized" }, 401);
-
+    // No handler-side auth check: verify_jwt=false in config.toml is the
+    // deliberate stance (cron-invoked, project-internal credentials only).
+    // Matches drain-guardian-queue's pattern. See 2026-05-13 forensic audit.
     const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
     const body = await req.json().catch(() => ({}));
     const max = Math.min(body.max || 10, 20);
@@ -49,7 +42,8 @@ serve(async (req) => {
 
     if (!rows || rows.length === 0) return json({ sent: 0, failed: 0, message: "No due items" });
 
-    let sent = 0, failed = 0;
+    let sent = 0,
+      failed = 0;
     for (const row of rows) {
       try {
         const resp = await fetch(`${TELEGRAM_API}/${row.kind || "sendMessage"}`, {
@@ -61,27 +55,38 @@ serve(async (req) => {
         const newAttempt = (row.attempt_count ?? 0) + 1;
 
         if (result.ok) {
-          await supabase.from("telegram_outbox").update({
-            status: "sent", sent_at: new Date().toISOString(), last_error: null,
-          }).eq("id", row.id);
+          await supabase
+            .from("telegram_outbox")
+            .update({
+              status: "sent",
+              sent_at: new Date().toISOString(),
+              last_error: null,
+            })
+            .eq("id", row.id);
           sent++;
         } else {
           const backoff = Math.min(Math.pow(newAttempt, 2) * 5, 120);
-          await supabase.from("telegram_outbox").update({
-            status: "failed",
-            last_error: result.description || JSON.stringify(result).slice(0, 500),
-            next_attempt_at: new Date(Date.now() + backoff * 1000).toISOString(),
-          }).eq("id", row.id);
+          await supabase
+            .from("telegram_outbox")
+            .update({
+              status: "failed",
+              last_error: result.description || JSON.stringify(result).slice(0, 500),
+              next_attempt_at: new Date(Date.now() + backoff * 1000).toISOString(),
+            })
+            .eq("id", row.id);
           failed++;
         }
       } catch (e) {
         const newAttempt = (row.attempt_count ?? 0) + 1;
         const backoff = Math.min(Math.pow(newAttempt, 2) * 5, 120);
-        await supabase.from("telegram_outbox").update({
-          status: "failed",
-          last_error: e instanceof Error ? e.message : String(e),
-          next_attempt_at: new Date(Date.now() + backoff * 1000).toISOString(),
-        }).eq("id", row.id);
+        await supabase
+          .from("telegram_outbox")
+          .update({
+            status: "failed",
+            last_error: e instanceof Error ? e.message : String(e),
+            next_attempt_at: new Date(Date.now() + backoff * 1000).toISOString(),
+          })
+          .eq("id", row.id);
         failed++;
       }
     }
@@ -89,7 +94,8 @@ serve(async (req) => {
     return json({ sent, failed });
   } catch (e) {
     return new Response(JSON.stringify({ error: e instanceof Error ? e.message : String(e) }), {
-      status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" },
+      status: 500,
+      headers: { ...corsHeaders, "Content-Type": "application/json" },
     });
   }
 });
