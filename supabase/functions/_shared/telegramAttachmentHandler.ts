@@ -149,30 +149,35 @@ export type AttachmentHandlerOutcome =
   | { kind: "no_attachment" }
   | { kind: "clarify_caption"; reply: string; correlationId: string }
   | { kind: "clarify_client"; reply: string; correlationId: string }
-  | { kind: "drive_unconfigured"; reply: string; correlationId: string; cause: string }
+  | {
+      kind: "drive_unconfigured";
+      reply: string;
+      correlationId: string;
+      cause: string;
+      matchedName: string;
+      attemptedPermutations: string[];
+    }
   | { kind: "error"; reply: string; correlationId: string; cause: string }
   | {
-    kind: "logged";
-    reply: string;
-    correlationId: string;
-    drivePath: string;
-    driveFileName: string;
-    driveFileId: string;
-    alreadyExisted: boolean;
-    parsed: ParsedAttachmentCaption;
-    matchedClient: string;
-    /**
-     * "deleted" → source message removed from Telegram; "kept" → dep not provided
-     * or no message_id; "delete_failed" → tried and failed (e.g. bot lacks rights),
-     * source still visible. Surfaced for tasks/result_json + tests.
-     */
-    sourceMessageDisposition: "deleted" | "kept" | "delete_failed";
-  };
+      kind: "logged";
+      reply: string;
+      correlationId: string;
+      drivePath: string;
+      driveFileName: string;
+      driveFileId: string;
+      alreadyExisted: boolean;
+      parsed: ParsedAttachmentCaption;
+      matchedClient: string;
+      /**
+       * "deleted" → source message removed from Telegram; "kept" → dep not provided
+       * or no message_id; "delete_failed" → tried and failed (e.g. bot lacks rights),
+       * source still visible. Surfaced for tasks/result_json + tests.
+       */
+      sourceMessageDisposition: "deleted" | "kept" | "delete_failed";
+    };
 
 /** Detect a photo or document on the update; null otherwise. */
-export function extractAttachmentSource(
-  update: TelegramAttachmentUpdate,
-): ResolvedAttachmentSource | null {
+export function extractAttachmentSource(update: TelegramAttachmentUpdate): ResolvedAttachmentSource | null {
   const m = update.message;
   if (!m) return null;
   if (m.document?.file_id) {
@@ -234,7 +239,8 @@ export async function handleTelegramAttachment(
   }
 
   if (resolution.needsVerification || !resolution.matchedName) {
-    const reply = resolution.clarification ??
+    const reply =
+      resolution.clarification ??
       `📎 I couldn't match "${parsed.value.client}" to a client. Please confirm the spelling.`;
     log.info("client needs clarification", { correlationId, raw: parsed.value.client });
     return { kind: "clarify_client", reply, correlationId };
@@ -246,13 +252,14 @@ export async function handleTelegramAttachment(
   } catch (err) {
     const cause = err instanceof Error ? err.message : String(err);
     log.error("drive folder resolution failed", { correlationId, cause });
+    const attemptedPermutations = candidateClientFolderNames(resolution.matchedName);
     return {
       kind: "drive_unconfigured",
-      reply:
-        `📎 ${cause}\n\nFor "${resolution.matchedName}", expected one of: ` +
-        candidateClientFolderNames(resolution.matchedName).join(", "),
+      reply: `📎 ${cause}\n\nFor "${resolution.matchedName}", expected one of: ` + attemptedPermutations.join(", "),
       correlationId,
       cause,
+      matchedName: resolution.matchedName,
+      attemptedPermutations,
     };
   }
 
