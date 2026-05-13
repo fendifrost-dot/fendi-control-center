@@ -747,6 +747,7 @@ export type Database = {
           bureau: string
           bureau_canonical: string
           cg_client_id: string | null
+          clarification_needed: Json | null
           client_name: string
           correlation_id: string
           created_at: string
@@ -755,11 +756,15 @@ export type Database = {
           drive_file_id: string
           drive_file_name: string
           drive_path: string
+          error_message: string | null
           event_type: string
           file_unique_id: string
+          guardian_event_id: string | null
           id: string
+          next_retry_at: string | null
           ocr_text: string | null
           received_at: string
+          retry_count: number
           round: number | null
           source: string
           status: string
@@ -769,6 +774,7 @@ export type Database = {
           bureau: string
           bureau_canonical: string
           cg_client_id?: string | null
+          clarification_needed?: Json | null
           client_name: string
           correlation_id: string
           created_at?: string
@@ -777,11 +783,15 @@ export type Database = {
           drive_file_id: string
           drive_file_name: string
           drive_path: string
+          error_message?: string | null
           event_type: string
           file_unique_id: string
+          guardian_event_id?: string | null
           id?: string
+          next_retry_at?: string | null
           ocr_text?: string | null
           received_at?: string
+          retry_count?: number
           round?: number | null
           source: string
           status?: string
@@ -791,6 +801,7 @@ export type Database = {
           bureau?: string
           bureau_canonical?: string
           cg_client_id?: string | null
+          clarification_needed?: Json | null
           client_name?: string
           correlation_id?: string
           created_at?: string
@@ -799,11 +810,15 @@ export type Database = {
           drive_file_id?: string
           drive_file_name?: string
           drive_path?: string
+          error_message?: string | null
           event_type?: string
           file_unique_id?: string
+          guardian_event_id?: string | null
           id?: string
+          next_retry_at?: string | null
           ocr_text?: string | null
           received_at?: string
+          retry_count?: number
           round?: number | null
           source?: string
           status?: string
@@ -1704,6 +1719,26 @@ export type Database = {
           id: string
           kind: string
           payload: Json
+        }[]
+      }
+      claim_pending_guardian_events: {
+        Args: { p_limit: number; p_now: string }
+        Returns: {
+          bureau: string
+          bureau_canonical: string
+          cg_client_id: string
+          client_name: string
+          correlation_id: string
+          drive_file_id: string
+          drive_file_name: string
+          drive_path: string
+          event_type: string
+          file_unique_id: string
+          id: string
+          ocr_text: string
+          retry_count: number
+          round: number
+          source: string
         }[]
       }
       delete_client_and_related_data: {
