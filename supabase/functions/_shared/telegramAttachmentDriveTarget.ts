@@ -45,9 +45,7 @@ export interface ResponsesFolderResolution {
  *   Ties broken by alphabetical name to keep the choice deterministic in tests.
  * - 0 matches → null.
  */
-export function pickCanonicalCreditFolder(
-  candidates: DriveFolderRef[],
-): CanonicalFolderPick | null {
+export function pickCanonicalCreditFolder(candidates: DriveFolderRef[]): CanonicalFolderPick | null {
   if (candidates.length === 0) return null;
   if (candidates.length === 1) {
     return { chosen: candidates[0], duplicates: [] };
@@ -84,10 +82,16 @@ export function isoDateUTC(now: Date = new Date()): string {
  * Candidate folder names to search for, in priority order, given a CG-resolved
  * client display name. Always uppercase.
  *
+ * For names with 3+ tokens, also tries a first+last combination so middle
+ * names (e.g. "Linda Latrice McCoy") still match folders named after the
+ * first and last token only (e.g. "LINDA MCCOY CREDIT"). The Set dedupes
+ * the first+last permutation when it collapses to <NAME> for 2-token names.
+ *
  * Examples:
- *   "Sam Higgins"  →  ["SAM HIGGINS CREDIT", "SAM CREDIT"]
- *   "Tara Wright"  →  ["TARA WRIGHT CREDIT", "TARA CREDIT"]
- *   "Sam"          →  ["SAM CREDIT"]
+ *   "Sam Higgins"          →  ["SAM HIGGINS CREDIT", "SAM CREDIT"]
+ *   "John Smith"           →  ["JOHN SMITH CREDIT", "JOHN CREDIT"] (collapsed, no third permutation)
+ *   "Linda Latrice McCoy"  →  ["LINDA LATRICE MCCOY CREDIT", "LINDA CREDIT", "LINDA MCCOY CREDIT"]
+ *   "Sam"                  →  ["SAM CREDIT"]
  */
 export function candidateClientFolderNames(canonicalClientName: string): string[] {
   const cleaned = canonicalClientName.trim().toUpperCase();
@@ -97,6 +101,9 @@ export function candidateClientFolderNames(canonicalClientName: string): string[
   candidates.add(`${cleaned} CREDIT`);
   if (tokens.length > 1) {
     candidates.add(`${tokens[0]} CREDIT`);
+  }
+  if (tokens.length > 2) {
+    candidates.add(`${tokens[0]} ${tokens[tokens.length - 1]} CREDIT`);
   }
   return [...candidates];
 }
@@ -161,13 +168,10 @@ export async function resolveResponsesFolder(
   let responsesFolder: DriveFolderRef;
   if (subPick) {
     if (subPick.duplicates.length > 0) {
-      logger.warn(
-        `multiple "responses" subfolders inside "${pick.chosen.name}" — using most recently modified.`,
-        {
-          chosen: { id: subPick.chosen.id, name: subPick.chosen.name },
-          duplicates: subPick.duplicates.map((d) => ({ id: d.id, name: d.name })),
-        },
-      );
+      logger.warn(`multiple "responses" subfolders inside "${pick.chosen.name}" — using most recently modified.`, {
+        chosen: { id: subPick.chosen.id, name: subPick.chosen.name },
+        duplicates: subPick.duplicates.map((d) => ({ id: d.id, name: d.name })),
+      });
     }
     responsesFolder = subPick.chosen;
   } else {
@@ -206,7 +210,10 @@ export function extensionForMimeType(mime: string | undefined, fallback = "bin")
   // E.g. "image/x-something" → "x-something" → strip prefixes
   const slash = m.indexOf("/");
   if (slash > 0) {
-    const tail = m.slice(slash + 1).replace(/^x-/, "").split(";")[0];
+    const tail = m
+      .slice(slash + 1)
+      .replace(/^x-/, "")
+      .split(";")[0];
     if (/^[a-z0-9]+$/.test(tail) && tail.length <= 8) return tail;
   }
   return fallback;
