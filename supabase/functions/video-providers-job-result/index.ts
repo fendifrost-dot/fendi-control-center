@@ -31,7 +31,7 @@ const PROVIDER_KEY_BY_NAME: Record<ProviderName, string> = {
   pika: "PIKA_API_KEY",
   fal: "FAL_API_KEY",
   grok: "Frost_Grok",
-  higgsfield: "HIGGSFIELD_API_KEY",
+  higgsfield: "HIGGSFIELD_API_KEY_ID", // ID-only check; full Key+Secret used by generate fn
 };
 
 const RUNWAY_BASE_URL = "https://api.dev.runwayml.com/v1";

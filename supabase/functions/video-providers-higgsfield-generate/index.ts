@@ -1,10 +1,14 @@
 /**
  * Higgsfield video-generation proxy.
  *
- * Higgsfield's public API access is gated as of May 2026. We accept the
- * request, attempt the upstream call, and surface PROVIDER_NOT_AVAILABLE
- * if the endpoint doesn't respond. AVT renders a "manual workflow only"
- * banner in that case.
+ * Higgsfield's API is publicly available (https://platform.higgsfield.ai).
+ * Auth uses an API-key-ID + secret pair combined into one header value:
+ *   Authorization: Key <KEY_ID>:<KEY_SECRET>
+ * (same colon-joined convention as fal.ai).
+ *
+ * If the upstream endpoint is unreachable (404/405/501/0) we surface
+ * PROVIDER_NOT_AVAILABLE so AVT renders a graceful "manual workflow only"
+ * banner instead of a stack trace.
  */
 
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
@@ -20,7 +24,7 @@ import {
   normaliseStatus,
 } from "../_shared/video-providers/proxy.ts";
 
-const HF_BASE_URL = "https://api.higgsfield.ai/v1";
+const HF_BASE_URL = "https://platform.higgsfield.ai";
 const DEFAULT_MODEL = "higgsfield-v1";
 
 serve(async (req) => {
@@ -30,15 +34,22 @@ serve(async (req) => {
   const auth = checkProxyAuth(req);
   if (!auth.ok) return auth.response;
 
-  const apiKey = Deno.env.get("HIGGSFIELD_API_KEY")?.trim();
-  if (!apiKey) {
+  // Higgsfield uses an API-key-ID + secret pair (UUID + hex). The official SDKs
+  // submit them as a single colon-joined Authorization header value:
+  //   Authorization: Key <KEY_ID>:<KEY_SECRET>
+  // (same convention as fal.ai). Either both env vars must be set, or both
+  // missing — surface PROVIDER_KEY_NOT_CONFIGURED otherwise.
+  const keyId = Deno.env.get("HIGGSFIELD_API_KEY_ID")?.trim();
+  const keySecret = Deno.env.get("HIGGSFIELD_API_SECRET")?.trim();
+  if (!keyId || !keySecret) {
     return jsonError(
       "PROVIDER_KEY_NOT_CONFIGURED",
-      "HIGGSFIELD_API_KEY is not configured in Control Center.",
+      "HIGGSFIELD_API_KEY_ID and HIGGSFIELD_API_SECRET must both be set in Control Center.",
       503,
       false,
     );
   }
+  const authValue = `Key ${keyId}:${keySecret}`;
 
   let body: unknown;
   try { body = await req.json(); } catch {
@@ -72,7 +83,7 @@ serve(async (req) => {
         signal: ctrl.signal,
         headers: {
           "Content-Type": "application/json",
-          Authorization: `Bearer ${apiKey}`,
+          Authorization: authValue,
         },
         body: JSON.stringify({
           model: modelVariant,
