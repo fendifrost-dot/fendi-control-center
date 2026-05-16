@@ -75,3 +75,31 @@ verify_jwt = false
 
 [functions.workflow-run-poller]
 verify_jwt = false
+
+# AI Video Tool video-provider proxy functions — auth via shared x-api-key (AVT_PROXY_KEY).
+[functions.video-providers-runway-generate]
+verify_jwt = false
+
+[functions.video-providers-veo-generate]
+verify_jwt = false
+
+[functions.video-providers-pika-generate]
+verify_jwt = false
+
+[functions.video-providers-fal-generate]
+verify_jwt = false
+
+[functions.video-providers-grok-generate]
+verify_jwt = false
+
+[functions.video-providers-higgsfield-generate]
+verify_jwt = false
+
+[functions.video-providers-job-status]
+verify_jwt = false
+
+[functions.video-providers-job-result]
+verify_jwt = false
+
+[functions.ai-draft-treatment]
+verify_jwt = false
