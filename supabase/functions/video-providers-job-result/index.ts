@@ -32,7 +32,14 @@ const FAL_BASE_URL = "https://queue.fal.run";
 /** Strip Fal method suffixes (e.g. /text-to-video) so we hit the queue
  *  result endpoint, which is keyed off the base model id only. */
 function stripFalMethodSuffix(modelPath: string): string {
-  return modelPath.replace(/\/(text-to-video|image-to-video|video-to-video)$/i, "");
+  // Fal status/result URLs use the model's base path only.
+  // Generate URLs look like fal-ai/pika/v2.2/text-to-video, but Fal returns
+  // status_url like fal-ai/pika/requests/{id}/status — so we need to strip
+  // both the method suffix (text-to-video/image-to-video/video-to-video)
+  // AND any trailing version segment (v1, v2, v2.2, etc).
+  return modelPath
+    .replace(/\/(text-to-video|image-to-video|video-to-video)$/i, "")
+    .replace(/\/v\d+(\.\d+)*$/i, "");
 }
 const XAI_BASE_URL = "https://api.x.ai/v1";
 const DEFAULT_PIKA_FAL_MODEL = "fal-ai/pika/v2.2/text-to-video";
