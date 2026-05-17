@@ -6,6 +6,7 @@
  */
 
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
+import { encodeBase64 } from "https://deno.land/std@0.224.0/encoding/base64.ts";
 import {
   corsHeaders,
   checkProxyAuth,
@@ -118,7 +119,8 @@ serve(async (req) => {
     }
     const buf = new Uint8Array(await dl.arrayBuffer());
     const contentType = dl.headers.get("content-type") ?? "video/mp4";
-    const b64 = btoa(String.fromCharCode(...buf));
+    // encodeBase64 streams through the buffer; the prior spread+btoa overflowed the call stack on video-sized payloads.
+    const b64 = encodeBase64(buf);
     return jsonOk({
       provider,
       providerJobId: id,
