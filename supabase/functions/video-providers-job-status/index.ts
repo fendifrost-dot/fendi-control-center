@@ -36,6 +36,8 @@ const VEO_BASE_URL = "https://generativelanguage.googleapis.com/v1beta";
 const FAL_BASE_URL = "https://queue.fal.run";
 const XAI_BASE_URL = "https://api.x.ai/v1";
 const DEFAULT_PIKA_FAL_MODEL = "fal-ai/pika/v2.2/text-to-video";
+const HIGGSFIELD_BASE_URL = "https://platform.higgsfield.ai";
+const HIGGSFIELD_USER_AGENT = "higgsfield-server-js/2.0";
 
 /** Strip Fal method suffixes (e.g. /text-to-video) from a model path so we can
  *  hit the queue status endpoint which is keyed off the base model id only. */
@@ -120,12 +122,30 @@ serve(async (req) => {
       const text = await resp.text();
       try { upstream = text ? JSON.parse(text) : {}; } catch { upstream = { raw: text }; }
     } else if (provider === "higgsfield") {
-      return jsonError(
-        "PROVIDER_NOT_AVAILABLE",
-        "Higgsfield polling not wired yet — generate function holds the request_id until its own status helper lands.",
-        501,
-        false,
+      // Higgsfield needs the colon-joined key pair. PROVIDER_KEY_BY_NAME maps
+      // higgsfield -> HIGGSFIELD_API_KEY_ID for the existence check; the secret
+      // half lives in HIGGSFIELD_API_SECRET. Fail clean if either is missing.
+      const hfSecret = Deno.env.get("HIGGSFIELD_API_SECRET")?.trim();
+      if (!hfSecret) {
+        return jsonError(
+          "PROVIDER_KEY_NOT_CONFIGURED",
+          "HIGGSFIELD_API_SECRET not set",
+          503,
+        );
+      }
+      const hfAuth = `Key ${apiKey}:${hfSecret}`;
+      const resp = await fetch(
+        `${HIGGSFIELD_BASE_URL}/requests/${encodeURIComponent(id)}/status`,
+        {
+          headers: {
+            Authorization: hfAuth,
+            "User-Agent": HIGGSFIELD_USER_AGENT,
+          },
+        },
       );
+      httpStatus = resp.status;
+      const text = await resp.text();
+      try { upstream = text ? JSON.parse(text) : {}; } catch { upstream = { raw: text }; }
     }
 
     let status: ReturnType<typeof normaliseStatus> = "queued";
@@ -169,6 +189,25 @@ serve(async (req) => {
       if (status === "succeeded") {
         const video = upstream.video as Record<string, unknown> | undefined;
         resultUrl = (video?.url as string) ?? null;
+      }
+    } else if (provider === "higgsfield") {
+      // Higgsfield status endpoint returns:
+      //   { status, request_id, status_url, cancel_url,
+      //     images?: [{url}], video?: {url} }
+      // Status values: queued | in_progress | completed | failed | nsfw | canceled
+      const raw = String(upstream.status ?? "").toLowerCase();
+      if (raw === "completed") status = "succeeded";
+      else if (raw === "failed" || raw === "nsfw" || raw === "canceled" || raw === "cancelled")
+        status = "failed";
+      else if (raw === "in_progress") status = "running";
+      else status = "queued";
+      if (status === "succeeded") {
+        const video = upstream.video as Record<string, unknown> | undefined;
+        const images = upstream.images as Array<Record<string, unknown>> | undefined;
+        resultUrl =
+          (video?.url as string)
+          ?? (Array.isArray(images) && images.length > 0 ? (images[0]?.url as string) : null)
+          ?? null;
       }
     }
 

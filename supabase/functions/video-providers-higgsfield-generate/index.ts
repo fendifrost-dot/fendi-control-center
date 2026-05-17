@@ -1,14 +1,27 @@
 /**
  * Higgsfield video-generation proxy.
  *
- * Higgsfield's API is publicly available (https://platform.higgsfield.ai).
- * Auth uses an API-key-ID + secret pair combined into one header value:
- *   Authorization: Key <KEY_ID>:<KEY_SECRET>
- * (same colon-joined convention as fal.ai).
+ * Verified live against https://platform.higgsfield.ai on 2026-05-17.
  *
- * If the upstream endpoint is unreachable (404/405/501/0) we surface
- * PROVIDER_NOT_AVAILABLE so AVT renders a graceful "manual workflow only"
- * banner instead of a stack trace.
+ *   POST {BASE}/v1/image2video/dop
+ *   Authorization: Key <KEY_ID>:<KEY_SECRET>
+ *   User-Agent: higgsfield-server-js/2.0
+ *   Body: { params: { model, prompt, input_images: [{ type, image_url }] } }
+ *
+ * Models accepted by the dop endpoint: "dop-lite", "dop-preview", "dop-turbo"
+ * (server-side enum, validated by FastAPI — anything else returns 422).
+ *
+ * The dop endpoint is **image-to-video only**. There is no text-to-video
+ * variant exposed at this base URL (POST /v1/text2video/dop returns
+ * "Model not found"). If the caller doesn't pass a reference image we
+ * surface INVALID_INPUT instead of getting a 422 from upstream.
+ *
+ * Upstream response is a JobSet:
+ *   { id, type:"image2video", created_at, jobs:[{ id, status, results }], input_params }
+ *
+ * Polling lives in video-providers-job-status; it hits
+ *   GET {BASE}/requests/{jobset_id}/status
+ * which the SDK README documents as the canonical status endpoint.
  */
 
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
@@ -25,7 +38,9 @@ import {
 } from "../_shared/video-providers/proxy.ts";
 
 const HF_BASE_URL = "https://platform.higgsfield.ai";
-const DEFAULT_MODEL = "higgsfield-v1";
+const HF_USER_AGENT = "higgsfield-server-js/2.0";
+const HF_VALID_MODELS = new Set(["dop-lite", "dop-preview", "dop-turbo"]);
+const DEFAULT_MODEL = "dop-turbo";
 
 serve(async (req) => {
   if (req.method === "OPTIONS") return new Response(null, { headers: corsHeaders });
@@ -34,11 +49,9 @@ serve(async (req) => {
   const auth = checkProxyAuth(req);
   if (!auth.ok) return auth.response;
 
-  // Higgsfield uses an API-key-ID + secret pair (UUID + hex). The official SDKs
-  // submit them as a single colon-joined Authorization header value:
-  //   Authorization: Key <KEY_ID>:<KEY_SECRET>
-  // (same convention as fal.ai). Either both env vars must be set, or both
-  // missing — surface PROVIDER_KEY_NOT_CONFIGURED otherwise.
+  // Higgsfield uses an API-key-ID + secret pair (UUID + hex). Auth header
+  // is the colon-joined value:  Authorization: Key <KEY_ID>:<KEY_SECRET>
+  // (same convention as fal.ai). Both env vars must be set.
   const keyId = Deno.env.get("HIGGSFIELD_API_KEY_ID")?.trim();
   const keySecret = Deno.env.get("HIGGSFIELD_API_SECRET")?.trim();
   if (!keyId || !keySecret) {
@@ -58,7 +71,20 @@ serve(async (req) => {
   const parsed = validateCommonBody(body);
   if ("error" in parsed) return jsonError("INVALID_INPUT", parsed.error, 400);
 
-  const modelVariant = parsed.modelVariant ?? DEFAULT_MODEL;
+  // Higgsfield's DoP endpoint is image-to-video only — require a reference image.
+  if (!parsed.referenceImageUrl || typeof parsed.referenceImageUrl !== "string") {
+    return jsonError(
+      "INVALID_INPUT",
+      "Higgsfield DoP is image-to-video only. Pass referenceImageUrl (a publicly fetchable URL).",
+      400,
+      false,
+    );
+  }
+
+  // Normalise modelVariant: accept "dop-turbo", "dop-lite", "dop-preview".
+  // Fall back to dop-turbo for any unknown value (matches the SDK default).
+  const requested = (parsed.modelVariant ?? DEFAULT_MODEL).toLowerCase();
+  const modelVariant = HF_VALID_MODELS.has(requested) ? requested : DEFAULT_MODEL;
 
   const log = await startLog({
     provider: "higgsfield",
@@ -78,63 +104,91 @@ serve(async (req) => {
     const ctrl = new AbortController();
     const timer = setTimeout(() => ctrl.abort(), 30_000);
     try {
-      const resp = await fetch(`${HF_BASE_URL}/generate`, {
+      const resp = await fetch(`${HF_BASE_URL}/v1/image2video/dop`, {
         method: "POST",
         signal: ctrl.signal,
         headers: {
           "Content-Type": "application/json",
-          Authorization: authValue,
+          "Authorization": authValue,
+          "User-Agent": HF_USER_AGENT,
         },
         body: JSON.stringify({
-          model: modelVariant,
-          prompt: parsed.promptText,
-          ...(parsed.referenceImageUrl ? { image_url: parsed.referenceImageUrl } : {}),
+          params: {
+            model: modelVariant,
+            prompt: parsed.promptText,
+            input_images: [{ type: "image_url", image_url: parsed.referenceImageUrl }],
+            // Pass through caller-specified seed if provided (deterministic re-runs).
+            ...(typeof parsed.seed === "number" ? { seed: parsed.seed } : {}),
+          },
         }),
       });
       const text = await resp.text();
       let json: Record<string, unknown> = {};
       try { json = text ? JSON.parse(text) : {}; } catch { json = { raw: text }; }
       if (!resp.ok) {
-        return { ok: false, status: resp.status, error: (json.error as string) ?? text.slice(0, 500) };
+        // Surface enough upstream detail to debug; truncated so logs stay sane.
+        const detail = (json.detail !== undefined ? JSON.stringify(json.detail) : text).slice(0, 800);
+        return { ok: false, status: resp.status, error: detail };
       }
       return { ok: true, status: resp.status, result: json };
     } finally { clearTimeout(timer); }
-  }, 1);
+  }, 2);
 
   if (!result.ok || !result.result) {
-    const notAvail = result.status === 404 || result.status === 405 || result.status === 501 || result.status === 0;
     await finishLog(log.logId, "failed", {
       httpStatus: result.status,
-      error: notAvail ? "endpoint not available" : (result.error ?? "unknown"),
+      error: result.error ?? "unknown",
       startedAt: log.startedAt,
     });
-    if (notAvail) {
-      return jsonError(
-        "PROVIDER_NOT_AVAILABLE",
-        "Higgsfield API is not yet publicly available. Use the manual Copy Prompt workflow inside Higgsfield's UI for now.",
-        501,
-        false,
-      );
-    }
+
+    // Distinguish error types but ALWAYS surface upstream context so future
+    // failures don't get swallowed by a generic "not available" message.
     const isAuth = result.status === 401 || result.status === 403;
+    const isValidation = result.status === 400 || result.status === 422;
+    const code = isAuth
+      ? "UNAUTHORISED"
+      : isValidation
+        ? "INVALID_INPUT"
+        : "PROVIDER_API_ERROR";
+
     return jsonError(
-      isAuth ? "UNAUTHORISED" : "PROVIDER_API_ERROR",
+      code,
       `Higgsfield returned ${result.status}: ${result.error ?? "unknown"}`,
       result.status >= 400 && result.status < 600 ? result.status : 502,
-      false,
-      { providerStatus: result.status, attempts: result.attempts },
+      result.status === 429 || (result.status >= 500 && result.status < 600),
+      {
+        providerStatus: result.status,
+        attempts: result.attempts,
+        error_upstream: "higgsfield",
+        error_status: result.status,
+        error_body_excerpt: (result.error ?? "").slice(0, 500),
+      },
     );
   }
 
   const upstream = result.result as Record<string, unknown>;
+  // JobSet shape: { id, type, jobs:[{ id, status, results }], input_params }
   const providerJobId = (upstream.id as string) ?? "";
-  const status = normaliseStatus((upstream.status as string) ?? "queued");
+  const firstJob = Array.isArray(upstream.jobs) && upstream.jobs.length > 0
+    ? (upstream.jobs[0] as Record<string, unknown>)
+    : {};
+  const upstreamStatus = (firstJob.status as string) ?? "queued";
+  const status = normaliseStatus(upstreamStatus);
+
+  // Pull a result URL through if the job somehow came back already complete
+  // (unlikely for video but cheap to handle).
+  let resultUrl: string | null = null;
+  const results = firstJob.results as Record<string, unknown> | undefined;
+  if (results && typeof results === "object") {
+    const raw = results.raw as Record<string, unknown> | undefined;
+    resultUrl = (raw?.url as string) ?? null;
+  }
 
   const responseEnvelope = {
     jobId: log.requestId,
     providerJobId,
     status,
-    resultUrl: null,
+    resultUrl,
     costEstimateCents: null,
     costFinalCents: null,
     provider: "higgsfield",
@@ -142,6 +196,10 @@ serve(async (req) => {
     providerMetadata: upstream,
   };
 
-  await finishLog(log.logId, "succeeded", { httpStatus: result.status, responseJson: responseEnvelope, startedAt: log.startedAt });
+  await finishLog(log.logId, "succeeded", {
+    httpStatus: result.status,
+    responseJson: responseEnvelope,
+    startedAt: log.startedAt,
+  });
   return jsonOk(responseEnvelope);
 });

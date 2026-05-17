@@ -43,6 +43,8 @@ function stripFalMethodSuffix(modelPath: string): string {
 }
 const XAI_BASE_URL = "https://api.x.ai/v1";
 const DEFAULT_PIKA_FAL_MODEL = "fal-ai/pika/v2.2/text-to-video";
+const HIGGSFIELD_BASE_URL = "https://platform.higgsfield.ai";
+const HIGGSFIELD_USER_AGENT = "higgsfield-server-js/2.0";
 
 serve(async (req) => {
   if (req.method === "OPTIONS") return new Response(null, { headers: corsHeaders });
@@ -122,6 +124,37 @@ serve(async (req) => {
       try { upstream = text ? JSON.parse(text) : {}; } catch { upstream = { raw: text }; }
       const video = upstream.video as Record<string, unknown> | undefined;
       resultUrl = (video?.url as string) ?? null;
+    } else if (provider === "higgsfield") {
+      // Higgsfield: poll /requests/{id}/status. When completed the response
+      // carries either { video: { url } } (image2video) or { images:[{url}] }
+      // (text2image). For video clips we prefer video.url.
+      // apiKey here is HIGGSFIELD_API_KEY_ID; full Authorization needs the secret too.
+      const hfSecret = Deno.env.get("HIGGSFIELD_API_SECRET")?.trim();
+      if (!hfSecret) {
+        return jsonError(
+          "PROVIDER_KEY_NOT_CONFIGURED",
+          "HIGGSFIELD_API_SECRET not set",
+          503,
+        );
+      }
+      const hfAuth = `Key ${apiKey}:${hfSecret}`;
+      const resp = await fetch(
+        `${HIGGSFIELD_BASE_URL}/requests/${encodeURIComponent(id)}/status`,
+        {
+          headers: {
+            Authorization: hfAuth,
+            "User-Agent": HIGGSFIELD_USER_AGENT,
+          },
+        },
+      );
+      const text = await resp.text();
+      try { upstream = text ? JSON.parse(text) : {}; } catch { upstream = { raw: text }; }
+      const video = upstream.video as Record<string, unknown> | undefined;
+      const images = upstream.images as Array<Record<string, unknown>> | undefined;
+      resultUrl =
+        (video?.url as string)
+        ?? (Array.isArray(images) && images.length > 0 ? (images[0]?.url as string) : null)
+        ?? null;
     } else {
       return jsonError(
         "PROVIDER_NOT_AVAILABLE",
