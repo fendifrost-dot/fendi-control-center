@@ -24,7 +24,7 @@ import {
 
 const RUNWAY_BASE_URL = "https://api.dev.runwayml.com/v1";
 const RUNWAY_API_VERSION = "2024-11-06";
-const DEFAULT_MODEL_T2V = "gen4_aleph"; // text-to-video flagship as of 2026-05
+const DEFAULT_MODEL_T2V = "gen4.5"; // text-to-video flagship per Runway model list (probed 2026-05-17)
 const DEFAULT_MODEL_I2V = "gen4_turbo";
 const DEFAULT_DURATION = 5; // seconds
 const DEFAULT_ASPECT = "1280:720";
