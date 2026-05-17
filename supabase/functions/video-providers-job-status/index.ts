@@ -37,6 +37,12 @@ const FAL_BASE_URL = "https://queue.fal.run";
 const XAI_BASE_URL = "https://api.x.ai/v1";
 const DEFAULT_PIKA_FAL_MODEL = "fal-ai/pika/v2.2/text-to-video";
 
+/** Strip Fal method suffixes (e.g. /text-to-video) from a model path so we can
+ *  hit the queue status endpoint which is keyed off the base model id only. */
+function stripFalMethodSuffix(modelPath: string): string {
+  return modelPath.replace(/\/(text-to-video|image-to-video|video-to-video)$/i, "");
+}
+
 serve(async (req) => {
   if (req.method === "OPTIONS") return new Response(null, { headers: corsHeaders });
   if (req.method !== "GET") return jsonError("INVALID_INPUT", "Method must be GET.", 405);
@@ -80,7 +86,10 @@ serve(async (req) => {
       try { upstream = text ? JSON.parse(text) : {}; } catch { upstream = { raw: text }; }
     } else if (provider === "pika") {
       // Pika is Fal-routed: use fal-ai/pika/v2.2/* as modelPath.
-      const modelPath = url.searchParams.get("modelPath") ?? DEFAULT_PIKA_FAL_MODEL;
+      const rawModelPath = url.searchParams.get("modelPath") ?? DEFAULT_PIKA_FAL_MODEL;
+      // Fal status URLs use the BASE model id (e.g. fal-ai/pika/v2.2) — strip the
+      // text-to-video / image-to-video method suffix that the generate URL uses.
+      const modelPath = stripFalMethodSuffix(rawModelPath);
       const resp = await fetch(`${FAL_BASE_URL}/${modelPath}/requests/${encodeURIComponent(id)}/status`, {
         headers: { Authorization: `Key ${apiKey}` },
       });
@@ -88,7 +97,8 @@ serve(async (req) => {
       const text = await resp.text();
       try { upstream = text ? JSON.parse(text) : {}; } catch { upstream = { raw: text }; }
     } else if (provider === "fal") {
-      const modelPath = url.searchParams.get("modelPath") ?? "fal-ai/mochi-v1";
+      const rawFalModelPath = url.searchParams.get("modelPath") ?? "fal-ai/mochi-v1";
+      const modelPath = stripFalMethodSuffix(rawFalModelPath);
       const resp = await fetch(`${FAL_BASE_URL}/${modelPath}/requests/${encodeURIComponent(id)}/status`, {
         headers: { Authorization: `Key ${apiKey}` },
       });

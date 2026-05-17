@@ -28,6 +28,12 @@ const RUNWAY_BASE_URL = "https://api.dev.runwayml.com/v1";
 const RUNWAY_API_VERSION = "2024-11-06";
 const VEO_BASE_URL = "https://generativelanguage.googleapis.com/v1beta";
 const FAL_BASE_URL = "https://queue.fal.run";
+
+/** Strip Fal method suffixes (e.g. /text-to-video) so we hit the queue
+ *  result endpoint, which is keyed off the base model id only. */
+function stripFalMethodSuffix(modelPath: string): string {
+  return modelPath.replace(/\/(text-to-video|image-to-video|video-to-video)$/i, "");
+}
 const XAI_BASE_URL = "https://api.x.ai/v1";
 const DEFAULT_PIKA_FAL_MODEL = "fal-ai/pika/v2.2/text-to-video";
 
@@ -81,7 +87,8 @@ serve(async (req) => {
       }
     } else if (provider === "pika" || provider === "fal") {
       const defaultPath = provider === "pika" ? DEFAULT_PIKA_FAL_MODEL : "fal-ai/mochi-v1";
-      const modelPath = url.searchParams.get("modelPath") ?? defaultPath;
+      const rawModelPath = url.searchParams.get("modelPath") ?? defaultPath;
+      const modelPath = stripFalMethodSuffix(rawModelPath);
       const resp = await fetch(`${FAL_BASE_URL}/${modelPath}/requests/${encodeURIComponent(id)}`, {
         headers: { Authorization: `Key ${apiKey}` },
       });
