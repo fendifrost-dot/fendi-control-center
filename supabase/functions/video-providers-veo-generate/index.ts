@@ -1,13 +1,17 @@
 /**
  * Veo (Google) video-generation proxy.
  *
- * Uses Google's Generative AI v1beta predictLongRunning endpoint for
- * veo-3.0-generate-preview. API key reuses Control Center's existing
+ * Calls Google's Generative Language v1beta `:predictLongRunning` endpoint
+ * for veo-3.1-generate-preview. API key reuses Control Center's existing
  * `Frost_Gemini` secret (same one used by Gemini parser / OCR).
  *
  * Docs: https://ai.google.dev/gemini-api/docs/video
  *
- * Pricing is per-second on Veo; estimate is ~$0.50/sec on the GA tier.
+ * Kickoff response shape (verified 2026-05-17 via curl):
+ *   { name: "models/veo-3.1-generate-preview/operations/<id>" }
+ *
+ * Note: `numberOfVideos` is rejected by this model — do NOT include it.
+ * Pricing is per-second on Veo; estimate is ~$0.50/sec.
  */
 
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
@@ -27,20 +31,49 @@ const VEO_BASE_URL = "https://generativelanguage.googleapis.com/v1beta";
 const DEFAULT_MODEL = "veo-3.1-generate-preview";
 const DEFAULT_DURATION = 8;
 const DEFAULT_ASPECT = "16:9";
+const DEFAULT_RESOLUTION = "1080p";
+const ALLOWED_ASPECTS = new Set(["16:9", "16:10"]);
+const ALLOWED_RESOLUTIONS = new Set(["720p", "1080p"]);
 const VEO_CENTS_PER_SECOND = 50;
 
+/** Veo 3.x accepts integer seconds 4-8 inclusive. Clamp + round to range. */
 function coerceVeoDuration(d: number): number {
-  // Veo 3.x accepts integer seconds in {4, 6, 8}. Snap any other value to the closest allowed.
-  const allowed = [4, 6, 8];
-  const n = Math.max(4, Math.min(8, Math.round(d)));
-  let best = allowed[0];
-  for (const v of allowed) if (Math.abs(v - n) < Math.abs(best - n)) best = v;
-  return best;
+  if (!Number.isFinite(d)) return DEFAULT_DURATION;
+  return Math.max(4, Math.min(8, Math.round(d)));
 }
 
+function coerceAspect(a: string | undefined): string {
+  if (!a) return DEFAULT_ASPECT;
+  return ALLOWED_ASPECTS.has(a) ? a : DEFAULT_ASPECT;
+}
+
+function coerceResolution(r: string | undefined): string {
+  if (!r) return DEFAULT_RESOLUTION;
+  return ALLOWED_RESOLUTIONS.has(r) ? r : DEFAULT_RESOLUTION;
+}
 
 function estimateCostCents(_model: string, durationSeconds: number): number {
   return Math.round(VEO_CENTS_PER_SECOND * durationSeconds);
+}
+
+/** Best-effort fetch + base64 of a reference image URL for image-to-video.
+ *  Veo expects { image: { bytesBase64Encoded, mimeType } }. */
+async function fetchImageAsBase64(
+  imageUrl: string,
+): Promise<{ bytesBase64Encoded: string; mimeType: string } | null> {
+  try {
+    const resp = await fetch(imageUrl);
+    if (!resp.ok) return null;
+    const buf = new Uint8Array(await resp.arrayBuffer());
+    const mimeType = resp.headers.get("content-type") ?? "image/png";
+    // Stream-based base64 to avoid call-stack overflow on large images.
+    const { encodeBase64 } = await import(
+      "https://deno.land/std@0.224.0/encoding/base64.ts"
+    );
+    return { bytesBase64Encoded: encodeBase64(buf), mimeType };
+  } catch {
+    return null;
+  }
 }
 
 serve(async (req) => {
@@ -70,16 +103,17 @@ serve(async (req) => {
   if ("error" in parsed) return jsonError("INVALID_INPUT", parsed.error, 400);
 
   const mode = parsed.mode ?? (parsed.referenceImageUrl ? "image_to_video" : "text_to_video");
-  if (mode === "lipsync" && !parsed.referenceVideoUrl) {
+  if (mode === "lipsync") {
     return jsonError(
       "INVALID_INPUT",
-      "lipsync mode requires referenceVideoUrl",
+      "lipsync mode is not supported on Veo.",
       400,
     );
   }
   const modelVariant = parsed.modelVariant ?? DEFAULT_MODEL;
-  const duration = parsed.duration ?? DEFAULT_DURATION;
-  const aspectRatio = parsed.aspectRatio ?? DEFAULT_ASPECT;
+  const duration = coerceVeoDuration(parsed.duration ?? DEFAULT_DURATION);
+  const aspectRatio = coerceAspect(parsed.aspectRatio);
+  const resolution = coerceResolution((parsed as Record<string, unknown>).resolution as string | undefined);
   const costEstimateCents = estimateCostCents(modelVariant, duration);
 
   const log = await startLog({
@@ -94,32 +128,38 @@ serve(async (req) => {
     modelVariant,
     promptText: parsed.promptText,
     referenceImageUrl: parsed.referenceImageUrl,
-    extraArgs: { mode, duration, aspectRatio, costEstimateCents },
+    extraArgs: { mode, duration, aspectRatio, resolution, costEstimateCents },
   });
 
-  // Map to Veo's predictLongRunning shape.
-  const instances: Record<string, unknown>[] = [
-    {
-      prompt: parsed.promptText,
-      ...(mode === "image_to_video" && parsed.referenceImageUrl
-        ? {
-            image: {
-              gcsUri: undefined,
-              imageBytes: undefined,
-              uri: parsed.referenceImageUrl,
-            },
-          }
-        : {}),
-    },
-  ];
+  // Build the instance. Image-to-video adds an `image` field with base64 bytes.
+  const instance: Record<string, unknown> = { prompt: parsed.promptText };
+  if (mode === "image_to_video" && parsed.referenceImageUrl) {
+    const img = await fetchImageAsBase64(parsed.referenceImageUrl);
+    if (!img) {
+      await finishLog(log.logId, "failed", {
+        httpStatus: 400,
+        error: "could not fetch reference image",
+        startedAt: log.startedAt,
+      });
+      return jsonError(
+        "INVALID_INPUT",
+        `Could not fetch reference image at ${parsed.referenceImageUrl}.`,
+        400,
+      );
+    }
+    instance.image = img;
+  }
+
+  const instances: Record<string, unknown>[] = [instance];
   const parameters: Record<string, unknown> = {
     aspectRatio,
-    durationSeconds: coerceVeoDuration(duration),
+    durationSeconds: duration,
     personGeneration: "allow_all",
+    resolution,
   };
   if (typeof parsed.seed === "number") parameters.seed = parsed.seed;
 
-  const url = `${VEO_BASE_URL}/models/${encodeURIComponent(modelVariant)}:predictLongRunning?key=${encodeURIComponent(apiKey)}`;
+  const url = `${VEO_BASE_URL}/models/${encodeURIComponent(modelVariant)}:predictLongRunning`;
 
   const result = await withRetry(async () => {
     const ctrl = new AbortController();
@@ -128,7 +168,10 @@ serve(async (req) => {
       const resp = await fetch(url, {
         method: "POST",
         signal: ctrl.signal,
-        headers: { "Content-Type": "application/json" },
+        headers: {
+          "Content-Type": "application/json",
+          "x-goog-api-key": apiKey,
+        },
         body: JSON.stringify({ instances, parameters }),
       });
       const text = await resp.text();
@@ -169,6 +212,10 @@ serve(async (req) => {
   }
 
   const upstream = result.result as Record<string, unknown>;
+  // Operation name is fully qualified, e.g.
+  //   "models/veo-3.1-generate-preview/operations/s32li62yjvff"
+  // Store this exact string as providerJobId so the status/result functions
+  // can pass it straight back to the /v1beta/{name} endpoint.
   const providerJobId = (upstream.name as string) ?? "";
   const upstreamStatus = upstream.done ? "succeeded" : "running";
   const status = normaliseStatus(upstreamStatus);

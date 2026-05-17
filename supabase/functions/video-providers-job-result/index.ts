@@ -84,15 +84,34 @@ serve(async (req) => {
       const output = upstream.output as unknown;
       if (Array.isArray(output) && typeof output[0] === "string") resultUrl = output[0];
     } else if (provider === "veo") {
-      const opUrl = `${VEO_BASE_URL}/${id}?key=${encodeURIComponent(apiKey)}`;
-      const resp = await fetch(opUrl);
+      const opName = id.startsWith("/") ? id.slice(1) : id;
+      const opUrl = `${VEO_BASE_URL}/${opName}`;
+      const resp = await fetch(opUrl, {
+        headers: { "x-goog-api-key": apiKey },
+      });
       const text = await resp.text();
       try { upstream = text ? JSON.parse(text) : {}; } catch { upstream = { raw: text }; }
+      // Verified shape (2026-05-17 curl):
+      //   response.generateVideoResponse.generatedSamples[0].video.uri
+      // The URI is a Generative-Language files/ resource:
+      //   https://generativelanguage.googleapis.com/v1beta/files/<id>:download?alt=media
+      // It requires the x-goog-api-key header to download bytes (handled
+      // below when inline=1).
       const responseField = upstream.response as Record<string, unknown> | undefined;
-      const predictions = responseField?.predictions as unknown;
-      if (Array.isArray(predictions) && predictions.length > 0) {
-        const p = predictions[0] as Record<string, unknown>;
-        resultUrl = (p.videoUri as string) ?? (p.uri as string) ?? null;
+      const gvr = responseField?.generateVideoResponse as Record<string, unknown> | undefined;
+      const samples = (gvr?.generatedSamples
+        ?? responseField?.generatedSamples) as unknown;
+      if (Array.isArray(samples) && samples.length > 0) {
+        const s = samples[0] as Record<string, unknown>;
+        const v = s.video as Record<string, unknown> | undefined;
+        resultUrl = (v?.uri as string) ?? (v?.url as string) ?? null;
+      }
+      if (!resultUrl) {
+        const predictions = responseField?.predictions as unknown;
+        if (Array.isArray(predictions) && predictions.length > 0) {
+          const p = predictions[0] as Record<string, unknown>;
+          resultUrl = (p.videoUri as string) ?? (p.uri as string) ?? null;
+        }
       }
     } else if (provider === "pika" || provider === "fal") {
       const defaultPath = provider === "pika" ? DEFAULT_PIKA_FAL_MODEL : "fal-ai/mochi-v1";
@@ -164,14 +183,21 @@ serve(async (req) => {
     }
 
     if (!resultUrl) {
-      // Surface enough of the upstream response to diagnose extraction failures
-      // (different providers use different keys for the video URL).
+      // Surface enough of the upstream response to diagnose extraction
+      // failures (different providers nest the video URL in different keys).
       const upstreamKeys = Object.keys(upstream as Record<string, unknown>).slice(0, 12).join(",");
-      const upstreamSnippet = JSON.stringify(upstream).slice(0, 600);
+      const upstreamSnippet = JSON.stringify(upstream).slice(0, 800);
       return jsonError(
         "PROVIDER_API_ERROR",
-        `Result not yet available — could not extract resultUrl from upstream. keys=[${upstreamKeys}] body=${upstreamSnippet}`,
+        `Result not yet available — could not extract resultUrl from upstream.`,
         425,
+        false,
+        {
+          error_upstream: provider,
+          error_status: "no_result_url",
+          error_keys: upstreamKeys,
+          error_body_excerpt: upstreamSnippet,
+        },
       );
     }
 
@@ -179,7 +205,13 @@ serve(async (req) => {
       return jsonOk({ provider, providerJobId: id, resultUrl, providerMetadata: upstream });
     }
 
-    const dl = await fetch(resultUrl);
+    // Veo files/ download URIs require the API key header to authorise the
+    // download. Other providers serve unauthenticated CDN URLs.
+    const dlHeaders: Record<string, string> = {};
+    if (provider === "veo" && resultUrl.includes("generativelanguage.googleapis.com")) {
+      dlHeaders["x-goog-api-key"] = apiKey;
+    }
+    const dl = await fetch(resultUrl, { headers: dlHeaders });
     if (!dl.ok) {
       return jsonError("PROVIDER_API_ERROR", `Failed to download from resultUrl: ${dl.status}`, 502, true);
     }
