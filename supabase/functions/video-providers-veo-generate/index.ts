@@ -24,10 +24,20 @@ import {
 } from "../_shared/video-providers/proxy.ts";
 
 const VEO_BASE_URL = "https://generativelanguage.googleapis.com/v1beta";
-const DEFAULT_MODEL = "veo-3.0-generate-preview";
+const DEFAULT_MODEL = "veo-3.1-generate-preview";
 const DEFAULT_DURATION = 8;
 const DEFAULT_ASPECT = "16:9";
 const VEO_CENTS_PER_SECOND = 50;
+
+function coerceVeoDuration(d: number): number {
+  // Veo 3.x accepts integer seconds in {4, 6, 8}. Snap any other value to the closest allowed.
+  const allowed = [4, 6, 8];
+  const n = Math.max(4, Math.min(8, Math.round(d)));
+  let best = allowed[0];
+  for (const v of allowed) if (Math.abs(v - n) < Math.abs(best - n)) best = v;
+  return best;
+}
+
 
 function estimateCostCents(_model: string, durationSeconds: number): number {
   return Math.round(VEO_CENTS_PER_SECOND * durationSeconds);
@@ -104,8 +114,8 @@ serve(async (req) => {
   ];
   const parameters: Record<string, unknown> = {
     aspectRatio,
-    durationSeconds: duration,
-    personGeneration: "allow_adult",
+    durationSeconds: coerceVeoDuration(duration),
+    personGeneration: "allow_all",
   };
   if (typeof parsed.seed === "number") parameters.seed = parsed.seed;
 

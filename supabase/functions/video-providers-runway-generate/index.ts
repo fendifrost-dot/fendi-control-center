@@ -24,15 +24,40 @@ import {
 
 const RUNWAY_BASE_URL = "https://api.dev.runwayml.com/v1";
 const RUNWAY_API_VERSION = "2024-11-06";
-const DEFAULT_MODEL = "gen3a_turbo";
+const DEFAULT_MODEL = "gen4_turbo";
 const DEFAULT_DURATION = 5; // seconds
-const DEFAULT_ASPECT = "16:9";
+const DEFAULT_ASPECT = "1280:720";
 
 // Per-second pricing — keep as a constant we can update without touching call sites.
 const RUNWAY_CENTS_PER_SECOND_BY_MODEL: Record<string, number> = {
   gen3a_turbo: 5,
   gen3a: 10,
+  gen4_turbo: 5,
+  gen4: 12,
 };
+
+const RATIO_MAP_GEN4: Record<string, string> = {
+  "16:9": "1280:720",
+  "9:16": "720:1280",
+  "1:1": "960:960",
+  "4:3": "1104:832",
+  "3:4": "832:1104",
+  "21:9": "1584:672",
+};
+
+function coerceRunwayRatio(modelVariant: string, ratio: string): string {
+  // gen4 wants pixel ratios (e.g. "1280:720"); if a friendly ratio (16:9, 9:16, ...) sneaks in, map it.
+  if (modelVariant.startsWith("gen4")) {
+    if (/^\d+:\d+$/.test(ratio) && ratio.split(":").every(n => Number(n) >= 256)) return ratio;
+    return RATIO_MAP_GEN4[ratio] ?? "1280:720";
+  }
+  return ratio;
+}
+
+function coerceRunwayDuration(d: number): number {
+  // Runway gen4_turbo accepts 5 or 10 only.
+  return d >= 8 ? 10 : 5;
+}
 
 function estimateCostCents(model: string, durationSeconds: number): number {
   const rate = RUNWAY_CENTS_PER_SECOND_BY_MODEL[model] ?? 5;
@@ -102,11 +127,13 @@ serve(async (req) => {
       ? `${RUNWAY_BASE_URL}/image_to_video`
       : `${RUNWAY_BASE_URL}/text_to_video`;
 
+  const coercedRatio = coerceRunwayRatio(modelVariant, aspectRatio);
+  const coercedDuration = coerceRunwayDuration(duration);
   const runwayBody: Record<string, unknown> = {
     model: modelVariant,
     promptText: parsed.promptText,
-    duration,
-    ratio: aspectRatio,
+    duration: coercedDuration,
+    ratio: coercedRatio,
   };
   if (mode === "image_to_video") {
     runwayBody.promptImage = parsed.referenceImageUrl;
@@ -138,7 +165,7 @@ serve(async (req) => {
         return {
           ok: false,
           status: resp.status,
-          error: (json.error as string) ?? text.slice(0, 500),
+          error: typeof json.error === "string" ? json.error : (text || "unknown").slice(0, 800),
         };
       }
       return { ok: true, status: resp.status, result: json };
