@@ -24,7 +24,8 @@ import {
 
 const RUNWAY_BASE_URL = "https://api.dev.runwayml.com/v1";
 const RUNWAY_API_VERSION = "2024-11-06";
-const DEFAULT_MODEL = "gen4_turbo";
+const DEFAULT_MODEL_T2V = "gen4_aleph"; // text-to-video flagship as of 2026-05
+const DEFAULT_MODEL_I2V = "gen4_turbo";
 const DEFAULT_DURATION = 5; // seconds
 const DEFAULT_ASPECT = "1280:720";
 
@@ -34,6 +35,10 @@ const RUNWAY_CENTS_PER_SECOND_BY_MODEL: Record<string, number> = {
   gen3a: 10,
   gen4_turbo: 5,
   gen4: 12,
+  gen4_aleph: 12,
+  "gen4.5": 15,
+  gen4_image: 5,
+  gen4_image_turbo: 3,
 };
 
 const RATIO_MAP_GEN4: Record<string, string> = {
@@ -101,7 +106,7 @@ serve(async (req) => {
     );
   }
 
-  const modelVariant = parsed.modelVariant ?? DEFAULT_MODEL;
+  const modelVariant = parsed.modelVariant ?? (mode === "image_to_video" ? DEFAULT_MODEL_I2V : DEFAULT_MODEL_T2V);
   const duration = parsed.duration ?? DEFAULT_DURATION;
   const aspectRatio = parsed.aspectRatio ?? DEFAULT_ASPECT;
   const costEstimateCents = estimateCostCents(modelVariant, duration);
@@ -162,10 +167,15 @@ serve(async (req) => {
         json = { raw: text };
       }
       if (!resp.ok) {
+        // Surface the FULL upstream body so callers can see Runway's validation details
+        // (e.g. which field failed). Runway returns {"error":"..."} but the field-level
+        // problem only shows up in the raw text or other JSON keys.
+        const summary = typeof json.error === "string" ? json.error : "unknown";
+        const fullRaw = (text || "").slice(0, 800);
         return {
           ok: false,
           status: resp.status,
-          error: typeof json.error === "string" ? json.error : (text || "unknown").slice(0, 800),
+          error: `${summary} | raw: ${fullRaw}`,
         };
       }
       return { ok: true, status: resp.status, result: json };
