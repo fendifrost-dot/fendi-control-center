@@ -4,6 +4,11 @@
  * AVT polls this with: GET /video-providers-job-status?provider=runway&id=<providerJobId>
  * Returns the normalised envelope with the latest status. When status =
  * succeeded the resultUrl is populated.
+ *
+ * Pika is now routed through Fal (see video-providers-pika-generate). The
+ * upstream `providerMetadata._falModel` from the original generate call
+ * tells us which fal model path to poll. Callers can also pass
+ * `?modelPath=fal-ai/pika/v2.2/text-to-video`.
  */
 
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
@@ -19,7 +24,7 @@ import {
 const PROVIDER_KEY_BY_NAME: Record<ProviderName, string> = {
   runway: "RUNWAY_API_KEY",
   veo: "Frost_Gemini",
-  pika: "PIKA_API_KEY",
+  pika: "FAL_API_KEY", // Pika is now Fal-routed.
   fal: "FAL_API_KEY",
   grok: "Frost_Grok",
   higgsfield: "HIGGSFIELD_API_KEY_ID", // ID-only check; full Key+Secret used by generate fn
@@ -28,8 +33,9 @@ const PROVIDER_KEY_BY_NAME: Record<ProviderName, string> = {
 const RUNWAY_BASE_URL = "https://api.dev.runwayml.com/v1";
 const RUNWAY_API_VERSION = "2024-11-06";
 const VEO_BASE_URL = "https://generativelanguage.googleapis.com/v1beta";
-const PIKA_BASE_URL = "https://api.pika.art/v1";
 const FAL_BASE_URL = "https://queue.fal.run";
+const XAI_BASE_URL = "https://api.x.ai/v1";
+const DEFAULT_PIKA_FAL_MODEL = "fal-ai/pika/v2.2/text-to-video";
 
 serve(async (req) => {
   if (req.method === "OPTIONS") return new Response(null, { headers: corsHeaders });
@@ -67,15 +73,16 @@ serve(async (req) => {
       const text = await resp.text();
       try { upstream = text ? JSON.parse(text) : {}; } catch { upstream = { raw: text }; }
     } else if (provider === "veo") {
-      // `id` is the long-running operation name returned by predictLongRunning.
       const opUrl = `${VEO_BASE_URL}/${id}?key=${encodeURIComponent(apiKey)}`;
       const resp = await fetch(opUrl);
       httpStatus = resp.status;
       const text = await resp.text();
       try { upstream = text ? JSON.parse(text) : {}; } catch { upstream = { raw: text }; }
     } else if (provider === "pika") {
-      const resp = await fetch(`${PIKA_BASE_URL}/jobs/${encodeURIComponent(id)}`, {
-        headers: { Authorization: `Bearer ${apiKey}` },
+      // Pika is Fal-routed: use fal-ai/pika/v2.2/* as modelPath.
+      const modelPath = url.searchParams.get("modelPath") ?? DEFAULT_PIKA_FAL_MODEL;
+      const resp = await fetch(`${FAL_BASE_URL}/${modelPath}/requests/${encodeURIComponent(id)}/status`, {
+        headers: { Authorization: `Key ${apiKey}` },
       });
       httpStatus = resp.status;
       const text = await resp.text();
@@ -88,11 +95,17 @@ serve(async (req) => {
       httpStatus = resp.status;
       const text = await resp.text();
       try { upstream = text ? JSON.parse(text) : {}; } catch { upstream = { raw: text }; }
-    } else if (provider === "grok" || provider === "higgsfield") {
-      // Polling not available until the API is open. Return PROVIDER_NOT_AVAILABLE.
+    } else if (provider === "grok") {
+      const resp = await fetch(`${XAI_BASE_URL}/videos/${encodeURIComponent(id)}`, {
+        headers: { Authorization: `Bearer ${apiKey}` },
+      });
+      httpStatus = resp.status;
+      const text = await resp.text();
+      try { upstream = text ? JSON.parse(text) : {}; } catch { upstream = { raw: text }; }
+    } else if (provider === "higgsfield") {
       return jsonError(
         "PROVIDER_NOT_AVAILABLE",
-        `${provider} status polling is not yet available — the upstream API is gated.`,
+        "Higgsfield polling not wired yet — generate function holds the request_id until its own status helper lands.",
         501,
         false,
       );
@@ -118,17 +131,27 @@ serve(async (req) => {
           resultUrl = (p.videoUri as string) ?? (p.uri as string) ?? null;
         }
       }
-    } else if (provider === "pika") {
-      status = normaliseStatus(upstream.status as string);
-      if (status === "succeeded") {
-        resultUrl = (upstream.video_url as string) ?? (upstream.url as string) ?? null;
-      }
-    } else if (provider === "fal") {
-      status = normaliseStatus(upstream.status as string);
+    } else if (provider === "pika" || provider === "fal") {
+      // Fal status semantics: IN_QUEUE, IN_PROGRESS, COMPLETED, FAILED, etc.
+      const raw = String(upstream.status ?? "").toLowerCase();
+      if (raw === "completed") status = "succeeded";
+      else if (raw === "failed" || raw === "cancelled") status = "failed";
+      else if (raw === "in_progress" || raw === "running") status = "running";
+      else status = "queued";
       if (status === "succeeded") {
         const out = upstream.response as Record<string, unknown> | undefined;
         const video = (out?.video as Record<string, unknown> | undefined) ?? undefined;
         resultUrl = (video?.url as string) ?? (out?.video_url as string) ?? null;
+      }
+    } else if (provider === "grok") {
+      // xAI semantics: pending | done | failed | expired
+      const raw = String(upstream.status ?? "").toLowerCase();
+      if (raw === "done") status = "succeeded";
+      else if (raw === "failed" || raw === "expired") status = "failed";
+      else status = "running";
+      if (status === "succeeded") {
+        const video = upstream.video as Record<string, unknown> | undefined;
+        resultUrl = (video?.url as string) ?? null;
       }
     }
 

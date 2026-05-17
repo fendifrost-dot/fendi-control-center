@@ -1,15 +1,16 @@
 /**
  * Grok (xAI) video-generation proxy.
  *
- * xAI's Grok Imagine clip generation API is invite-gated as of May 2026.
- * The xAI image generation API (text-to-image) IS publicly available via
- * https://api.x.ai/v1, but video clip generation is not.
+ * xAI's Grok Imagine clip generation API is publicly available as of
+ * May 2026 via https://api.x.ai/v1/videos/generations.
+ * (See https://docs.x.ai/developers/model-capabilities/video/generation)
  *
- * Strategy:
- *   - If `Frost_Grok` is configured we attempt the video endpoint anyway,
- *     but if xAI returns 404 / not_found we surface PROVIDER_NOT_AVAILABLE
- *     with a clear "use manual workflow" message that AVT renders gracefully.
- *   - If the key is missing, we surface PROVIDER_KEY_NOT_CONFIGURED.
+ * Flow is async:
+ *   1. POST /v1/videos/generations  -> { request_id }
+ *   2. Poll GET /v1/videos/<request_id>  -> { status: pending|done|failed|expired, video: {url, duration, ...} }
+ *
+ * This function handles step 1 and returns the request_id as providerJobId.
+ * AVT then polls via video-providers-job-status (?provider=grok&id=...).
  */
 
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
@@ -26,7 +27,12 @@ import {
 } from "../_shared/video-providers/proxy.ts";
 
 const XAI_BASE_URL = "https://api.x.ai/v1";
-const DEFAULT_MODEL = "grok-imagine-1";
+const DEFAULT_MODEL = "grok-imagine-video";
+const DEFAULT_DURATION = 5;
+const DEFAULT_RESOLUTION = "720p";
+// Cost estimate per generation in cents — placeholder until real pricing
+// lands (xAI exposes pricing on /developers/pricing).
+const GROK_CENTS_PER_GENERATION = 60;
 
 serve(async (req) => {
   if (req.method === "OPTIONS") return new Response(null, { headers: corsHeaders });
@@ -53,6 +59,13 @@ serve(async (req) => {
   if ("error" in parsed) return jsonError("INVALID_INPUT", parsed.error, 400);
 
   const modelVariant = parsed.modelVariant ?? DEFAULT_MODEL;
+  const mode = parsed.mode ?? (parsed.referenceImageUrl ? "image_to_video" : "text_to_video");
+  const duration = Math.max(1, Math.min(15, parsed.duration ?? DEFAULT_DURATION));
+  const aspect_ratio = parsed.aspectRatio ?? "16:9";
+  const resolution =
+    typeof (parsed.settings as Record<string, unknown> | undefined)?.resolution === "string"
+      ? ((parsed.settings as Record<string, unknown>).resolution as string)
+      : DEFAULT_RESOLUTION;
 
   const log = await startLog({
     provider: "grok",
@@ -66,80 +79,86 @@ serve(async (req) => {
     modelVariant,
     promptText: parsed.promptText,
     referenceImageUrl: parsed.referenceImageUrl,
-    extraArgs: { mode: parsed.mode ?? "text_to_video" },
+    extraArgs: { mode, duration, aspect_ratio, resolution },
   });
 
-  // Best-effort attempt against the (hypothetical) Grok video endpoint.
+  const xaiBody: Record<string, unknown> = {
+    model: modelVariant,
+    prompt: parsed.promptText,
+    duration,
+    aspect_ratio,
+    resolution,
+  };
+  if (mode === "image_to_video" && parsed.referenceImageUrl) {
+    xaiBody.image = parsed.referenceImageUrl;
+  }
+
   const result = await withRetry(async () => {
     const ctrl = new AbortController();
     const timer = setTimeout(() => ctrl.abort(), 30_000);
     try {
-      const resp = await fetch(`${XAI_BASE_URL}/video/generations`, {
+      const resp = await fetch(`${XAI_BASE_URL}/videos/generations`, {
         method: "POST",
         signal: ctrl.signal,
         headers: {
           "Content-Type": "application/json",
           Authorization: `Bearer ${apiKey}`,
         },
-        body: JSON.stringify({
-          model: modelVariant,
-          prompt: parsed.promptText,
-          ...(parsed.referenceImageUrl ? { image_url: parsed.referenceImageUrl } : {}),
-        }),
+        body: JSON.stringify(xaiBody),
       });
       const text = await resp.text();
       let json: Record<string, unknown> = {};
       try { json = text ? JSON.parse(text) : {}; } catch { json = { raw: text }; }
       if (!resp.ok) {
-        return { ok: false, status: resp.status, error: (json.error as string) ?? text.slice(0, 500) };
+        const errObj = (json.error as Record<string, unknown> | undefined) ?? null;
+        const message =
+          (errObj?.message as string) ??
+          (json.detail as string) ??
+          (json.error as string) ??
+          text.slice(0, 500);
+        return { ok: false, status: resp.status, error: message };
       }
       return { ok: true, status: resp.status, result: json };
     } finally { clearTimeout(timer); }
-  }, 1); // Don't retry — endpoint may simply not exist yet.
+  });
 
   if (!result.ok || !result.result) {
-    // 404 / 405 / 501 => the endpoint isn't open. Surface as a 501 with clear
-    // instructions for AVT to render a "manual workflow only" banner.
-    const notAvail = result.status === 404 || result.status === 405 || result.status === 501;
     await finishLog(log.logId, "failed", {
       httpStatus: result.status,
-      error: notAvail ? "endpoint not available" : (result.error ?? "unknown"),
+      error: result.error ?? "unknown",
       startedAt: log.startedAt,
     });
-    if (notAvail) {
-      return jsonError(
-        "PROVIDER_NOT_AVAILABLE",
-        "Grok Imagine clip generation API is not yet publicly available. Use the manual Copy Prompt workflow inside Grok's UI for now.",
-        501,
-        false,
-      );
-    }
     const isAuth = result.status === 401 || result.status === 403;
     return jsonError(
       isAuth ? "UNAUTHORISED" : "PROVIDER_API_ERROR",
       `Grok returned ${result.status}: ${result.error ?? "unknown"}`,
       result.status >= 400 && result.status < 600 ? result.status : 502,
-      false,
+      result.status === 429 || (result.status >= 500 && result.status < 600),
       { providerStatus: result.status, attempts: result.attempts },
     );
   }
 
   const upstream = result.result as Record<string, unknown>;
-  const providerJobId = (upstream.id as string) ?? "";
-  const status = normaliseStatus((upstream.status as string) ?? "queued");
+  // xAI returns { request_id } on submit.
+  const providerJobId = (upstream.request_id as string) ?? (upstream.id as string) ?? "";
+  const status = normaliseStatus("queued");
 
   const responseEnvelope = {
     jobId: log.requestId,
     providerJobId,
     status,
     resultUrl: null,
-    costEstimateCents: null,
+    costEstimateCents: GROK_CENTS_PER_GENERATION,
     costFinalCents: null,
     provider: "grok",
     modelVariant,
     providerMetadata: upstream,
   };
 
-  await finishLog(log.logId, "succeeded", { httpStatus: result.status, responseJson: responseEnvelope, startedAt: log.startedAt });
+  await finishLog(log.logId, "succeeded", {
+    httpStatus: result.status,
+    responseJson: responseEnvelope,
+    startedAt: log.startedAt,
+  });
   return jsonOk(responseEnvelope);
 });
