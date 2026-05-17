@@ -102,7 +102,18 @@ serve(async (req) => {
       const text = await resp.text();
       try { upstream = text ? JSON.parse(text) : {}; } catch { upstream = { raw: text }; }
       const video = upstream.video as Record<string, unknown> | undefined;
-      resultUrl = (video?.url as string) ?? (upstream.video_url as string) ?? null;
+      // Try the common shapes. Fal models vary: mochi-v1 returns {video:{url}},
+      // Pika returns {video:{url}}, some return {output_url}, {clips:[{url}]} etc.
+      const clips = upstream.clips as Array<Record<string, unknown>> | undefined;
+      const outputArr = upstream.output as Array<unknown> | undefined;
+      resultUrl =
+        (video?.url as string)
+        ?? (upstream.video_url as string)
+        ?? (upstream.output_url as string)
+        ?? (clips?.[0]?.url as string)
+        ?? (Array.isArray(outputArr) && typeof outputArr[0] === "string" ? (outputArr[0] as string) : null)
+        ?? (Array.isArray(outputArr) && outputArr[0] && typeof outputArr[0] === "object" && (outputArr[0] as Record<string, unknown>).url ? ((outputArr[0] as Record<string, unknown>).url as string) : null)
+        ?? null;
     } else if (provider === "grok") {
       const resp = await fetch(`${XAI_BASE_URL}/videos/${encodeURIComponent(id)}`, {
         headers: { Authorization: `Bearer ${apiKey}` },
@@ -120,7 +131,15 @@ serve(async (req) => {
     }
 
     if (!resultUrl) {
-      return jsonError("PROVIDER_API_ERROR", "Result not yet available — job may still be running.", 425);
+      // Surface enough of the upstream response to diagnose extraction failures
+      // (different providers use different keys for the video URL).
+      const upstreamKeys = Object.keys(upstream as Record<string, unknown>).slice(0, 12).join(",");
+      const upstreamSnippet = JSON.stringify(upstream).slice(0, 600);
+      return jsonError(
+        "PROVIDER_API_ERROR",
+        `Result not yet available — could not extract resultUrl from upstream. keys=[${upstreamKeys}] body=${upstreamSnippet}`,
+        425,
+      );
     }
 
     if (!inline) {
