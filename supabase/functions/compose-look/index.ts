@@ -51,7 +51,7 @@ type Body = {
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
   "Access-Control-Allow-Headers":
-    "authorization, x-client-info, apikey, content-type, x-internal-proxy-secret",
+    "authorization, x-client-info, apikey, content-type, x-proxy-secret",
   "Access-Control-Allow-Methods": "POST, OPTIONS",
 };
 
@@ -70,7 +70,7 @@ serve(async (req) => {
   const proxySecret = Deno.env.get("COMPOSE_LOOK_PROXY_SECRET") ?? "";
   if (!falKey || !proxySecret) return json(500, { error: "server_misconfigured" });
 
-  const headerSecret = req.headers.get("x-internal-proxy-secret") ?? "";
+  const headerSecret = req.headers.get("x-proxy-secret") ?? "";
   if (!constantTimeEqual(headerSecret, proxySecret)) {
     return json(401, { error: "bad_proxy_secret" });
   }
