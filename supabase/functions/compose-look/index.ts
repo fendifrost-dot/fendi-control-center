@@ -124,7 +124,7 @@ serve(async (req) => {
       imageUrls.push(...propFal);
       const compose = await callFalSeedreamEdit(falKey, {
         prompt: buildComposePrompt(recipe.basePrompt, recipe.stylingNotes, wardrobeLabels, jewelryLabels, !!urls.location),
-        imageUrls: imageUrls.slice(0, 10),
+        imageUrls: imageUrls.slice(0, 7),
       });
       stages.push({ stage: "seedream_edit", request_id: compose.request_id, image_url: compose.image_url });
       costCents += 4;
@@ -143,7 +143,7 @@ serve(async (req) => {
       if (imageUrls.length === 0) return json(400, { error: "no_references_provided" });
       const compose = await callFalSeedreamEdit(falKey, {
         prompt: buildComposePrompt(recipe.basePrompt, recipe.stylingNotes, wardrobeLabels, jewelryLabels, !!urls.location),
-        imageUrls: imageUrls.slice(0, 10),
+        imageUrls: imageUrls.slice(0, 7),
       });
       stages.push({ stage: "seedream_edit", request_id: compose.request_id, image_url: compose.image_url });
       costCents += 4;
