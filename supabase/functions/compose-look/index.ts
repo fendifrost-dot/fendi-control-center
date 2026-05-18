@@ -203,7 +203,7 @@ async function uploadToFalStorage(apiKey: string, sourceUrl: string): Promise<st
   const initResp = await fetch("https://rest.alpha.fal.ai/storage/upload/initiate", {
     method: "POST",
     headers: { Authorization: `Key ${apiKey}`, "Content-Type": "application/json" },
-    body: JSON.stringify({ content_type: contentType, file_name: `ref.${ext}` }),
+    body: JSON.stringify({ content_type: contentType, file_name: `ref_${Date.now()}_${Math.random().toString(36).slice(2,8)}.${ext}` }),
   });
   if (!initResp.ok) throw new Error(`fal_init_${initResp.status}`);
   const init = await initResp.json();
