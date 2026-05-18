@@ -115,9 +115,13 @@ serve(async (req) => {
       stages.push({ stage: "flux_lora", request_id: lora.request_id, image_url: lora.image_url });
       costCents += 3;
 
-      const imageUrls = [lora.image_url, ...wardrobeUrls, ...jewelryUrls];
-      if (urls.location) imageUrls.push(urls.location);
-      imageUrls.push(...propUrls);
+      const wardrobeFal = await rehostUrls(falKey, wardrobeUrls);
+      const jewelryFal = await rehostUrls(falKey, jewelryUrls);
+      const propFal = await rehostUrls(falKey, propUrls);
+      const locationFal = urls.location ? await uploadToFalStorage(falKey, urls.location) : null;
+      const imageUrls = [lora.image_url, ...wardrobeFal, ...jewelryFal];
+      if (locationFal) imageUrls.push(locationFal);
+      imageUrls.push(...propFal);
       const compose = await callFalSeedreamEdit(falKey, {
         prompt: buildComposePrompt(recipe.basePrompt, recipe.stylingNotes, wardrobeLabels, jewelryLabels, !!urls.location),
         imageUrls: imageUrls.slice(0, 10),
@@ -127,10 +131,15 @@ serve(async (req) => {
       finalImageUrl = compose.image_url;
     } else if (pipeline === "seedream_only") {
       const imageUrls: string[] = [];
-      if (urls.face) imageUrls.push(urls.face);
-      imageUrls.push(...wardrobeUrls, ...jewelryUrls);
-      if (urls.location) imageUrls.push(urls.location);
-      imageUrls.push(...propUrls);
+      const wardrobeFalB = await rehostUrls(falKey, wardrobeUrls);
+      const jewelryFalB = await rehostUrls(falKey, jewelryUrls);
+      const propFalB = await rehostUrls(falKey, propUrls);
+      const locationFalB = urls.location ? await uploadToFalStorage(falKey, urls.location) : null;
+      const faceFalB = urls.face ? await uploadToFalStorage(falKey, urls.face) : null;
+      if (faceFalB) imageUrls.push(faceFalB);
+      imageUrls.push(...wardrobeFalB, ...jewelryFalB);
+      if (locationFalB) imageUrls.push(locationFalB);
+      imageUrls.push(...propFalB);
       if (imageUrls.length === 0) return json(400, { error: "no_references_provided" });
       const compose = await callFalSeedreamEdit(falKey, {
         prompt: buildComposePrompt(recipe.basePrompt, recipe.stylingNotes, wardrobeLabels, jewelryLabels, !!urls.location),
@@ -141,10 +150,15 @@ serve(async (req) => {
       finalImageUrl = compose.image_url;
     } else {
       const imageUrls: string[] = [];
-      if (urls.face) imageUrls.push(urls.face);
-      imageUrls.push(...wardrobeUrls, ...jewelryUrls);
-      if (urls.location) imageUrls.push(urls.location);
-      imageUrls.push(...propUrls);
+      const wardrobeFalC = await rehostUrls(falKey, wardrobeUrls);
+      const jewelryFalC = await rehostUrls(falKey, jewelryUrls);
+      const propFalC = await rehostUrls(falKey, propUrls);
+      const locationFalC = urls.location ? await uploadToFalStorage(falKey, urls.location) : null;
+      const faceFalC = urls.face ? await uploadToFalStorage(falKey, urls.face) : null;
+      if (faceFalC) imageUrls.push(faceFalC);
+      imageUrls.push(...wardrobeFalC, ...jewelryFalC);
+      if (locationFalC) imageUrls.push(locationFalC);
+      imageUrls.push(...propFalC);
       if (imageUrls.length === 0) return json(400, { error: "no_references_provided" });
       const compose = await callFalFluxKontextMulti(falKey, {
         prompt: buildComposePrompt(recipe.basePrompt, recipe.stylingNotes, wardrobeLabels, jewelryLabels, !!urls.location),
@@ -175,6 +189,37 @@ serve(async (req) => {
 // Fal calls
 // ---------------------------------------------------------------------------
 type FalImageResult = { request_id: string; image_url: string };
+
+
+// Pre-upload a remote URL's bytes to Fal storage. Fal's image fetchers
+// sometimes choke on multiple cross-origin signed URLs in one request;
+// routing every reference through Fal storage avoids that entirely.
+async function uploadToFalStorage(apiKey: string, sourceUrl: string): Promise<string> {
+  const fetchResp = await fetch(sourceUrl);
+  if (!fetchResp.ok) throw new Error(`source_fetch_${fetchResp.status}`);
+  const contentType = fetchResp.headers.get("content-type") ?? "image/jpeg";
+  const bytes = await fetchResp.arrayBuffer();
+  const ext = contentType.includes("png") ? "png" : contentType.includes("webp") ? "webp" : "jpg";
+  const initResp = await fetch("https://rest.alpha.fal.ai/storage/upload/initiate", {
+    method: "POST",
+    headers: { Authorization: `Key ${apiKey}`, "Content-Type": "application/json" },
+    body: JSON.stringify({ content_type: contentType, file_name: `ref.${ext}` }),
+  });
+  if (!initResp.ok) throw new Error(`fal_init_${initResp.status}`);
+  const init = await initResp.json();
+  const putResp = await fetch(init.upload_url, {
+    method: "PUT",
+    headers: { "Content-Type": contentType },
+    body: bytes,
+  });
+  if (!putResp.ok) throw new Error(`fal_put_${putResp.status}`);
+  return init.file_url as string;
+}
+
+async function rehostUrls(apiKey: string, urls: string[]): Promise<string[]> {
+  if (urls.length === 0) return [];
+  return await Promise.all(urls.map((u) => uploadToFalStorage(apiKey, u)));
+}
 
 async function callFalFluxLora(
   apiKey: string,
