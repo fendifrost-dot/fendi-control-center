@@ -140,7 +140,7 @@ serve(async (req) => {
           recipe.stylingNotes ?? undefined,
         ),
         loraUrl: body.loraUrl,
-        loraScale: 0.95,
+        loraScale: 1.0,
       });
       stages.push({
         stage: "flux_lora",
@@ -381,3 +381,4 @@ async function pollFalUntilDone(
   }
   throw new Error("fal_poll_timeout");
 }
+
