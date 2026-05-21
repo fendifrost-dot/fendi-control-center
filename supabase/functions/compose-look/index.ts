@@ -538,7 +538,38 @@ async function callFalSeedreamEdit(
 // Response: { image: { url, content_type, width, height, ... }, seed,
 //             has_nsfw_concepts } — same `image.url` extraction pattern
 // as the other helpers.
+// Public wrapper. Single auto-retry on transient network / 5xx / poll-
+// timeout errors. The IDM-VTON smoke tests showed first-click 502s on
+// every run with success on retry; this hides that flake from callers.
+// We deliberately do NOT retry on logical errors (4xx with body, no-image,
+// fal_failed) — those will just fail again and waste another 60s.
 async function callFalLeffaVton(
+  apiKey: string,
+  input: {
+    humanImageUrl: string;
+    garmentImageUrl: string;
+    garmentType: "upper_body" | "lower_body" | "dresses";
+  },
+): Promise<FalImageResult> {
+  try {
+    return await callFalLeffaVtonOnce(apiKey, input);
+  } catch (err: any) {
+    const msg = String(err?.message ?? err);
+    const isTransient =
+      err instanceof TypeError ||
+      /Failed to fetch/i.test(msg) ||
+      /leffa_vton_submit_5\d\d/.test(msg) ||
+      /fal_response_5\d\d/.test(msg) ||
+      /fal_poll_timeout/.test(msg);
+    if (!isTransient) throw err;
+    // Brief backoff before the single retry — gives Fal a moment to
+    // recover from a queue blip / cold start.
+    await new Promise((r) => setTimeout(r, 1500));
+    return await callFalLeffaVtonOnce(apiKey, input);
+  }
+}
+
+async function callFalLeffaVtonOnce(
   apiKey: string,
   input: {
     humanImageUrl: string;
@@ -566,7 +597,10 @@ async function callFalLeffaVton(
     throw new Error(`leffa_vton_submit_${submitResp.status}: ${await submitResp.text().catch(() => "")}`);
   }
   const { request_id, status_url, response_url } = await submitResp.json();
-  const result = await pollFalUntilDone(apiKey, request_id, status_url, response_url);
+  // Leffa VTON runs are slower than the other Fal models — bottoms in
+  // particular were tipping over the default 90s poll timeout. Bump to
+  // 120s for this call only; other callers retain the 90s default.
+  const result = await pollFalUntilDone(apiKey, request_id, status_url, response_url, 120_000);
   const url = result?.image?.url ?? result?.images?.[0]?.url;
   if (!url) throw new Error("leffa_vton_no_image");
   return { request_id, image_url: url };
@@ -606,10 +640,15 @@ async function pollFalUntilDone(
   requestId: string,
   statusUrl: string,
   responseUrl: string,
+  // Per-call timeout override. The IDM-VTON / Leffa-VTON runs are
+  // routinely 60–100s end-to-end (FLUX-LoRA Stage 1 + multi-step VTON);
+  // the original 90s default was right on the edge and caused timeouts
+  // for bottoms. Callers that know they're slow pass 120_000.
+  timeoutMs: number = 90_000,
 ): Promise<any> {
   const start = Date.now();
   const POLL_INTERVAL_MS = 1500;
-  const POLL_TIMEOUT_MS = 90_000;
+  const POLL_TIMEOUT_MS = timeoutMs;
   while (Date.now() - start < POLL_TIMEOUT_MS) {
     await new Promise((r) => setTimeout(r, POLL_INTERVAL_MS));
     const statusResp = await fetch(statusUrl, {
