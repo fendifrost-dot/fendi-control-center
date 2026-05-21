@@ -91,7 +91,8 @@ export type PipelineMode =
   | "auto"
   | "lora_seedream"
   | "seedream_only"
-  | "kontext_multi";
+  | "kontext_multi"
+  | "lora_idm_vton";
 
 export function decidePipeline(
   requested: PipelineMode,
@@ -99,5 +100,9 @@ export function decidePipeline(
 ): Exclude<PipelineMode, "auto"> {
   if (requested === "auto") return hasLora ? "lora_seedream" : "seedream_only";
   if (requested === "lora_seedream" && !hasLora) return "seedream_only";
+  // lora_idm_vton requires a LoRA for the Stage 1 base photo; without one,
+  // there's no canonical human image for VTON to overlay. Fall back to
+  // seedream_only same as lora_seedream does.
+  if (requested === "lora_idm_vton" && !hasLora) return "seedream_only";
   return requested;
 }

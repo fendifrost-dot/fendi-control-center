@@ -168,3 +168,9 @@ Deno.test("decidePipeline — explicit kontext_multi is honoured", () => {
 Deno.test("decidePipeline — explicit seedream_only is honoured", () => {
   assertEquals(decidePipeline("seedream_only", true), "seedream_only");
 });
+Deno.test("decidePipeline — explicit lora_idm_vton with LoRA is honoured", () => {
+  assertEquals(decidePipeline("lora_idm_vton", true), "lora_idm_vton");
+});
+Deno.test("decidePipeline — explicit lora_idm_vton downgrades when no LoRA", () => {
+  assertEquals(decidePipeline("lora_idm_vton", false), "seedream_only");
+});

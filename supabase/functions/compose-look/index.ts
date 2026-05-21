@@ -35,6 +35,19 @@ type SignedUrls = {
   props?: string[];
 };
 
+// Per-wardrobe-item passthrough for the lora_idm_vton pipeline. The proxy
+// signs the FRONT-most reference image per wardrobe pick and forwards it
+// here so CC can chain a sequence of IDM-VTON calls (one garment overlay
+// per item) on top of the Stage 1 LoRA base photo. Older pipelines
+// (lora_seedream, seedream_only, kontext_multi) ignore this field; they
+// continue to read from signedUrls.wardrobe.
+type WardrobeItemPassthrough = {
+  feature_type: string;
+  label: string;
+  signed_url: string;
+  dimensions_description?: string | null;
+};
+
 type Recipe = {
   artistId: string;
   faceFeatureId?: string;
@@ -46,6 +59,7 @@ type Recipe = {
   stylingNotes?: string | null;
   pipelinePreference?: PipelineMode;
   wardrobeLabels?: string[];
+  wardrobeItems?: WardrobeItemPassthrough[];
   jewelryLabels?: string[];
   hasLocation?: boolean;
   hasFace?: boolean;
@@ -171,6 +185,117 @@ serve(async (req) => {
       });
       costCents += 4;
       falImageUrl = compose.image_url;
+    } else if (pipeline === "lora_idm_vton") {
+      // ---------------------------------------------------------------
+      // lora_idm_vton — Stage 1 (FLUX LoRA) generates a canonical base
+      // photo of the artist with identity preamble baked in, then a
+      // chain of IDM-VTON calls overlays each wardrobe garment on top.
+      // Each VTON output feeds into the next as the "human_image_url",
+      // so multiple garments compose cleanly.
+      //
+      // Footwear and accessories are skipped (IDM-VTON only handles
+      // upper_body and lower_body garments). Items in those categories
+      // continue to appear via the Stage 1 LoRA base photo (the
+      // identity preamble locks eyewear, etc.) rather than via VTON.
+      // ---------------------------------------------------------------
+      if (!body.loraUrl) {
+        return json(400, { error: "lora_required_for_lora_idm_vton" });
+      }
+      const flux = await callFalFluxLora(falKey, {
+        prompt: buildBasePhotoPrompt(
+          body.triggerWord ?? "",
+          recipe.basePrompt,
+          recipe.stylingNotes ?? undefined,
+        ),
+        loraUrl: body.loraUrl,
+        loraScale: 1.0,
+      });
+      stages.push({
+        stage: "flux_lora",
+        request_id: flux.request_id,
+        image_url: flux.image_url,
+      });
+      costCents += 5;
+
+      // Build the list of garments to overlay. Prefer the per-item
+      // passthrough (post-Phase-3 proxy); if it's missing (old proxy),
+      // fall back to a best-effort using the flat signedUrls.wardrobe
+      // + wardrobeLabels parallel arrays, assuming upper_body — the
+      // most common case for outerwear/top picks.
+      const garments: Array<{
+        feature_type: string;
+        label: string;
+        signed_url: string;
+      }> = [];
+      if (Array.isArray(recipe.wardrobeItems) && recipe.wardrobeItems.length > 0) {
+        for (const it of recipe.wardrobeItems) {
+          if (it && it.signed_url) {
+            garments.push({
+              feature_type: it.feature_type ?? "wardrobe_top",
+              label: it.label ?? "",
+              signed_url: it.signed_url,
+            });
+          }
+        }
+      } else {
+        // Fallback path. Pair flat wardrobe URLs with wardrobeLabels
+        // (same order). Without feature_type we can't reliably skip
+        // accessories, so include everything as upper_body — Phase 2
+        // smoke tests will catch any miscategorization.
+        const urls = signedUrls.wardrobe ?? [];
+        const labels = recipe.wardrobeLabels ?? [];
+        for (let i = 0; i < urls.length; i++) {
+          garments.push({
+            feature_type: "wardrobe_top",
+            label: labels[i] ?? "",
+            signed_url: urls[i],
+          });
+        }
+      }
+
+      // Filter to VTON-eligible categories. Outerwear and tops go in
+      // as upper_body; bottoms go in as lower_body. Footwear and
+      // accessories are skipped — they survive via the LoRA Stage 1
+      // base photo when the identity preamble references them
+      // (e.g. eyewear lock).
+      const vtonEligible = garments.filter((g) => {
+        const t = g.feature_type;
+        return t === "wardrobe_outerwear" || t === "wardrobe_top" || t === "wardrobe_bottom";
+      });
+
+      let currentHumanUrl: string = flux.image_url;
+      for (let i = 0; i < vtonEligible.length; i++) {
+        const g = vtonEligible[i];
+        const category = g.feature_type === "wardrobe_bottom" ? "lower_body" : "upper_body";
+        // Build a short description for IDM-VTON's text encoder. The
+        // hosted Fal endpoint takes a `description` string (no category
+        // enum); we encode the body region + label there.
+        const region =
+          g.feature_type === "wardrobe_outerwear"
+            ? "upper body outerwear / jacket"
+            : g.feature_type === "wardrobe_top"
+              ? "upper body top / shirt"
+              : "lower body bottoms / pants";
+        const description = g.label ? `${g.label}, ${region}` : region;
+        const vton = await callFalIdmVton(falKey, {
+          humanImageUrl: currentHumanUrl,
+          garmentImageUrl: g.signed_url,
+          description,
+        });
+        stages.push({
+          stage: `idm_vton_${i + 1}_${category}`,
+          request_id: vton.request_id,
+          image_url: vton.image_url,
+        });
+        costCents += 5;
+        currentHumanUrl = vton.image_url;
+      }
+
+      // If no eligible garments (e.g. only accessories picked), the
+      // final result is the Stage 1 LoRA output — accessories are
+      // already locked into identity-preamble so the LoRA photo IS
+      // the look.
+      falImageUrl = currentHumanUrl;
     } else if (pipeline === "seedream_only") {
       const imageUrls: string[] = [];
       if (signedUrls.face) imageUrls.push(signedUrls.face);
@@ -318,6 +443,45 @@ async function callFalSeedreamEdit(
   const result = await pollFalUntilDone(apiKey, request_id, status_url, response_url);
   const url = result?.images?.[0]?.url;
   if (!url) throw new Error("seedream_no_image");
+  return { request_id, image_url: url };
+}
+
+// IDM-VTON: garment-overlay virtual try-on. Takes a "human" image and a
+// "garment" image, returns the human wearing the garment. The hosted
+// Fal endpoint (fal-ai/idm-vton) accepts:
+//   - human_image_url:    string (required)
+//   - garment_image_url:  string (required)
+//   - description:        string (required) — text-encoder hint
+//   - num_inference_steps: int (optional, default 30)
+//   - seed:               int (optional, default 42)
+// Response shape differs from the other Fal models we call: result.image
+// is a single object (not result.images[0]). Polling pattern is identical.
+async function callFalIdmVton(
+  apiKey: string,
+  input: { humanImageUrl: string; garmentImageUrl: string; description: string },
+): Promise<FalImageResult> {
+  if (!input.humanImageUrl) throw new Error("idm_vton_no_human_image");
+  if (!input.garmentImageUrl) throw new Error("idm_vton_no_garment_image");
+  const submitResp = await fetch("https://queue.fal.run/fal-ai/idm-vton", {
+    method: "POST",
+    headers: {
+      Authorization: `Key ${apiKey}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      human_image_url: input.humanImageUrl,
+      garment_image_url: input.garmentImageUrl,
+      description: input.description,
+      num_inference_steps: 30,
+    }),
+  });
+  if (!submitResp.ok) {
+    throw new Error(`idm_vton_submit_${submitResp.status}: ${await submitResp.text().catch(() => "")}`);
+  }
+  const { request_id, status_url, response_url } = await submitResp.json();
+  const result = await pollFalUntilDone(apiKey, request_id, status_url, response_url);
+  const url = result?.image?.url ?? result?.images?.[0]?.url;
+  if (!url) throw new Error("idm_vton_no_image");
   return { request_id, image_url: url };
 }
 
