@@ -71,6 +71,12 @@ type Body = {
   signedUrls: SignedUrls;
   loraUrl?: string;
   triggerWord?: string;
+  // Async mode (Phase 4 refactor): when present, CC returns
+  // `{ status: 'queued' }` immediately and runs the pipeline in the
+  // background via EdgeRuntime.waitUntil. When the pipeline finishes (or
+  // fails), CC POSTs the result to `callback_url` with the X-Proxy-Secret
+  // header. When absent, CC behaves as before (synchronous response).
+  callback_url?: string;
 };
 
 const corsHeaders = {
@@ -142,8 +148,26 @@ serve(async (req) => {
   let costCents = 0;
   let falImageUrl: string | null = null;
 
-  try {
-    if (pipeline === "lora_seedream") {
+  // ---------------------------------------------------------------------
+  // executePipelineResponse — Phase 4 refactor.
+  //
+  // The pipeline switch is wrapped in an inner closure so we can reuse it
+  // for both sync and async modes:
+  //   - SYNC mode (no callback_url): we await this and return the Response
+  //     directly. The legacy contract is preserved verbatim — same status
+  //     codes, same body shape.
+  //   - ASYNC mode (callback_url present): we run it inside
+  //     EdgeRuntime.waitUntil and intercept its Response body to POST to
+  //     the callback. The platform's 150s synchronous-response wall no
+  //     longer applies because we returned `{ status: 'queued' }` first.
+  //
+  // The inner-function variables (stages, costCents, falImageUrl) close
+  // over the outer-scope declarations so the existing switch body needs
+  // no edits beyond this wrapper.
+  // ---------------------------------------------------------------------
+  const executePipelineResponse = async (): Promise<Response> => {
+    try {
+      if (pipeline === "lora_seedream") {
       if (!body.loraUrl) {
         return json(400, { error: "lora_required_for_lora_seedream" });
       }
@@ -439,22 +463,115 @@ serve(async (req) => {
     return json(502, { error: "fal_no_image", stages });
   }
 
-  return json(200, {
-    fal_image_url: falImageUrl,
-    pipeline_used: pipeline,
-    cost_cents: costCents,
-    generation_metadata: {
-      stages,
-      recipe_summary: {
-        hasFace: recipe.hasFace ?? !!signedUrls.face,
-        hasLocation,
-        wardrobeLabels: recipe.wardrobeLabels ?? [],
-        jewelryLabels: recipe.jewelryLabels ?? [],
-        propCount: recipe.propCount ?? (signedUrls.props?.length ?? 0),
+    return json(200, {
+      fal_image_url: falImageUrl,
+      pipeline_used: pipeline,
+      cost_cents: costCents,
+      generation_metadata: {
+        stages,
+        recipe_summary: {
+          hasFace: recipe.hasFace ?? !!signedUrls.face,
+          hasLocation,
+          wardrobeLabels: recipe.wardrobeLabels ?? [],
+          jewelryLabels: recipe.jewelryLabels ?? [],
+          propCount: recipe.propCount ?? (signedUrls.props?.length ?? 0),
+        },
       },
-    },
-  });
+    });
+  }; // <- closes executePipelineResponse
+
+  // -------------------------------------------------------------------
+  // ASYNC MODE: callback_url present.
+  //
+  // Return `{ status: 'queued' }` immediately, run the pipeline in the
+  // background via EdgeRuntime.waitUntil, and POST the result (or
+  // failure) to the callback URL when done. This is the workaround for
+  // Supabase Edge Functions' ~150s synchronous-response wall — the
+  // chained LoRA + Leffa-VTON + Seedream-polish pipeline routinely
+  // pushes past 150s, so we couldn't synchronously return success.
+  // -------------------------------------------------------------------
+  if (body.callback_url) {
+    const callbackUrl = body.callback_url;
+    const background = (async () => {
+      let resp: Response;
+      try {
+        resp = await executePipelineResponse();
+      } catch (err: any) {
+        // Belt-and-suspenders: executePipelineResponse should always
+        // resolve with a Response. If something escapes the try/catch
+        // inside it, still surface it to the callback as a failure so
+        // the look doesn't hang in 'pending'.
+        await postCallback(callbackUrl, proxySecret, {
+          status: "failed",
+          error: `cc_unhandled: ${String(err?.message ?? err).slice(0, 500)}`,
+        });
+        return;
+      }
+      const respText = await resp.text().catch(() => "");
+      let parsed: any = null;
+      try { parsed = JSON.parse(respText); } catch { /* ignore */ }
+      if (resp.ok && parsed?.fal_image_url) {
+        await postCallback(callbackUrl, proxySecret, {
+          status: "complete",
+          fal_image_url: parsed.fal_image_url,
+          pipeline_used: parsed.pipeline_used,
+          cost_cents: parsed.cost_cents,
+          generation_metadata: parsed.generation_metadata,
+        });
+      } else {
+        const errMsg = parsed?.error ?? `cc_${resp.status}`;
+        const detail = parsed?.detail ? `: ${String(parsed.detail).slice(0, 300)}` : "";
+        await postCallback(callbackUrl, proxySecret, {
+          status: "failed",
+          error: `${errMsg}${detail}`.slice(0, 500),
+        });
+      }
+    })();
+
+    // deno-lint-ignore no-explicit-any
+    const er = (globalThis as any).EdgeRuntime;
+    if (er && typeof er.waitUntil === "function") {
+      er.waitUntil(background);
+    } else {
+      // Fallback for local/Deno-test runs: fire-and-forget without the
+      // platform-provided lifetime extension. The promise still runs in
+      // the same process; we just don't get the keep-alive guarantee.
+      background.catch(() => {});
+    }
+    return json(200, { status: "queued" });
+  }
+
+  // -------------------------------------------------------------------
+  // SYNC MODE: no callback_url — legacy contract preserved.
+  // -------------------------------------------------------------------
+  return await executePipelineResponse();
 });
+
+// ---------------------------------------------------------------------------
+// postCallback — small helper used by the async branch to ship a result
+// payload back to AVT's compose-look-callback endpoint. Failures here are
+// swallowed: the look stays in 'pending' and the UI's poll resolves to a
+// "still generating" notice. We could add a sink later if dropped
+// callbacks become a real operational concern.
+// ---------------------------------------------------------------------------
+async function postCallback(
+  url: string,
+  proxySecret: string,
+  payload: Record<string, unknown>,
+): Promise<void> {
+  try {
+    await fetch(url, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "X-Proxy-Secret": proxySecret,
+      },
+      body: JSON.stringify(payload),
+    });
+  } catch {
+    // Drop — see comment above.
+  }
+}
 
 // ---------------------------------------------------------------------------
 // Fal call helpers (preserved verbatim from prior version)
