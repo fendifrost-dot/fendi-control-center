@@ -255,35 +255,51 @@ serve(async (req) => {
 
       // Filter to VTON-eligible categories. Outerwear and tops go in
       // as upper_body; bottoms go in as lower_body. Footwear and
-      // accessories are skipped — they survive via the LoRA Stage 1
-      // base photo when the identity preamble references them
-      // (e.g. eyewear lock).
+      // accessories are skipped — accessories survive via the LoRA
+      // Stage 1 base photo when the identity preamble references them
+      // (e.g. eyewear lock); footwear is out of scope for the current
+      // VTON endpoint (Leffa supports upper_body / lower_body / dresses
+      // only). When the user picks footwear we silently skip it here —
+      // a later iteration can rope shoes back in via a Seedream polish
+      // pass if needed.
       const vtonEligible = garments.filter((g) => {
         const t = g.feature_type;
         return t === "wardrobe_outerwear" || t === "wardrobe_top" || t === "wardrobe_bottom";
       });
 
+      // Chain order matters: each VTON call takes the previous output as
+      // its human_image_url. We want layered composition where jackets
+      // sit OVER shirts, so within the upper body we run TOP first then
+      // OUTERWEAR. Bottoms come last (they're a separate region, but
+      // running them last keeps stage indexing readable for the audit
+      // log). Footwear/accessory items have already been filtered out.
+      const orderPriority: Record<string, number> = {
+        wardrobe_top: 0,
+        wardrobe_outerwear: 1,
+        wardrobe_bottom: 2,
+      };
+      vtonEligible.sort(
+        (a, b) =>
+          (orderPriority[a.feature_type] ?? 99) -
+          (orderPriority[b.feature_type] ?? 99),
+      );
+
       let currentHumanUrl: string = flux.image_url;
       for (let i = 0; i < vtonEligible.length; i++) {
         const g = vtonEligible[i];
-        const category = g.feature_type === "wardrobe_bottom" ? "lower_body" : "upper_body";
-        // Build a short description for IDM-VTON's text encoder. The
-        // hosted Fal endpoint takes a `description` string (no category
-        // enum); we encode the body region + label there.
-        const region =
-          g.feature_type === "wardrobe_outerwear"
-            ? "upper body outerwear / jacket"
-            : g.feature_type === "wardrobe_top"
-              ? "upper body top / shirt"
-              : "lower body bottoms / pants";
-        const description = g.label ? `${g.label}, ${region}` : region;
-        const vton = await callFalIdmVton(falKey, {
+        // Leffa accepts a strict garment_type enum: upper_body, lower_body,
+        // dresses. We don't currently surface "dresses" because the
+        // wardrobe schema doesn't have a wardrobe_dress feature_type;
+        // when it does, add the mapping here.
+        const garmentType =
+          g.feature_type === "wardrobe_bottom" ? "lower_body" : "upper_body";
+        const vton = await callFalLeffaVton(falKey, {
           humanImageUrl: currentHumanUrl,
           garmentImageUrl: g.signed_url,
-          description,
+          garmentType,
         });
         stages.push({
-          stage: `idm_vton_${i + 1}_${category}`,
+          stage: `leffa_vton_${i + 1}_${garmentType}`,
           request_id: vton.request_id,
           image_url: vton.image_url,
         });
@@ -446,23 +462,35 @@ async function callFalSeedreamEdit(
   return { request_id, image_url: url };
 }
 
-// IDM-VTON: garment-overlay virtual try-on. Takes a "human" image and a
-// "garment" image, returns the human wearing the garment. The hosted
-// Fal endpoint (fal-ai/idm-vton) accepts:
-//   - human_image_url:    string (required)
-//   - garment_image_url:  string (required)
-//   - description:        string (required) — text-encoder hint
-//   - num_inference_steps: int (optional, default 30)
-//   - seed:               int (optional, default 42)
-// Response shape differs from the other Fal models we call: result.image
-// is a single object (not result.images[0]). Polling pattern is identical.
-async function callFalIdmVton(
+// Leffa Virtual Try-On (fal-ai/leffa/virtual-tryon). Garment-overlay
+// VTON with an explicit category enum, which is the key thing we
+// needed beyond IDM-VTON: routing bottoms to lower_body so jeans
+// render as pants instead of getting mis-applied to the torso.
+//
+// Request body:
+//   - human_image_url:        string (required)
+//   - garment_image_url:      string (required)
+//   - garment_type:           "upper_body" | "lower_body" | "dresses" (required)
+//   - num_inference_steps:    int (optional, default 50)
+//   - guidance_scale:         float (optional, default 2.5)
+//   - seed:                   int (optional)
+//   - enable_safety_checker:  bool (optional, default true)
+//   - output_format:          "jpeg" | "png" (optional, default png)
+//
+// Response: { image: { url, content_type, width, height, ... }, seed,
+//             has_nsfw_concepts } — same `image.url` extraction pattern
+// as the other helpers.
+async function callFalLeffaVton(
   apiKey: string,
-  input: { humanImageUrl: string; garmentImageUrl: string; description: string },
+  input: {
+    humanImageUrl: string;
+    garmentImageUrl: string;
+    garmentType: "upper_body" | "lower_body" | "dresses";
+  },
 ): Promise<FalImageResult> {
-  if (!input.humanImageUrl) throw new Error("idm_vton_no_human_image");
-  if (!input.garmentImageUrl) throw new Error("idm_vton_no_garment_image");
-  const submitResp = await fetch("https://queue.fal.run/fal-ai/idm-vton", {
+  if (!input.humanImageUrl) throw new Error("leffa_vton_no_human_image");
+  if (!input.garmentImageUrl) throw new Error("leffa_vton_no_garment_image");
+  const submitResp = await fetch("https://queue.fal.run/fal-ai/leffa/virtual-tryon", {
     method: "POST",
     headers: {
       Authorization: `Key ${apiKey}`,
@@ -471,17 +499,18 @@ async function callFalIdmVton(
     body: JSON.stringify({
       human_image_url: input.humanImageUrl,
       garment_image_url: input.garmentImageUrl,
-      description: input.description,
-      num_inference_steps: 30,
+      garment_type: input.garmentType,
+      output_format: "png",
+      enable_safety_checker: false,
     }),
   });
   if (!submitResp.ok) {
-    throw new Error(`idm_vton_submit_${submitResp.status}: ${await submitResp.text().catch(() => "")}`);
+    throw new Error(`leffa_vton_submit_${submitResp.status}: ${await submitResp.text().catch(() => "")}`);
   }
   const { request_id, status_url, response_url } = await submitResp.json();
   const result = await pollFalUntilDone(apiKey, request_id, status_url, response_url);
   const url = result?.image?.url ?? result?.images?.[0]?.url;
-  if (!url) throw new Error("idm_vton_no_image");
+  if (!url) throw new Error("leffa_vton_no_image");
   return { request_id, image_url: url };
 }
 
