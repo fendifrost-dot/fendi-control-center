@@ -307,10 +307,68 @@ serve(async (req) => {
         currentHumanUrl = vton.image_url;
       }
 
-      // If no eligible garments (e.g. only accessories picked), the
-      // final result is the Stage 1 LoRA output — accessories are
-      // already locked into identity-preamble so the LoRA photo IS
-      // the look.
+      // ---------------------------------------------------------------
+      // Accessories polish pass.
+      //
+      // Leffa-VTON only handles upper_body / lower_body / dresses, so
+      // wardrobe_accessory items (Cazal glasses, hats, etc.) get
+      // filtered out of the VTON chain above. They were supposed to
+      // survive via the LoRA Stage 1 base photo's identity preamble
+      // (eyewear LOCK), but in practice Stage 1 was emitting bald
+      // earring-wearing variants with no glasses — VTON then can't
+      // bring them back because it doesn't touch the head region.
+      //
+      // Fix: if the user picked any wardrobe_accessory items, run a
+      // focused Seedream Edit pass at the very end with the chained
+      // VTON output as the human and 1–2 accessory ref photos. This
+      // is a tight, single-subject overlay (≤3 input URLs), so the
+      // prompt-fragility issues we hit with full multi-item compose
+      // passes shouldn't surface here.
+      // ---------------------------------------------------------------
+      const accessories = garments.filter((g) => g.feature_type === "wardrobe_accessory");
+      if (accessories.length > 0 && currentHumanUrl) {
+        const accessoryRefs = accessories
+          .slice(0, 2)
+          .map((a) => a.signed_url)
+          .filter((u): u is string => !!u);
+        // Hard cap at 3 total (1 human + ≤2 accessory refs) per the
+        // task spec; Seedream Edit can take more but we want this pass
+        // narrow and stable.
+        const polishImageUrls = [currentHumanUrl, ...accessoryRefs].slice(0, 3);
+        const accessoryLabels = accessories
+          .slice(0, 2)
+          .map((a) => a.label)
+          .filter(Boolean)
+          .join(", ");
+        const polishPrompt =
+          `Apply the accessory shown in the reference image(s) to the subject's face/head` +
+          (accessoryLabels ? `: ${accessoryLabels}.` : ".") +
+          ` Preserve identity, body, clothing, and background exactly — change ONLY the accessory placement on the subject.` +
+          ` If the accessory is eyewear/glasses, lenses must be CLEAR prescription (not tinted, not sunglasses, not dark, not mirrored);` +
+          ` the wearer's eyes must remain fully visible through the lenses.`;
+        try {
+          const polish = await callFalSeedreamEdit(falKey, {
+            prompt: polishPrompt,
+            imageUrls: polishImageUrls,
+          });
+          stages.push({
+            stage: "accessories_polish_seedream",
+            request_id: polish.request_id,
+            image_url: polish.image_url,
+          });
+          costCents += 4;
+          currentHumanUrl = polish.image_url;
+        } catch (_err) {
+          // Don't fail the whole pipeline if the polish pass errors —
+          // the VTON output is still usable as the look. Record the
+          // failure in the stage log so callers can see we tried.
+          stages.push({ stage: "accessories_polish_seedream_failed" });
+        }
+      }
+
+      // If no eligible garments AND no accessories, the final result
+      // is the Stage 1 LoRA output (currentHumanUrl was initialised
+      // to flux.image_url above).
       falImageUrl = currentHumanUrl;
     } else if (pipeline === "seedream_only") {
       const imageUrls: string[] = [];
