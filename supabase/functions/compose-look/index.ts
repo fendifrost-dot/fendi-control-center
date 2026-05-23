@@ -28,6 +28,13 @@ import {
   type PipelineMode,
   type ResolvedFeatureLite,
 } from "./helpers.ts";
+import {
+  buildRegionInpaintPrompt,
+  filterInpaintEligible,
+  segmentPromptForGarment,
+  stageSlug,
+  type GarmentForInpaint,
+} from "./segmented-inpaint.ts";
 
 type SignedUrls = {
   face?: string | null;
@@ -84,6 +91,10 @@ type Body = {
   // header. When absent, CC behaves as before (synchronous response).
   callback_url?: string;
 };
+
+// Seedream v4 edit accepts up to 10 image_urls; lora_seedream uses 8 refs.
+const SEEDREAM_COMPOSE_MAX_DEFAULT = 4;
+const SEEDREAM_COMPOSE_MAX_LORA_SEEDREAM = 8;
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
@@ -194,9 +205,16 @@ serve(async (req) => {
       });
       costCents += 5;
 
+      const maxRefs = SEEDREAM_COMPOSE_MAX_LORA_SEEDREAM;
       const imageUrls: string[] = [flux.image_url];
-      imageUrls.push(...(signedUrls.wardrobe ?? []).slice(0, 2));
-      if (signedUrls.location && imageUrls.length < 4) {
+      imageUrls.push(...(signedUrls.wardrobe ?? []));
+      if (signedUrls.jewelry) {
+        for (const u of signedUrls.jewelry) {
+          if (imageUrls.length >= maxRefs) break;
+          imageUrls.push(u);
+        }
+      }
+      if (signedUrls.location && imageUrls.length < maxRefs) {
         imageUrls.push(signedUrls.location);
       }
       const compose = await callFalSeedreamEdit(falKey, {
@@ -207,7 +225,7 @@ serve(async (req) => {
           jewelryLite,
           hasLocation,
         ),
-        imageUrls: imageUrls.slice(0, 4),
+        imageUrls: imageUrls.slice(0, maxRefs),
       });
       stages.push({
         stage: "seedream_edit",
@@ -411,6 +429,164 @@ serve(async (req) => {
       // If no eligible garments AND no accessories, the final result
       // is the Stage 1 LoRA output (currentHumanUrl was initialised
       // to flux.image_url above).
+      falImageUrl = currentHumanUrl;
+    } else if (pipeline === "lora_segmented_inpaint") {
+      if (!body.loraUrl) {
+        return json(400, { error: "lora_required_for_lora_segmented_inpaint" });
+      }
+      const flux = await callFalFluxLora(falKey, {
+        prompt: buildBasePhotoPrompt(
+          body.triggerWord ?? "",
+          recipe.basePrompt,
+          recipe.stylingNotes ?? undefined,
+        ),
+        loraUrl: body.loraUrl,
+        loraScale: 1.0,
+      });
+      stages.push({
+        stage: "flux_lora",
+        request_id: flux.request_id,
+        image_url: flux.image_url,
+      });
+      costCents += 5;
+
+      const garmentSources: GarmentForInpaint[] = [];
+      if (Array.isArray(recipe.wardrobeItems) && recipe.wardrobeItems.length > 0) {
+        for (const it of recipe.wardrobeItems) {
+          if (it?.signed_url) {
+            garmentSources.push({
+              feature_type: it.feature_type ?? "wardrobe_top",
+              label: it.label ?? "",
+              signed_url: it.signed_url,
+              dimensions_description: it.dimensions_description ?? null,
+            });
+          }
+        }
+      } else {
+        const urls = signedUrls.wardrobe ?? [];
+        const labels = recipe.wardrobeLabels ?? [];
+        for (let i = 0; i < urls.length; i++) {
+          garmentSources.push({
+            feature_type: "wardrobe_top",
+            label: labels[i] ?? "",
+            signed_url: urls[i],
+            dimensions_description: null,
+          });
+        }
+      }
+
+      const inpaintQueue = sortGarmentsForVtonChain(
+        filterInpaintEligible(garmentSources),
+      );
+
+      let canvasUrl: string = flux.image_url;
+      for (const g of inpaintQueue) {
+        const segPrompt = segmentPromptForGarment(g);
+        let maskUrl: string;
+        try {
+          const seg = await callFalSam3Segment(falKey, {
+            imageUrl: canvasUrl,
+            prompt: segPrompt,
+          });
+          stages.push({
+            stage: `sam3_segment_${stageSlug(g.label, g.feature_type)}`,
+            request_id: seg.request_id,
+            image_url: seg.mask_url,
+          });
+          costCents += 2;
+          maskUrl = seg.mask_url;
+        } catch (err: any) {
+          throw new Error(
+            `segmentation_failed_${stageSlug(g.label, g.feature_type)}: ${
+              String(err?.message ?? err)
+            }`,
+          );
+        }
+
+        const fillPrompt = buildRegionInpaintPrompt(g);
+        const fill = await callFalFluxLoraFill(falKey, {
+          prompt: fillPrompt,
+          imageUrl: canvasUrl,
+          maskUrl,
+          garmentImageUrl: g.signed_url,
+        });
+        stages.push({
+          stage: `flux_fill_${g.feature_type}_${stageSlug(g.label, g.feature_type)}`,
+          request_id: fill.request_id,
+          image_url: fill.image_url,
+        });
+        costCents += 7;
+        canvasUrl = fill.image_url;
+      }
+
+      let currentHumanUrl: string = canvasUrl;
+
+      const jewelryRefs = (signedUrls.jewelry ?? []).filter(Boolean).slice(0, 2);
+      if (jewelryRefs.length > 0 && currentHumanUrl) {
+        const polishPrompt = (recipe.jewelryPolishPrompt ?? "").trim() ||
+          `Apply the jewelry or eyewear from the reference image(s): ${
+            (recipe.jewelryLabels ?? []).filter(Boolean).join(", ") || "selected items"
+          }. Preserve face, body, clothing, and background exactly. Change ONLY the jewelry/eyewear. CRITICAL: glasses lenses must be CLEAR prescription, not tinted or sunglasses.`;
+        const polishUrls: string[] = [currentHumanUrl];
+        if (signedUrls.face) polishUrls.push(signedUrls.face);
+        for (const u of jewelryRefs) {
+          if (polishUrls.length >= 3) break;
+          polishUrls.push(u);
+        }
+        try {
+          const jewelryPolish = await callFalSeedreamEdit(falKey, {
+            prompt: polishPrompt,
+            imageUrls: polishUrls.slice(0, 3),
+          });
+          stages.push({
+            stage: "jewelry_polish_seedream",
+            request_id: jewelryPolish.request_id,
+            image_url: jewelryPolish.image_url,
+          });
+          costCents += 4;
+          currentHumanUrl = jewelryPolish.image_url;
+        } catch (_err) {
+          stages.push({ stage: "jewelry_polish_seedream_failed" });
+        }
+      }
+
+      const accessories = garmentSources.filter(
+        (g) => g.feature_type === "wardrobe_accessory",
+      );
+      if (accessories.length > 0 && currentHumanUrl) {
+        const accessoryRefs = accessories
+          .slice(0, 2)
+          .map((a) => a.signed_url)
+          .filter((u): u is string => !!u);
+        const polishImageUrls = [currentHumanUrl, ...accessoryRefs].slice(0, 3);
+        const accessoryLabels = accessories
+          .slice(0, 2)
+          .map((a) => a.label)
+          .filter(Boolean)
+          .join(", ");
+        const polishPrompt =
+          `Apply the accessory shown in the reference image(s) to the subject's face/head` +
+          (accessoryLabels ? `: ${accessoryLabels}.` : ".") +
+          ` Preserve identity, body, clothing, and background exactly — change ONLY the accessory placement on the subject.` +
+          ` If the accessory is eyewear/glasses, lenses must be CLEAR prescription (not tinted, not sunglasses, not dark, not mirrored);` +
+          ` the wearer's eyes must remain fully visible through the lenses.`;
+        try {
+          const polish = await callFalSeedreamEdit(falKey, {
+            prompt: polishPrompt,
+            imageUrls: polishImageUrls,
+          });
+          stages.push({
+            stage: "accessories_polish_seedream",
+            request_id: polish.request_id,
+            image_url: polish.image_url,
+          });
+          costCents += 4;
+          currentHumanUrl = polish.image_url;
+        } catch (_err) {
+          stages.push({ stage: "accessories_polish_seedream_failed" });
+        }
+      }
+
       falImageUrl = currentHumanUrl;
     } else if (pipeline === "seedream_only") {
       const imageUrls: string[] = [];
@@ -627,9 +803,10 @@ async function callFalFluxLora(
 
 async function callFalSeedreamEdit(
   apiKey: string,
-  input: { prompt: string; imageUrls: string[] },
+  input: { prompt: string; imageUrls: string[]; maxImages?: number },
 ): Promise<FalImageResult> {
   if (input.imageUrls.length === 0) throw new Error("seedream_no_inputs");
+  const cap = input.maxImages ?? SEEDREAM_COMPOSE_MAX_DEFAULT;
   const submitResp = await fetch("https://queue.fal.run/fal-ai/bytedance/seedream/v4/edit", {
     method: "POST",
     headers: {
@@ -638,7 +815,7 @@ async function callFalSeedreamEdit(
     },
     body: JSON.stringify({
       prompt: input.prompt,
-      image_urls: input.imageUrls,
+      image_urls: input.imageUrls.slice(0, cap),
       image_size: "portrait_4_3",
       num_images: 1,
       enable_safety_checker: false,
@@ -652,6 +829,79 @@ async function callFalSeedreamEdit(
   const result = await pollFalUntilDone(apiKey, request_id, status_url, response_url);
   const url = result?.images?.[0]?.url;
   if (!url) throw new Error("seedream_no_image");
+  return { request_id, image_url: url };
+}
+
+// SAM-3 text-prompted segmentation — returns a mask image URL for inpainting.
+async function callFalSam3Segment(
+  apiKey: string,
+  input: { imageUrl: string; prompt: string },
+): Promise<{ request_id: string; mask_url: string }> {
+  const submitResp = await fetch("https://queue.fal.run/fal-ai/sam-3/image", {
+    method: "POST",
+    headers: {
+      Authorization: `Key ${apiKey}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      image_url: input.imageUrl,
+      prompt: input.prompt,
+      apply_mask: false,
+      output_format: "png",
+      max_masks: 1,
+    }),
+  });
+  if (!submitResp.ok) {
+    throw new Error(`sam3_submit_${submitResp.status}: ${await submitResp.text().catch(() => "")}`);
+  }
+  const { request_id, status_url, response_url } = await submitResp.json();
+  const result = await pollFalUntilDone(apiKey, request_id, status_url, response_url, 90_000);
+  const maskUrl =
+    result?.masks?.[0]?.url ??
+    result?.image?.url;
+  if (!maskUrl) throw new Error("sam3_no_mask");
+  return { request_id, mask_url: maskUrl };
+}
+
+// FLUX LoRA Fill — regional inpaint with optional garment reference via fill_image.
+async function callFalFluxLoraFill(
+  apiKey: string,
+  input: {
+    prompt: string;
+    imageUrl: string;
+    maskUrl: string;
+    garmentImageUrl?: string | null;
+  },
+): Promise<FalImageResult> {
+  const body: Record<string, unknown> = {
+    prompt: input.prompt,
+    image_url: input.imageUrl,
+    mask_url: input.maskUrl,
+    paste_back: true,
+    resize_to_original: true,
+    output_format: "png",
+    enable_safety_checker: false,
+    num_inference_steps: 28,
+    guidance_scale: 30,
+  };
+  if (input.garmentImageUrl) {
+    body.fill_image = { image_url: input.garmentImageUrl };
+  }
+  const submitResp = await fetch("https://queue.fal.run/fal-ai/flux-lora-fill", {
+    method: "POST",
+    headers: {
+      Authorization: `Key ${apiKey}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify(body),
+  });
+  if (!submitResp.ok) {
+    throw new Error(`flux_fill_submit_${submitResp.status}: ${await submitResp.text().catch(() => "")}`);
+  }
+  const { request_id, status_url, response_url } = await submitResp.json();
+  const result = await pollFalUntilDone(apiKey, request_id, status_url, response_url, 120_000);
+  const url = result?.images?.[0]?.url;
+  if (!url) throw new Error("flux_fill_no_image");
   return { request_id, image_url: url };
 }
 

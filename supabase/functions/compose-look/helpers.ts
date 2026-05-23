@@ -92,7 +92,8 @@ export type PipelineMode =
   | "lora_seedream"
   | "seedream_only"
   | "kontext_multi"
-  | "lora_idm_vton";
+  | "lora_idm_vton"
+  | "lora_segmented_inpaint";
 
 /** Stage 2 / Seedream text; falls back for older proxies that only sent basePrompt. */
 export function resolveComposePrompt(recipe: {
@@ -130,5 +131,6 @@ export function decidePipeline(
   // there's no canonical human image for VTON to overlay. Fall back to
   // seedream_only same as lora_seedream does.
   if (requested === "lora_idm_vton" && !hasLora) return "seedream_only";
+  if (requested === "lora_segmented_inpaint" && !hasLora) return "seedream_only";
   return requested;
 }

@@ -174,3 +174,9 @@ Deno.test("decidePipeline — explicit lora_idm_vton with LoRA is honoured", () 
 Deno.test("decidePipeline — explicit lora_idm_vton downgrades when no LoRA", () => {
   assertEquals(decidePipeline("lora_idm_vton", false), "seedream_only");
 });
+Deno.test("decidePipeline — explicit lora_segmented_inpaint with LoRA is honoured", () => {
+  assertEquals(decidePipeline("lora_segmented_inpaint", true), "lora_segmented_inpaint");
+});
+Deno.test("decidePipeline — explicit lora_segmented_inpaint downgrades when no LoRA", () => {
+  assertEquals(decidePipeline("lora_segmented_inpaint", false), "seedream_only");
+});
