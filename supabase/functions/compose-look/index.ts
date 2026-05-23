@@ -23,6 +23,8 @@ import {
   buildComposePrompt,
   constantTimeEqual,
   decidePipeline,
+  resolveComposePrompt,
+  sortGarmentsForVtonChain,
   type PipelineMode,
   type ResolvedFeatureLite,
 } from "./helpers.ts";
@@ -56,6 +58,10 @@ type Recipe = {
   locationId?: string;
   propIds?: string[];
   basePrompt: string;
+  /** Tattoo-stripped compose brief for Seedream; defaults to basePrompt if absent. */
+  composePrompt?: string | null;
+  /** Narrow eyewear/jewelry polish — no wardrobe_rules / anti-crop. */
+  jewelryPolishPrompt?: string | null;
   stylingNotes?: string | null;
   pipelinePreference?: PipelineMode;
   wardrobeLabels?: string[];
@@ -143,6 +149,7 @@ serve(async (req) => {
     .filter(Boolean)
     .map((label) => ({ label }));
   const hasLocation = !!signedUrls.location || !!recipe.hasLocation;
+  const composeText = resolveComposePrompt(recipe);
 
   const stages: Array<{ stage: string; request_id?: string; image_url?: string }> = [];
   let costCents = 0;
@@ -194,7 +201,7 @@ serve(async (req) => {
       }
       const compose = await callFalSeedreamEdit(falKey, {
         prompt: buildComposePrompt(
-          recipe.basePrompt,
+          composeText,
           recipe.stylingNotes ?? undefined,
           wardrobeLite,
           jewelryLite,
@@ -286,26 +293,15 @@ serve(async (req) => {
       // only). When the user picks footwear we silently skip it here —
       // a later iteration can rope shoes back in via a Seedream polish
       // pass if needed.
-      const vtonEligible = garments.filter((g) => {
-        const t = g.feature_type;
-        return t === "wardrobe_outerwear" || t === "wardrobe_top" || t === "wardrobe_bottom";
-      });
-
-      // Chain order matters: each VTON call takes the previous output as
-      // its human_image_url. We want layered composition where jackets
-      // sit OVER shirts, so within the upper body we run TOP first then
-      // OUTERWEAR. Bottoms come last (they're a separate region, but
-      // running them last keeps stage indexing readable for the audit
-      // log). Footwear/accessory items have already been filtered out.
-      const orderPriority: Record<string, number> = {
-        wardrobe_top: 0,
-        wardrobe_outerwear: 1,
-        wardrobe_bottom: 2,
-      };
-      vtonEligible.sort(
-        (a, b) =>
-          (orderPriority[a.feature_type] ?? 99) -
-          (orderPriority[b.feature_type] ?? 99),
+      // Chain order: bottoms → shirt (top) → jacket (outerwear) so the
+      // outer layer sees pants + shirt underneath. Footwear/accessory
+      // items are filtered out of VTON (Leffa has no footwear category).
+      const vtonEligible = sortGarmentsForVtonChain(
+        garments.filter((g) => {
+          const t = g.feature_type;
+          return t === "wardrobe_outerwear" || t === "wardrobe_top" ||
+            t === "wardrobe_bottom";
+        }),
       );
 
       let currentHumanUrl: string = flux.image_url;
@@ -332,22 +328,44 @@ serve(async (req) => {
       }
 
       // ---------------------------------------------------------------
-      // Accessories polish pass.
+      // Jewelry polish pass (character_features jewelry — e.g. Cazals).
       //
-      // Leffa-VTON only handles upper_body / lower_body / dresses, so
-      // wardrobe_accessory items (Cazal glasses, hats, etc.) get
-      // filtered out of the VTON chain above. They were supposed to
-      // survive via the LoRA Stage 1 base photo's identity preamble
-      // (eyewear LOCK), but in practice Stage 1 was emitting bald
-      // earring-wearing variants with no glasses — VTON then can't
-      // bring them back because it doesn't touch the head region.
-      //
-      // Fix: if the user picked any wardrobe_accessory items, run a
-      // focused Seedream Edit pass at the very end with the chained
-      // VTON output as the human and 1–2 accessory ref photos. This
-      // is a tight, single-subject overlay (≤3 input URLs), so the
-      // prompt-fragility issues we hit with full multi-item compose
-      // passes shouldn't surface here.
+      // Narrow Seedream call: face + jewelry refs only, jewelryPolishPrompt
+      // from AVT (no wardrobe_rules, fit details, or anti-crop). Runs
+      // before wardrobe_accessory polish so glasses land before hats etc.
+      // ---------------------------------------------------------------
+      const jewelryRefs = (signedUrls.jewelry ?? []).filter(Boolean).slice(0, 2);
+      if (jewelryRefs.length > 0 && currentHumanUrl) {
+        const polishPrompt = (recipe.jewelryPolishPrompt ?? "").trim() ||
+          `Apply the jewelry or eyewear from the reference image(s): ${
+            (recipe.jewelryLabels ?? []).filter(Boolean).join(", ") || "selected items"
+          }. Preserve face, body, clothing, and background exactly. Change ONLY the jewelry/eyewear. CRITICAL: glasses lenses must be CLEAR prescription, not tinted or sunglasses.`;
+        const polishUrls: string[] = [currentHumanUrl];
+        if (signedUrls.face) polishUrls.push(signedUrls.face);
+        for (const u of jewelryRefs) {
+          if (polishUrls.length >= 3) break;
+          polishUrls.push(u);
+        }
+        try {
+          const jewelryPolish = await callFalSeedreamEdit(falKey, {
+            prompt: polishPrompt,
+            imageUrls: polishUrls.slice(0, 3),
+          });
+          stages.push({
+            stage: "jewelry_polish_seedream",
+            request_id: jewelryPolish.request_id,
+            image_url: jewelryPolish.image_url,
+          });
+          costCents += 4;
+          currentHumanUrl = jewelryPolish.image_url;
+        } catch (_err) {
+          stages.push({ stage: "jewelry_polish_seedream_failed" });
+        }
+      }
+
+      // ---------------------------------------------------------------
+      // Wardrobe accessory polish (glasses/hats picked as wardrobe_accessory).
+      // Same narrow pattern — not the full composePrompt brief.
       // ---------------------------------------------------------------
       const accessories = garments.filter((g) => g.feature_type === "wardrobe_accessory");
       if (accessories.length > 0 && currentHumanUrl) {
@@ -406,7 +424,7 @@ serve(async (req) => {
       }
       const compose = await callFalSeedreamEdit(falKey, {
         prompt: buildComposePrompt(
-          recipe.basePrompt,
+          composeText,
           recipe.stylingNotes ?? undefined,
           wardrobeLite,
           jewelryLite,
@@ -433,7 +451,7 @@ serve(async (req) => {
       }
       const compose = await callFalFluxKontextMulti(falKey, {
         prompt: buildComposePrompt(
-          recipe.basePrompt,
+          composeText,
           recipe.stylingNotes ?? undefined,
           wardrobeLite,
           jewelryLite,

@@ -94,6 +94,32 @@ export type PipelineMode =
   | "kontext_multi"
   | "lora_idm_vton";
 
+/** Stage 2 / Seedream text; falls back for older proxies that only sent basePrompt. */
+export function resolveComposePrompt(recipe: {
+  basePrompt: string;
+  composePrompt?: string | null;
+}): string {
+  const compose = recipe.composePrompt?.trim();
+  return compose && compose.length >= 4 ? compose : recipe.basePrompt;
+}
+
+// VTON chain: pants → shirt → jacket so outerwear overlays last.
+const WARDROBE_VTON_ORDER: Record<string, number> = {
+  wardrobe_bottom: 0,
+  wardrobe_top: 1,
+  wardrobe_outerwear: 2,
+};
+
+export function sortGarmentsForVtonChain<
+  T extends { feature_type: string },
+>(garments: T[]): T[] {
+  return [...garments].sort(
+    (a, b) =>
+      (WARDROBE_VTON_ORDER[a.feature_type] ?? 99) -
+      (WARDROBE_VTON_ORDER[b.feature_type] ?? 99),
+  );
+}
+
 export function decidePipeline(
   requested: PipelineMode,
   hasLora: boolean,
