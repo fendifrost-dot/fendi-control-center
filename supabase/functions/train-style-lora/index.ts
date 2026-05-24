@@ -1,4 +1,8 @@
 // CC — Fal flux-lora-fast-training for personal style LoRA v2
+//
+// Async mode (callback_url present): submit to Fal synchronously, return
+// `{ status: 'queued', request_id }` immediately, then poll + POST result
+// inside EdgeRuntime.waitUntil so we don't hit the ~150s response wall.
 
 import { serve } from "https://deno.land/std@0.224.0/http/server.ts";
 
@@ -33,7 +37,6 @@ function constantTimeEqual(a: string, b: string): boolean {
 
 async function pollFalUntilDone(
   apiKey: string,
-  requestId: string,
   statusUrl: string,
   responseUrl: string,
   timeoutMs = 600_000,
@@ -81,6 +84,61 @@ async function postCallback(
   }
 }
 
+async function submitTraining(
+  falKey: string,
+  body: Body,
+): Promise<{ request_id: string; status_url: string; response_url: string }> {
+  const submitResp = await fetch(
+    "https://queue.fal.run/fal-ai/flux-lora-fast-training",
+    {
+      method: "POST",
+      headers: {
+        Authorization: `Key ${falKey}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        images_data_url: body.images_data_url,
+        trigger_word: body.trigger_word ?? "FENDIFITS",
+        is_style: body.is_style ?? true,
+        create_masks: false,
+        steps: 1000,
+      }),
+    },
+  );
+  if (!submitResp.ok) {
+    throw new Error(
+      `train_submit_${submitResp.status}: ${await submitResp.text().catch(() => "")}`,
+    );
+  }
+  const { request_id, status_url, response_url } = await submitResp.json();
+  if (!request_id || !status_url || !response_url) {
+    throw new Error("train_submit_missing_queue_urls");
+  }
+  return { request_id, status_url, response_url };
+}
+
+async function finishTraining(
+  falKey: string,
+  statusUrl: string,
+  responseUrl: string,
+): Promise<string> {
+  const result = await pollFalUntilDone(falKey, statusUrl, responseUrl);
+  const loraFile = result?.diffusers_lora_file as { url?: string } | undefined;
+  const loraUrl = loraFile?.url;
+  if (!loraUrl) throw new Error("training_no_lora_url");
+  return loraUrl;
+}
+
+function scheduleBackground(task: Promise<void>): void {
+  // deno-lint-ignore no-explicit-any
+  const er = (globalThis as any).EdgeRuntime;
+  if (er && typeof er.waitUntil === "function") {
+    er.waitUntil(task);
+  } else {
+    task.catch(() => {});
+  }
+}
+
 serve(async (req) => {
   if (req.method === "OPTIONS") return new Response(null, { headers: corsHeaders });
   if (req.method !== "POST") return json(405, { error: "method_not_allowed" });
@@ -103,78 +161,47 @@ serve(async (req) => {
 
   if (!body.images_data_url) return json(400, { error: "missing_images_data_url" });
 
-  const runTraining = async () => {
-    try {
-      const submitResp = await fetch(
-        "https://queue.fal.run/fal-ai/flux-lora-fast-training",
-        {
-          method: "POST",
-          headers: {
-            Authorization: `Key ${falKey}`,
-            "Content-Type": "application/json",
-          },
-          body: JSON.stringify({
-            images_data_url: body.images_data_url,
-            trigger_word: body.trigger_word ?? "FENDIFITS",
-            is_style: body.is_style ?? true,
-            create_masks: false,
-            steps: 1000,
-          }),
-        },
-      );
-      if (!submitResp.ok) {
-        throw new Error(
-          `train_submit_${submitResp.status}: ${await submitResp.text().catch(() => "")}`,
-        );
-      }
-      const { request_id, status_url, response_url } = await submitResp.json();
-      const result = await pollFalUntilDone(
-        falKey,
-        request_id,
-        status_url,
-        response_url,
-      );
-      const loraFile = result?.diffusers_lora_file as { url?: string } | undefined;
-      const loraUrl = loraFile?.url;
-      if (!loraUrl) throw new Error("training_no_lora_url");
+  const triggerWord = body.trigger_word ?? "FENDIFITS";
+  const callbackUrl = body.callback_url;
 
-      if (body.callback_url) {
-        await postCallback(body.callback_url, proxySecret, {
-          status: "complete",
-          lora_url: loraUrl,
-          trigger_word: body.trigger_word ?? "FENDIFITS",
-        });
-      }
+  try {
+    const { request_id, status_url, response_url } = await submitTraining(falKey, body);
 
-      return json(200, {
-        status: "complete",
-        lora_url: loraUrl,
-        request_id,
+    if (callbackUrl) {
+      scheduleBackground((async () => {
+        try {
+          const loraUrl = await finishTraining(falKey, status_url, response_url);
+          await postCallback(callbackUrl, proxySecret, {
+            status: "complete",
+            lora_url: loraUrl,
+            trigger_word: triggerWord,
+          });
+        } catch (err: unknown) {
+          const msg = String((err as Error)?.message ?? err).slice(0, 500);
+          await postCallback(callbackUrl, proxySecret, {
+            status: "failed",
+            error: msg,
+          });
+        }
+      })());
+
+      return json(200, { status: "queued", request_id });
+    }
+
+    const loraUrl = await finishTraining(falKey, status_url, response_url);
+    return json(200, {
+      status: "complete",
+      lora_url: loraUrl,
+      request_id,
+    });
+  } catch (err: unknown) {
+    const msg = String((err as Error)?.message ?? err).slice(0, 500);
+    if (callbackUrl) {
+      await postCallback(callbackUrl, proxySecret, {
+        status: "failed",
+        error: msg,
       });
-    } catch (err: unknown) {
-      const msg = String((err as Error)?.message ?? err).slice(0, 500);
-      if (body.callback_url) {
-        await postCallback(body.callback_url, proxySecret, {
-          status: "failed",
-          error: msg,
-        });
-      }
-      return json(500, { status: "failed", error: msg });
     }
-  };
-
-  if (body.callback_url) {
-    const background = runTraining;
-    // @ts-ignore EdgeRuntime.waitUntil
-    if (typeof EdgeRuntime !== "undefined" && EdgeRuntime.waitUntil) {
-      EdgeRuntime.waitUntil(
-        background().then(() => undefined).catch(() => undefined),
-      );
-    } else {
-      background();
-    }
-    return json(200, { status: "queued" });
+    return json(500, { status: "failed", error: msg });
   }
-
-  return await runTraining();
 });
