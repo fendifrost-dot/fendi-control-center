@@ -101,7 +101,7 @@ async function submitTraining(
         trigger_word: body.trigger_word ?? "FENDIFITS",
         is_style: body.is_style ?? true,
         create_masks: false,
-        steps: 1000,
+        steps: 300,
       }),
     },
   );
