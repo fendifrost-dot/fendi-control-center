@@ -103,3 +103,9 @@ verify_jwt = false
 
 [functions.ai-draft-treatment]
 verify_jwt = false
+
+[functions.compose-look]
+verify_jwt = false
+
+[functions.train-style-lora]
+verify_jwt = false
