@@ -21,9 +21,11 @@ import { serve } from "https://deno.land/std@0.224.0/http/server.ts";
 import {
   buildBasePhotoPrompt,
   buildComposePrompt,
+  buildSegmentedInpaintStage1Prompt,
   constantTimeEqual,
   decidePipeline,
   resolveComposePrompt,
+  SEGMENTED_INPAINT_FLUX_IMAGE_SIZE,
   sortGarmentsForVtonChain,
   type PipelineMode,
   type ResolvedFeatureLite,
@@ -435,13 +437,14 @@ serve(async (req) => {
         return json(400, { error: "lora_required_for_lora_segmented_inpaint" });
       }
       const flux = await callFalFluxLora(falKey, {
-        prompt: buildBasePhotoPrompt(
+        prompt: buildSegmentedInpaintStage1Prompt(
           body.triggerWord ?? "",
           recipe.basePrompt,
           recipe.stylingNotes ?? undefined,
         ),
         loraUrl: body.loraUrl,
         loraScale: 1.0,
+        imageSize: SEGMENTED_INPAINT_FLUX_IMAGE_SIZE,
       });
       stages.push({
         stage: "flux_lora",
@@ -482,26 +485,26 @@ serve(async (req) => {
       let canvasUrl: string = flux.image_url;
       for (const g of inpaintQueue) {
         const segPrompt = segmentPromptForGarment(g);
-        let maskUrl: string;
-        try {
-          const seg = await callFalSam3Segment(falKey, {
-            imageUrl: canvasUrl,
-            prompt: segPrompt,
-          });
+        const slug = stageSlug(g.label, g.feature_type);
+        const seg = await callFalSam3Segment(falKey, {
+          imageUrl: canvasUrl,
+          prompt: segPrompt,
+        });
+        if (!seg.mask_url) {
           stages.push({
-            stage: `sam3_segment_${stageSlug(g.label, g.feature_type)}`,
+            stage: `segmentation_skipped_${slug}`,
             request_id: seg.request_id,
-            image_url: seg.mask_url,
+            reason: "sam3_no_mask",
           });
-          costCents += 2;
-          maskUrl = seg.mask_url;
-        } catch (err: any) {
-          throw new Error(
-            `segmentation_failed_${stageSlug(g.label, g.feature_type)}: ${
-              String(err?.message ?? err)
-            }`,
-          );
+          continue;
         }
+        stages.push({
+          stage: `sam3_segment_${slug}`,
+          request_id: seg.request_id,
+          image_url: seg.mask_url,
+        });
+        costCents += 2;
+        const maskUrl = seg.mask_url;
 
         const fillPrompt = buildRegionInpaintPrompt(g);
         const fill = await callFalFluxLoraFill(falKey, {
@@ -770,9 +773,18 @@ async function postCallback(
 // ---------------------------------------------------------------------------
 // Fal call helpers (preserved verbatim from prior version)
 // ---------------------------------------------------------------------------
+type FluxLoraImageSize =
+  | string
+  | { width: number; height: number };
+
 async function callFalFluxLora(
   apiKey: string,
-  input: { prompt: string; loraUrl: string; loraScale: number },
+  input: {
+    prompt: string;
+    loraUrl: string;
+    loraScale: number;
+    imageSize?: FluxLoraImageSize;
+  },
 ): Promise<FalImageResult> {
   const submitResp = await fetch("https://queue.fal.run/fal-ai/flux-lora", {
     method: "POST",
@@ -783,7 +795,7 @@ async function callFalFluxLora(
     body: JSON.stringify({
       prompt: input.prompt,
       loras: [{ path: input.loraUrl, scale: input.loraScale }],
-      image_size: "portrait_4_3",
+      image_size: input.imageSize ?? "portrait_4_3",
       num_inference_steps: 28,
       guidance_scale: 3.5,
       num_images: 1,
@@ -836,7 +848,7 @@ async function callFalSeedreamEdit(
 async function callFalSam3Segment(
   apiKey: string,
   input: { imageUrl: string; prompt: string },
-): Promise<{ request_id: string; mask_url: string }> {
+): Promise<{ request_id: string; mask_url: string | null }> {
   const submitResp = await fetch("https://queue.fal.run/fal-ai/sam-3/image", {
     method: "POST",
     headers: {
@@ -858,8 +870,8 @@ async function callFalSam3Segment(
   const result = await pollFalUntilDone(apiKey, request_id, status_url, response_url, 90_000);
   const maskUrl =
     result?.masks?.[0]?.url ??
-    result?.image?.url;
-  if (!maskUrl) throw new Error("sam3_no_mask");
+    result?.image?.url ??
+    null;
   return { request_id, mask_url: maskUrl };
 }
 
