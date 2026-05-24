@@ -7,6 +7,7 @@ import {
 import {
   buildBasePhotoPrompt,
   buildComposePrompt,
+  buildSegmentedInpaintStage1Prompt,
   constantTimeEqual,
   decidePipeline,
   defaultLookName,
@@ -87,6 +88,13 @@ Deno.test("buildBasePhotoPrompt — omits empty trigger", () => {
   // should not start with ", " from an empty trigger
   assert(!p.startsWith(", "));
   assertStringIncludes(p, "chrome luxe");
+});
+
+Deno.test("buildSegmentedInpaintStage1Prompt — requires head-to-toe framing", () => {
+  const p = buildSegmentedInpaintStage1Prompt("FENDI", "editorial", undefined);
+  assertStringIncludes(p, "head to toe visible");
+  assertStringIncludes(p, "Do NOT crop above the knees");
+  assertStringIncludes(p, "editorial");
 });
 
 // ---------------------------------------------------------------------------

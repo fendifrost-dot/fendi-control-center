@@ -52,6 +52,24 @@ export function buildBasePhotoPrompt(
   return `${triggerClause}photorealistic portrait, neutral expression, studio lighting, flexible pose, full body visible, clean background, ${base}${stylingClause}`;
 }
 
+/** Taller FLUX-LoRA canvas for segmented inpaint — room for head-to-toe SAM-3 masks. */
+export const SEGMENTED_INPAINT_FLUX_IMAGE_SIZE = {
+  width: 832,
+  height: 1216,
+} as const;
+
+const SEGMENTED_INPAINT_FULL_BODY_SUFFIX =
+  "Full body shot, head to toe visible, feet visible at the bottom of the frame, standing pose facing camera or three-quarter angle. Do NOT crop above the knees. Do NOT render as a portrait or upper-body shot. The entire subject from head to feet must be in frame.";
+
+/** Stage-1 prompt for lora_segmented_inpaint only — stricter framing than buildBasePhotoPrompt. */
+export function buildSegmentedInpaintStage1Prompt(
+  trigger: string,
+  base: string,
+  styling: string | undefined,
+): string {
+  return `${buildBasePhotoPrompt(trigger, base, styling)} ${SEGMENTED_INPAINT_FULL_BODY_SUFFIX}`;
+}
+
 export function buildComposePrompt(
   base: string,
   styling: string | undefined,
