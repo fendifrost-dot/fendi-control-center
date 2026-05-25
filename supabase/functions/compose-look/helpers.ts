@@ -77,7 +77,7 @@ export function buildSegmentedInpaintStage1Prompt(
   _styling: string | undefined,
 ): string {
   const triggerClause = trigger ? `${trigger}, ` : "";
-  return `${triggerClause}photorealistic full-body photograph of an adult man wearing a plain white crew-neck t-shirt and dark blue denim jeans, standing pose facing the camera or in three-quarter angle, casual sneakers, clean light gray studio background, soft natural lighting, fully clothed, head to toe visible, feet visible at the bottom of the frame. ${SEGMENTED_INPAINT_FULL_BODY_SUFFIX}`;
+  return `${triggerClause}photorealistic full-body photograph of an adult man, front-facing the camera with face clearly visible, wearing a plain dark zip-up jacket over a plain white crew-neck t-shirt, dark blue denim jeans, casual sneakers, standing pose with arms relaxed at the sides, clean light gray studio background, soft natural lighting, fully clothed, head to toe visible, feet visible at the bottom of the frame. ${SEGMENTED_INPAINT_FULL_BODY_SUFFIX}`;
 }
 
 export function buildComposePrompt(
