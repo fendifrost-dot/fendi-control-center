@@ -443,7 +443,7 @@ serve(async (req) => {
           recipe.stylingNotes ?? undefined,
         ),
         loraUrl: body.loraUrl,
-        loraScale: 1.0,
+        loraScale: 0.6,
         imageSize: SEGMENTED_INPAINT_FLUX_IMAGE_SIZE,
       });
       stages.push({
