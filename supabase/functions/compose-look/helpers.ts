@@ -61,13 +61,23 @@ export const SEGMENTED_INPAINT_FLUX_IMAGE_SIZE = {
 const SEGMENTED_INPAINT_FULL_BODY_SUFFIX =
   "Full body shot, head to toe visible, feet visible at the bottom of the frame, standing pose facing camera or three-quarter angle. Do NOT crop above the knees. Do NOT render as a portrait or upper-body shot. The entire subject from head to feet must be in frame.";
 
-/** Stage-1 prompt for lora_segmented_inpaint only — stricter framing than buildBasePhotoPrompt. */
+/** Stage-1 prompt for lora_segmented_inpaint only.
+ *
+ * IMPORTANT: this intentionally IGNORES the full base prompt's identity preamble.
+ * The base prompt contains tattoo enumerations and skin descriptions that bias
+ * FLUX toward shirtless renders, leaving SAM-3 nothing to mask. Instead, Stage 1
+ * here produces a clean fully-clothed body in placeholder neutral garments;
+ * the per-garment FLUX-fill stages then inpaint the actual wardrobe references
+ * over those placeholders, and the seedream accessories polish handles glasses
+ * + identity touch-ups at the end.
+ */
 export function buildSegmentedInpaintStage1Prompt(
   trigger: string,
-  base: string,
-  styling: string | undefined,
+  _base: string,
+  _styling: string | undefined,
 ): string {
-  return `${buildBasePhotoPrompt(trigger, base, styling)} ${SEGMENTED_INPAINT_FULL_BODY_SUFFIX}`;
+  const triggerClause = trigger ? `${trigger}, ` : "";
+  return `${triggerClause}photorealistic full-body photograph of an adult man wearing a plain white crew-neck t-shirt and dark blue denim jeans, standing pose facing the camera or in three-quarter angle, casual sneakers, clean light gray studio background, soft natural lighting, fully clothed, head to toe visible, feet visible at the bottom of the frame. ${SEGMENTED_INPAINT_FULL_BODY_SUFFIX}`;
 }
 
 export function buildComposePrompt(
