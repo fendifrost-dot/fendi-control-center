@@ -43,6 +43,11 @@ export function buildRegionInpaintPrompt(g: GarmentForInpaint): string {
     `In the masked region only, dress the subject in the exact garment: ${g.label}.`,
     "Match the reference product photo for color, fabric, closure, and silhouette.",
   ];
+  if (g.feature_type === "wardrobe_outerwear") {
+    parts.push(
+      "The jacket is FULLY ZIPPED and FULLY CLOSED — no exposed chest, no open front, no bare skin under the jacket. The bomber covers the entire torso from collar to hem. The chest and stomach area are completely covered by the jacket fabric, not visible. Zipper is fully pulled up to the neck.",
+    );
+  }
   const dims = (g.dimensions_description ?? "").trim();
   if (dims) parts.push(dims);
   parts.push(
