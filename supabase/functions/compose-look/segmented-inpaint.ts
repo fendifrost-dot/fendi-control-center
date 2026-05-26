@@ -46,7 +46,7 @@ export function buildRegionInpaintPrompt(g: GarmentForInpaint): string {
   const dims = (g.dimensions_description ?? "").trim();
   if (dims) parts.push(dims);
   parts.push(
-    "Do not alter face, hair, skin, tattoos, eyewear, hands, or any unmasked pixels.",
+    "Do not alter face, hair, skin, eyewear, hands, or any unmasked pixels.",
     "Photorealistic fit and folds. No invented logos, text, or graphics on fabric.",
   );
   return parts.join(" ");

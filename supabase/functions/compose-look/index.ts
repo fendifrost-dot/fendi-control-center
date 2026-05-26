@@ -67,7 +67,7 @@ type Recipe = {
   locationId?: string;
   propIds?: string[];
   basePrompt: string;
-  /** Tattoo-stripped compose brief for Seedream; defaults to basePrompt if absent. */
+  /** Stage 2 / Seedream compose brief; defaults to basePrompt if absent. */
   composePrompt?: string | null;
   /** Narrow eyewear/jewelry polish — no wardrobe_rules / anti-crop. */
   jewelryPolishPrompt?: string | null;

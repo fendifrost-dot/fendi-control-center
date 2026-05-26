@@ -70,12 +70,13 @@ const SEGMENTED_INPAINT_FULL_BODY_SUFFIX =
 /** Stage-1 prompt for lora_segmented_inpaint only.
  *
  * IMPORTANT: this intentionally IGNORES the full base prompt's identity preamble.
- * The base prompt contains tattoo enumerations and skin descriptions that bias
- * FLUX toward shirtless renders, leaving SAM-3 nothing to mask. Instead, Stage 1
- * here produces a clean fully-clothed body in placeholder neutral garments;
- * the per-garment FLUX-fill stages then inpaint the actual wardrobe references
- * over those placeholders, and the seedream accessories polish handles glasses
- * + identity touch-ups at the end.
+ * The base prompt's skin descriptions historically biased FLUX toward shirtless
+ * renders, leaving SAM-3 nothing to mask. Instead, Stage 1 here produces a clean
+ * fully-clothed body in placeholder neutral garments; the per-garment FLUX-fill
+ * stages then inpaint the actual wardrobe references over those placeholders,
+ * and the seedream accessories polish handles glasses + identity touch-ups at
+ * the end. (Tattoo enumeration has been removed from the upstream preamble in
+ * the proxy — see compose-look-proxy/helpers.ts.)
  */
 export function buildSegmentedInpaintStage1Prompt(
   trigger: string,
@@ -109,7 +110,7 @@ export function buildComposePrompt(
   const locationClause = hasLocation ? " Place him in the location shown in the location reference image." : "";
   return `Take the man in image 1 and ${
     hasLocation ? "place him in the location" : "compose a new portrait"
-  } with photorealistic detail, preserving his identity, face, body shape, skin and tattoos exactly.${wardrobeClause}${jewelryClause}${locationClause}${stylingClause} ${base}`;
+  } with photorealistic detail, preserving his identity, face, body shape, and skin exactly.${wardrobeClause}${jewelryClause}${locationClause}${stylingClause} ${base}`;
 }
 
 export function defaultLookName(wardrobe: ResolvedFeatureLite[]): string {
