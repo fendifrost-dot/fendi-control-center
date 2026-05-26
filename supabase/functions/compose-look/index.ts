@@ -369,7 +369,7 @@ serve(async (req) => {
         const polishPrompt = (recipe.jewelryPolishPrompt ?? "").trim() ||
           `Apply the jewelry or eyewear from the reference image(s): ${
             (recipe.jewelryLabels ?? []).filter(Boolean).join(", ") || "selected items"
-          }. Preserve face, body, clothing, and background exactly. Change ONLY the jewelry/eyewear. CRITICAL: glasses lenses must be CLEAR prescription, not tinted or sunglasses.`;
+          }. Preserve face, body, clothing, and background exactly. Change ONLY the jewelry/eyewear. CRITICAL: glasses lenses must be CLEAR prescription, not tinted or sunglasses. The glasses are proportional to the wearer's face — same width as the temples, lenses sized to cover the eyes naturally without extending past the cheekbones or eyebrows. Match the reference frame proportions exactly. Do NOT render oversized or magnified versions.`;
         const polishUrls: string[] = [currentHumanUrl];
         if (signedUrls.face) polishUrls.push(signedUrls.face);
         for (const u of jewelryRefs) {
@@ -559,7 +559,7 @@ serve(async (req) => {
         const polishPrompt = (recipe.jewelryPolishPrompt ?? "").trim() ||
           `Apply the jewelry or eyewear from the reference image(s): ${
             (recipe.jewelryLabels ?? []).filter(Boolean).join(", ") || "selected items"
-          }. Preserve face, body, clothing, and background exactly. Change ONLY the jewelry/eyewear. CRITICAL: glasses lenses must be CLEAR prescription, not tinted or sunglasses.`;
+          }. Preserve face, body, clothing, and background exactly. Change ONLY the jewelry/eyewear. CRITICAL: glasses lenses must be CLEAR prescription, not tinted or sunglasses. The glasses are proportional to the wearer's face — same width as the temples, lenses sized to cover the eyes naturally without extending past the cheekbones or eyebrows. Match the reference frame proportions exactly. Do NOT render oversized or magnified versions.`;
         const polishUrls: string[] = [currentHumanUrl];
         if (signedUrls.face) polishUrls.push(signedUrls.face);
         for (const u of jewelryRefs) {
