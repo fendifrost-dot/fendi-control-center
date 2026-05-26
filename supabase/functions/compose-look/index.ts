@@ -79,6 +79,16 @@ type Recipe = {
   hasLocation?: boolean;
   hasFace?: boolean;
   propCount?: number;
+  /**
+   * Canonical-base architecture (per ChatGPT recommendation): when present,
+   * the lora_segmented_inpaint pipeline SKIPS the Stage 1 callFalFluxLora
+   * call and uses this pre-locked identity image as the canvas. This removes
+   * the per-look probabilistic regeneration of identity — wardrobe inpaint
+   * still runs, but every look starts from the same face/body/proportions.
+   * Set on the artist via identity_profile_json.canonical_base_image_url,
+   * passed through by compose-look-proxy.
+   */
+  canonicalBaseImageUrl?: string | null;
 };
 
 type Body = {
@@ -436,22 +446,42 @@ serve(async (req) => {
       if (!body.loraUrl) {
         return json(400, { error: "lora_required_for_lora_segmented_inpaint" });
       }
-      const flux = await callFalFluxLora(falKey, {
-        prompt: buildSegmentedInpaintStage1Prompt(
-          body.triggerWord ?? "",
-          recipe.basePrompt,
-          recipe.stylingNotes ?? undefined,
-        ),
-        loraUrl: body.loraUrl,
-        loraScale: 0.6,
-        imageSize: SEGMENTED_INPAINT_FLUX_IMAGE_SIZE,
-      });
-      stages.push({
-        stage: "flux_lora",
-        request_id: flux.request_id,
-        image_url: flux.image_url,
-      });
-      costCents += 5;
+
+      // Canonical-base short-circuit. When the artist has a locked identity
+      // base image (identity_profile_json.canonical_base_image_url,
+      // forwarded by the proxy as recipe.canonicalBaseImageUrl), skip the
+      // Stage 1 FLUX_LoRA call entirely and use the canonical image as the
+      // canvas. This stops the per-look identity drift that comes from
+      // re-generating the base photo probabilistically each time. The
+      // garment inpaint passes below then operate on a stable identity.
+      let stage1ImageUrl: string;
+      const canonicalUrl = (recipe.canonicalBaseImageUrl ?? "").trim();
+      if (canonicalUrl) {
+        stage1ImageUrl = canonicalUrl;
+        stages.push({
+          stage: "canonical_base",
+          image_url: canonicalUrl,
+        });
+        // No costCents bump — no Fal call was made.
+      } else {
+        const flux = await callFalFluxLora(falKey, {
+          prompt: buildSegmentedInpaintStage1Prompt(
+            body.triggerWord ?? "",
+            recipe.basePrompt,
+            recipe.stylingNotes ?? undefined,
+          ),
+          loraUrl: body.loraUrl,
+          loraScale: 0.6,
+          imageSize: SEGMENTED_INPAINT_FLUX_IMAGE_SIZE,
+        });
+        stages.push({
+          stage: "flux_lora",
+          request_id: flux.request_id,
+          image_url: flux.image_url,
+        });
+        costCents += 5;
+        stage1ImageUrl = flux.image_url;
+      }
 
       const garmentSources: GarmentForInpaint[] = [];
       if (Array.isArray(recipe.wardrobeItems) && recipe.wardrobeItems.length > 0) {
@@ -482,7 +512,7 @@ serve(async (req) => {
         filterInpaintEligible(garmentSources),
       );
 
-      let canvasUrl: string = flux.image_url;
+      let canvasUrl: string = stage1ImageUrl;
       for (const g of inpaintQueue) {
         const segPrompt = segmentPromptForGarment(g);
         const slug = stageSlug(g.label, g.feature_type);
