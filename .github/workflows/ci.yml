@@ -30,6 +30,6 @@ jobs:
       - uses: actions/checkout@v4
       - uses: denoland/setup-deno@v2
         with:
-          deno-version: v2.x
+          deno-version: v2.5.4
       - name: Deno tests (Supabase edge shared)
         run: deno test supabase/functions/_shared/creditKnowledgeRetrieval_test.ts --allow-env
