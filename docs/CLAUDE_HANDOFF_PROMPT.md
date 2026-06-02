@@ -2,6 +2,8 @@
 
 For **full system context, git state, and prioritized next steps**, read **`docs/CLAUDE_COMPREHENSIVE_ONBOARDING.md`** in this repo (or **`CLAUDE_COMPREHENSIVE_ONBOARDING.md`** in `Documents/Claude/Projects/Control Hub/` on the Mac).
 
+For **Remote Control Hub go-live** (Mac bridge, `/remote`, Telegram `/mac`), read **`docs/CLAUDE_HANDOFF_REMOTE_CONTROL_HUB.md`** — ordered deploy steps and verification gates.
+
 Use this file as the **short system or task preamble** when you want Claude to continue work on these projects with correct repo boundaries and deploy flow.
 
 ---
