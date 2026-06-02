@@ -34,6 +34,7 @@ const App = () => (
             <Route path="/reset-password" element={<ResetPassword />} />
             <Route path="/" element={<HubHomePage />} />
             <Route path="/ops" element={<Ops />} />
+            <Route path="/remote" element={<RemoteControlPage />} />
             <Route path="/test" element={<Test />} />
             <Route path="/tax" element={<Navigate to="/clients" replace />} />
             <Route path="/tax/*" element={<Navigate to="/clients" replace />} />
