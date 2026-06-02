@@ -14,6 +14,7 @@ type Props = {
  */
 export function RequireSession({ children, showSignedOutFallback = true }: Props) {
   const [session, setSession] = useState<Session | null | undefined>(undefined);
+  const location = useLocation();
 
   useEffect(() => {
     supabase.auth.getSession().then(({ data }) => setSession(data.session ?? null));
@@ -28,8 +29,6 @@ export function RequireSession({ children, showSignedOutFallback = true }: Props
       </div>
     );
   }
-
-  const location = useLocation();
 
   if (!session) {
     if (!showSignedOutFallback) return null;

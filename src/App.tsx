@@ -9,6 +9,7 @@ import { RequireSession } from "@/components/auth/RequireSession";
 import Index from "./pages/Index";
 import HubHomePage from "./pages/HubHomePage";
 import Ops from "./pages/Ops";
+import RemoteControlPage from "./pages/RemoteControlPage";
 import Test from "./pages/Test";
 import Login from "./pages/Login";
 import ForgotPassword from "./pages/ForgotPassword";
@@ -33,6 +34,7 @@ const App = () => (
             <Route path="/reset-password" element={<ResetPassword />} />
             <Route path="/" element={<HubHomePage />} />
             <Route path="/ops" element={<Ops />} />
+            <Route path="/remote" element={<RemoteControlPage />} />
             <Route path="/test" element={<Test />} />
             <Route path="/tax" element={<Navigate to="/clients" replace />} />
             <Route path="/tax/*" element={<Navigate to="/clients" replace />} />

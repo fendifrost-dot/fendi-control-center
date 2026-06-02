@@ -5457,6 +5457,8 @@ serve(async (req) => {
       text.toLowerCase().trim().startsWith("/status") ||
       text.toLowerCase().trim().startsWith("/help") ||
       text.toLowerCase().trim() === "/ping" ||
+      text.toLowerCase().trim().startsWith("/mac") ||
+      text.toLowerCase().trim().startsWith("/computer") ||
       text.toLowerCase().trim().startsWith("/resend") ||
       text.toLowerCase().trim().startsWith("/model") ||
       text.toLowerCase().trim().startsWith("/tax ");

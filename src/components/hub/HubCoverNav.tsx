@@ -110,7 +110,15 @@ export function HubCoverNav() {
             );
           })}
         </nav>
-        <div className="mt-8 border-t border-green-900/60 pt-4">
+        <div className="mt-8 flex flex-col gap-2 border-t border-green-900/60 pt-4">
+          <SheetClose asChild>
+            <Link
+              to="/remote"
+              className="inline-block font-mono text-xs text-green-600/80 underline-offset-4 hover:text-green-400 hover:underline"
+            >
+              Remote Mac →
+            </Link>
+          </SheetClose>
           <SheetClose asChild>
             <Link
               to="/ops"
