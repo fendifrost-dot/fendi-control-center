@@ -904,6 +904,98 @@ export type Database = {
         }
         Relationships: []
       }
+      remote_bridge_devices: {
+        Row: {
+          capabilities: Json
+          created_at: string
+          device_name: string
+          id: string
+          last_seen_at: string | null
+          status: string
+          updated_at: string
+        }
+        Insert: {
+          capabilities?: Json
+          created_at?: string
+          device_name: string
+          id?: string
+          last_seen_at?: string | null
+          status?: string
+          updated_at?: string
+        }
+        Update: {
+          capabilities?: Json
+          created_at?: string
+          device_name?: string
+          id?: string
+          last_seen_at?: string | null
+          status?: string
+          updated_at?: string
+        }
+        Relationships: []
+      }
+      remote_command_queue: {
+        Row: {
+          claimed_at: string | null
+          command_type: string
+          completed_at: string | null
+          created_at: string
+          device_id: string | null
+          error: string | null
+          expires_at: string
+          id: string
+          payload: Json
+          reply_chat_id: string | null
+          result_json: Json | null
+          source: string
+          source_ref: string | null
+          status: string
+          updated_at: string
+        }
+        Insert: {
+          claimed_at?: string | null
+          command_type: string
+          completed_at?: string | null
+          created_at?: string
+          device_id?: string | null
+          error?: string | null
+          expires_at?: string
+          id?: string
+          payload?: Json
+          reply_chat_id?: string | null
+          result_json?: Json | null
+          source?: string
+          source_ref?: string | null
+          status?: string
+          updated_at?: string
+        }
+        Update: {
+          claimed_at?: string | null
+          command_type?: string
+          completed_at?: string | null
+          created_at?: string
+          device_id?: string | null
+          error?: string | null
+          expires_at?: string
+          id?: string
+          payload?: Json
+          reply_chat_id?: string | null
+          result_json?: Json | null
+          source?: string
+          source_ref?: string | null
+          status?: string
+          updated_at?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "remote_command_queue_device_id_fkey"
+            columns: ["device_id"]
+            isOneToOne: false
+            referencedRelation: "remote_bridge_devices"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
       sessions: {
         Row: {
           active_model: string
@@ -1391,98 +1483,6 @@ export type Database = {
         }
         Relationships: []
       }
-      remote_bridge_devices: {
-        Row: {
-          capabilities: Json
-          created_at: string
-          device_name: string
-          id: string
-          last_seen_at: string | null
-          status: string
-          updated_at: string
-        }
-        Insert: {
-          capabilities?: Json
-          created_at?: string
-          device_name: string
-          id?: string
-          last_seen_at?: string | null
-          status?: string
-          updated_at?: string
-        }
-        Update: {
-          capabilities?: Json
-          created_at?: string
-          device_name?: string
-          id?: string
-          last_seen_at?: string | null
-          status?: string
-          updated_at?: string
-        }
-        Relationships: []
-      }
-      remote_command_queue: {
-        Row: {
-          claimed_at: string | null
-          command_type: string
-          completed_at: string | null
-          created_at: string
-          device_id: string | null
-          error: string | null
-          expires_at: string
-          id: string
-          payload: Json
-          reply_chat_id: string | null
-          result_json: Json | null
-          source: string
-          source_ref: string | null
-          status: string
-          updated_at: string
-        }
-        Insert: {
-          claimed_at?: string | null
-          command_type: string
-          completed_at?: string | null
-          created_at?: string
-          device_id?: string | null
-          error?: string | null
-          expires_at?: string
-          id?: string
-          payload?: Json
-          reply_chat_id?: string | null
-          result_json?: Json | null
-          source?: string
-          source_ref?: string | null
-          status?: string
-          updated_at?: string
-        }
-        Update: {
-          claimed_at?: string | null
-          command_type?: string
-          completed_at?: string | null
-          created_at?: string
-          device_id?: string | null
-          error?: string | null
-          expires_at?: string
-          id?: string
-          payload?: Json
-          reply_chat_id?: string | null
-          result_json?: Json | null
-          source?: string
-          source_ref?: string | null
-          status?: string
-          updated_at?: string
-        }
-        Relationships: [
-          {
-            foreignKeyName: "remote_command_queue_device_id_fkey"
-            columns: ["device_id"]
-            isOneToOne: false
-            referencedRelation: "remote_bridge_devices"
-            referencedColumns: ["id"]
-          },
-        ]
-      }
       telegram_outbox: {
         Row: {
           attempt_count: number
@@ -1830,6 +1830,16 @@ export type Database = {
           ocr_text: string
           retry_count: number
           round: number
+          source: string
+        }[]
+      }
+      claim_remote_command_rows: {
+        Args: { p_device_id: string; p_limit: number; p_now: string }
+        Returns: {
+          command_type: string
+          id: string
+          payload: Json
+          reply_chat_id: string
           source: string
         }[]
       }
