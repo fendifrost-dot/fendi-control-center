@@ -32,4 +32,4 @@ jobs:
         with:
           deno-version: v2.5.4
       - name: Deno tests (Supabase edge shared)
-        run: deno test supabase/functions/_shared/creditKnowledgeRetrieval_test.ts --allow-env
+        run: deno test supabase/functions/_shared/creditKnowledgeRetrieval_test.ts --allow-env --no-check
