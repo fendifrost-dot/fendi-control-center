@@ -34,6 +34,15 @@ export const HUB_TOOL_DEFS: HubToolDef[] = [
     accentClass: "bg-emerald-500",
   },
   {
+    id: "remote-mac",
+    name: "Remote Mac",
+    tagline: "Queue shell, Cursor, and Claude commands for your computer",
+    kind: "internal",
+    path: "/remote",
+    status: "live",
+    accentClass: "bg-green-500",
+  },
+  {
     id: "artist-hub",
     name: "Artist Hub",
     tagline: "Music pitching and artist growth",

@@ -9,6 +9,7 @@ import { RequireSession } from "@/components/auth/RequireSession";
 import Index from "./pages/Index";
 import HubHomePage from "./pages/HubHomePage";
 import Ops from "./pages/Ops";
+import RemoteControlPage from "./pages/RemoteControlPage";
 import Test from "./pages/Test";
 import Login from "./pages/Login";
 import ForgotPassword from "./pages/ForgotPassword";
