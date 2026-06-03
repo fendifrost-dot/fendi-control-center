@@ -5457,8 +5457,6 @@ serve(async (req) => {
       text.toLowerCase().trim().startsWith("/status") ||
       text.toLowerCase().trim().startsWith("/help") ||
       text.toLowerCase().trim() === "/ping" ||
-      text.toLowerCase().trim().startsWith("/mac") ||
-      text.toLowerCase().trim().startsWith("/computer") ||
       text.toLowerCase().trim().startsWith("/resend") ||
       text.toLowerCase().trim().startsWith("/model") ||
       text.toLowerCase().trim().startsWith("/tax ");
@@ -6718,6 +6716,8 @@ serve(async (req) => {
           `â¢ /status â System status`,
           `â¢ /metrics â Metrics + recent tasks`,
           `â¢ /ping â Connectivity test`,
+          `â¢ /mac status â Mac bridge online/offline`,
+          `â¢ /mac <command> â Run shell/Cursor/Claude on your Mac`,
           `â¢ /workflows â See all registered workflows`,
           `â¢ /help â Quick help`,
           `â¢ /do <workflow> â Execute a workflow`,
