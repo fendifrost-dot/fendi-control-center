@@ -33,7 +33,7 @@ import {
 } from "../_shared/unifiedClientIntelligence.ts";
 import { handleTelegramAttachment, type TelegramAttachmentUpdate } from "../_shared/telegramAttachmentHandler.ts";
 import { buildLiveAttachmentDeps } from "../_shared/telegramAttachmentDepsLive.ts";
-import { tryHandleRemoteMacCommand } from "../_shared/remoteBridgeTelegram.ts";
+import { tryHandleTelegramEarlyCommands } from "../_shared/telegramEarlyCommands.ts";
 
 const BOT_TOKEN = Deno.env.get("FendiAIbot")!;
 const CHAT_ID = Deno.env.get("TELEGRAM_CHAT_ID") ?? "";
@@ -5446,6 +5446,11 @@ serve(async (req) => {
     }
 
     // Determine if this is an explicit model request (for requested_model field only — no mutation)
+    const earlyHandled = await tryHandleTelegramEarlyCommands(supabase, chatId, text, async (c, msg) => {
+      await sendMessage(c, msg);
+    });
+    if (earlyHandled) return new Response("ok");
+
     const modelRequestMatch = text.match(/^\/model\s+(claude|chatgpt|grok|gemini)$/i);
     const requestedModel = modelRequestMatch ? modelRequestMatch[1].toLowerCase() : null;
 
@@ -5872,11 +5877,6 @@ serve(async (req) => {
       return new Response("ok");
     }
     // ââ End pitch routing ââââââââââââââââââââââââââââââââââââââ
-
-    const macHandled = await tryHandleRemoteMacCommand(supabase, chatId, text, async (c, msg) => {
-      await sendMessage(c, msg);
-    });
-    if (macHandled) return new Response("ok");
 
     try {
       taskId = await createTaskRow(session.id, text, requestedModel);
