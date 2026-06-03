@@ -34,7 +34,7 @@ import {
 import { handleTelegramAttachment, type TelegramAttachmentUpdate } from "../_shared/telegramAttachmentHandler.ts";
 import { buildLiveAttachmentDeps } from "../_shared/telegramAttachmentDepsLive.ts";
 import { tryHandleTelegramEarlyCommands } from "../_shared/telegramEarlyCommands.ts";
-import { hasNaturalLanguageExecutionIntent, isUnknownSlashCommand, NATURAL_LANGUAGE_HELP } from "../_shared/telegramNaturalLanguage.ts";
+import { hasNaturalLanguageExecutionIntent, isClearlyConversational, isUnknownSlashCommand, NATURAL_LANGUAGE_HELP } from "../_shared/telegramNaturalLanguage.ts";
 
 const BOT_TOKEN = Deno.env.get("FendiAIbot")!;
 const CHAT_ID = Deno.env.get("TELEGRAM_CHAT_ID") ?? "";
@@ -598,6 +598,7 @@ async function classifyNaturalLanguageIntent(
       .join("\n");
 
     const prompt = `You are an intent classifier. Given the user message, determine if they want to EXECUTE an action.
+Match MEANING, not exact wording — paraphrases and casual phrasing count.
 If yes, respond with ONLY the matching workflow key. If it is just a question or conversation, respond NONE.
 
 Rules:
@@ -7736,7 +7737,7 @@ serve(async (req) => {
     // ══════════════════════════════════════════════════════════
     // NL INTENT CLASSIFICATION — auto-promote to Lane 1 if Gemini detects execution intent
     // ══════════════════════════════════════════════════════════
-    if (!text.startsWith("/") && !hasExecutionIntent && !isAutonomousRequest && !explicitCgIngestIntent) {
+    if (!text.startsWith("/") && !isClearlyConversational(lowerText) && !isAutonomousRequest && !explicitCgIngestIntent) {
       const nlWorkflows = await fetchWorkflowRegistry();
       const nlMatch = await classifyNaturalLanguageIntent(text, nlWorkflows);
       if (nlMatch) {
@@ -7838,7 +7839,7 @@ TWO-LANE RULE â You are in ASSISTANT MODE (Lane 2).
 
 CREDIT & DISPUTES (AUTONOMOUS): For credit reports, disputes, bureau responses, comparing pulls, or dispute letters — do NOT tell the user to type slash commands. The execution lane runs automatically when they describe the task (analyze credit, compare reports, generate dispute letters, sync Drive, etc.). If something is unclear (e.g. which client), ask for the missing fact only.
 
-Natural language (preferred):
+Natural language (preferred — any wording, not exact phrases):
 - Mac: "is my mac online", "on my mac run git status"
 - Hub: "system status", "help", "ping"
 - Work: describe the task (analyze credit, run drive ingest, generate tax docs) — no slash required
