@@ -33,6 +33,7 @@ import {
 } from "../_shared/unifiedClientIntelligence.ts";
 import { handleTelegramAttachment, type TelegramAttachmentUpdate } from "../_shared/telegramAttachmentHandler.ts";
 import { buildLiveAttachmentDeps } from "../_shared/telegramAttachmentDepsLive.ts";
+import { tryHandleRemoteMacCommand } from "../_shared/remoteBridgeTelegram.ts";
 
 const BOT_TOKEN = Deno.env.get("FendiAIbot")!;
 const CHAT_ID = Deno.env.get("TELEGRAM_CHAT_ID") ?? "";
@@ -5627,6 +5628,8 @@ serve(async (req) => {
           lower.startsWith("/status") ||
           lower.startsWith("/help") ||
           lower === "/ping" ||
+          lower.startsWith("/mac") ||
+          lower.startsWith("/computer") ||
           lower.startsWith("/resend") ||
           lower.startsWith("/model") ||
           lower.startsWith("/tax ");
@@ -5869,6 +5872,11 @@ serve(async (req) => {
       return new Response("ok");
     }
     // ââ End pitch routing ââââââââââââââââââââââââââââââââââââââ
+
+    const macHandled = await tryHandleRemoteMacCommand(supabase, chatId, text, async (c, msg) => {
+      await sendMessage(c, msg);
+    });
+    if (macHandled) return new Response("ok");
 
     try {
       taskId = await createTaskRow(session.id, text, requestedModel);
@@ -6956,6 +6964,7 @@ serve(async (req) => {
         `â¢ /status â System status`,
         `â¢ /metrics â Metrics + recent tasks`,
         `â¢ /ping â Connectivity test`,
+        `â¢ /mac status â Mac bridge online/offline`,
         `â¢ /resend\\_failed â Retry failed outbox items`,
         `â¢ /workflows â See all available workflows`,
         `â¢ /do <workflow> â Execute a workflow (optional if you use *run* / *execute*)`,
