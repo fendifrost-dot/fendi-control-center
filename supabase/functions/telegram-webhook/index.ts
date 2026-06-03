@@ -34,6 +34,7 @@ import {
 import { handleTelegramAttachment, type TelegramAttachmentUpdate } from "../_shared/telegramAttachmentHandler.ts";
 import { buildLiveAttachmentDeps } from "../_shared/telegramAttachmentDepsLive.ts";
 import { tryHandleTelegramEarlyCommands } from "../_shared/telegramEarlyCommands.ts";
+import { hasNaturalLanguageExecutionIntent, isUnknownSlashCommand, NATURAL_LANGUAGE_HELP } from "../_shared/telegramNaturalLanguage.ts";
 
 const BOT_TOKEN = Deno.env.get("FendiAIbot")!;
 const CHAT_ID = Deno.env.get("TELEGRAM_CHAT_ID") ?? "";
@@ -6386,18 +6387,7 @@ serve(async (req) => {
       }
       return s;
     };
-    const hasPlainEnglishExecutionIntent = (lower: string): boolean => {
-      if (["run ", "execute ", "trigger ", "start "].some((p) => lower.startsWith(p))) return true;
-      if (/\bplease\s+(execute|run)\b/.test(lower)) return true;
-      if (/\bgo\s+ahead(?:\s+and)?\s+(execute|run)\b/.test(lower)) return true;
-      if (/\bjust\s+(execute|run)\b/.test(lower)) return true;
-      if (/\b(execute|run)\s+the\s+search\b/.test(lower)) return true;
-      if (/\b(execute|run)\s+(it|that|this)\b/.test(lower)) return true;
-      if (/\b(execute|run)\s+again\b/.test(lower)) return true;
-      if (/\b(execute|run)\s+now\b/.test(lower)) return true;
-      return false;
-    };
-    const hasExecutionIntent = hasPlainEnglishExecutionIntent(lowerText);
+    const hasExecutionIntent = hasNaturalLanguageExecutionIntent(lowerText);
 
     /** Must win over new/existing-client heuristics, tax, Credit Compass, NL classify, and Lane 2. */
     const explicitCgIngestIntent = isExplicitCreditGuardianIngestIntent(lowerText);
@@ -6714,28 +6704,17 @@ serve(async (req) => {
           `ð¯ *${SYSTEM_IDENTITY} â Online (Two-Lane Mode)*`,
           ``,
           `ð¬ *Lane 2 (Default):* Just talk to me â I'll answer, explain, draft, plan.`,
-          `â¡ *Lane 1 (Execute):* Say *run* / *execute* + what you want, or use \`/do <workflow>\`.`,
+          `⚡ *Lane 1 (Execute):* Describe work in plain English — "analyze credit for Jabril", "run drive ingest for Zeus", "on my mac run pwd".`,
           ``,
           `*Examples:*`,
-          `â¢ "What's broken today?" â I'll explain (Lane 2)`,
-          `â¢ \`/do status\` â Executes system status check (Lane 1)`,
-          `â¢ \`/do retry failed jobs\` â Executes retry workflow (Lane 1)`,
-          `â¢ "How are my projects doing?" â I'll discuss (Lane 2)`,
+          `• "What's broken today?" → explain (Lane 2)`,
+          `• "system status" → hub health (no slash)`,
+          `• "analyze credit for Smith" → credit workflow (Lane 1)`,
+          `• /do status → optional explicit workflow`,
           ``,
-          `*Commands:*`,
-          `â¢ /status â System status`,
-          `â¢ /metrics â Metrics + recent tasks`,
-          `â¢ /ping â Connectivity test`,
-          `â¢ /workflows â See all registered workflows`,
-          `â¢ /help â Quick help`,
-          `â¢ /do <workflow> â Execute a workflow`,
-          `â¢ /model â Check or switch AI model`,
+          `*Optional shortcuts:* /help, /ping, /status, /do, /workflows, /model`,
           ``,
-          `ð *Observability:*`,
-          `â¢ /status â health snapshot`,
-          `â¢ /metrics â last 20 tasks + durations`,
-          ``,
-          `ð Tools run when you clearly ask to *run* / *execute* / *start* something, use \`/do\`, or use a shortcut command.`,
+          `🔒 Tools run when you clearly ask to *run*, *execute*, *analyze*, *ingest*, or use Mac phrases — not from casual chat.`,
         ].join("\n"),
       );
       await supabase
@@ -7741,6 +7720,19 @@ serve(async (req) => {
       }
     }
 
+    if (isUnknownSlashCommand(text)) {
+      await sendMessage(chatId, NATURAL_LANGUAGE_HELP, {}, `task:${taskId}:unknown-slash`);
+      await supabase
+        .from("tasks")
+        .update({
+          status: "succeeded",
+          result_json: { execution_lane: "shortcut", action: "unknown_slash_help" },
+        })
+        .eq("id", taskId);
+      _currentTaskId = null;
+      return new Response("ok");
+    }
+
     // ══════════════════════════════════════════════════════════
     // NL INTENT CLASSIFICATION — auto-promote to Lane 1 if Gemini detects execution intent
     // ══════════════════════════════════════════════════════════
@@ -7846,12 +7838,12 @@ TWO-LANE RULE â You are in ASSISTANT MODE (Lane 2).
 
 CREDIT & DISPUTES (AUTONOMOUS): For credit reports, disputes, bureau responses, comparing pulls, or dispute letters — do NOT tell the user to type slash commands. The execution lane runs automatically when they describe the task (analyze credit, compare reports, generate dispute letters, sync Drive, etc.). If something is unclear (e.g. which client), ask for the missing fact only.
 
-Available commands:
-- /do <workflow> â Optional explicit workflow (Lane 1); natural-language credit tasks usually auto-execute without this.
-- /status â System status
-- /ping â Connectivity test
-- /workflows â See all registered workflows
-- /help â Quick help
+Natural language (preferred):
+- Mac: "is my mac online", "on my mac run git status"
+- Hub: "system status", "help", "ping"
+- Work: describe the task (analyze credit, run drive ingest, generate tax docs) — no slash required
+
+Optional shortcuts: /do, /status, /ping, /help, /workflows
 ${workflowContext}
 
 Conversation Context:
