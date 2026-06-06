@@ -32,7 +32,7 @@ const COST_ESTIMATE_CENTS = 5;
 // Fal queue poll budget. Advanced face-swap (with 2x upscale) typically
 // finishes in 10-40s; we cap well under the edge-function wall.
 const POLL_INTERVAL_MS = 2000;
-const POLL_MAX_MS = 120_000;
+const POLL_MAX_MS = 240_000;
 
 type Body = {
   faceImageUrl?: string;
