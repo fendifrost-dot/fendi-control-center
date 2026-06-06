@@ -27,7 +27,7 @@ const corsHeaders = {
 };
 
 const FAL_QUEUE_URL = "https://queue.fal.run";
-const MODEL = "easel-ai/advanced-face-swap"; // $0.05 / generation
+const MODEL = "fal-ai/face-swap"; // supported replacement for deprecated easel-ai/advanced-face-swap
 const COST_ESTIMATE_CENTS = 5;
 
 // Hard wall on the outbound submit fetch. Fal queue submit returns in <1s
@@ -80,10 +80,12 @@ async function mintToken(
   hmacKey: string,
   cb: string,
   cs: string,
+  ti: string,
 ): Promise<string> {
   const payload = JSON.stringify({
     cb,
     cs,
+    ti,
     exp: Math.floor(Date.now() / 1000) + TOKEN_TTL_SEC,
   });
   const payloadB64 = b64urlEncodeStr(payload);
@@ -163,18 +165,18 @@ serve(async (req) => {
   }
 
   // ---- build the Fal webhook (CC-internal callback receiver) ---------
-  const token = await mintToken(expectedSecret, callbackUrl, callbackSecret);
+  const token = await mintToken(expectedSecret, callbackUrl, callbackSecret, targetImageUrl);
   const ccWebhook =
     `${CC_FUNCTIONS_BASE}/faceswap-generate-callback?t=${encodeURIComponent(token)}`;
 
+  // fal-ai/face-swap schema:
+  //   base_image_url = the scene to paste a face onto (our targetImageUrl)
+  //   swap_image_url = the face to lift from (our faceImageUrl)
+  // gender / workflowType / upscale from SubmitBody are not part of this
+  // model's schema and are intentionally ignored. AVT contract unchanged.
   const input = {
-    face_image_0: faceImageUrl,
-    gender_0: body.gender ?? "male",
-    target_image: targetImageUrl,
-    // user_hair preserves the artist's own hairline (correct for a bald/shaved
-    // continuity profile); target_hair keeps the scene model's hair.
-    workflow_type: body.workflowType ?? "user_hair",
-    upscale: body.upscale ?? true,
+    base_image_url: targetImageUrl,
+    swap_image_url: faceImageUrl,
   };
 
   // ---- submit to Fal queue with webhook ------------------------------

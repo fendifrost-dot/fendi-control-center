@@ -24,7 +24,7 @@ const corsHeaders = {
   "Access-Control-Allow-Methods": "POST, OPTIONS",
 };
 
-const MODEL = "easel-ai/advanced-face-swap";
+const MODEL = "fal-ai/face-swap";
 const COST_ESTIMATE_CENTS = 5;
 const AVT_POST_TIMEOUT_MS = 10_000;
 
