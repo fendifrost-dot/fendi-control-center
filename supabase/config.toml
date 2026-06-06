@@ -112,3 +112,9 @@ verify_jwt = false
 
 [functions.remote-bridge-api]
 verify_jwt = false
+
+[functions.faceswap-generate]
+verify_jwt = false
+
+[functions.faceswap-generate-callback]
+verify_jwt = false
