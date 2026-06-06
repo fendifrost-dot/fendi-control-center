@@ -1,75 +1,98 @@
+# CC faceswap async refactor — file-by-file diff scope
 
+Matches the new AVT contract: AVT submits, CC submits to Fal, Fal pings CC, CC relays to AVT's `faceswap-callback`. No more sync polling inside the 150s edge wall.
 
-## Plan: Async Statement-Chunk Processing Pipeline
+## Files touched (only these — no schemas, migrations, or unrelated routes)
 
-### What This Does
-Large bank statement PDFs (>50MB) are currently queued in an in-memory blob but never picked up. This creates a durable database table, two new edge functions (dispatcher + worker), updates the ingest function to write durable job records, and schedules automatic dispatch every 2 minutes.
+1. `supabase/functions/faceswap-generate/index.ts` — rewrite (submit-only)
+2. `supabase/functions/faceswap-generate-callback/index.ts` — **new** (Fal → AVT relay)
+3. `supabase/config.toml` — add 2 blocks with `verify_jwt = false`
+
+That's it.
 
 ---
 
-### Step 1: Database Migration — `statement_chunk_jobs` table
+## 1. `faceswap-generate/index.ts` — rewrite
 
-Create table with all specified columns including `source_type` (default `'drive'`), `claimed_at`, `started_at`, `completed_at`. Indexes on `(status, created_at)`, `(client_id, tax_year)`, and a partial unique index `(client_id, tax_year, file_id) WHERE status IN (...)`. RLS: service_role full access, authenticated select-only. Trigger using existing `update_updated_at_column()`.
-
-### Step 2: New Edge Function — `statement-chunk-dispatch/index.ts`
-
-- Select oldest jobs with `status='requires_async_processing'` and `attempts < 3`
-- Atomically claim: `status='processing_chunked'`, `attempts++`, `claimed_at=now()`
-- If `attempts >= 3`, mark `dead_letter` instead of claiming
-- Invoke `statement-chunk-worker` for each via `fetch()` (fire-and-forget)
-- If invoke fails: set `status='chunk_processing_failed'`, `last_error='dispatch_invoke_failed:...'`
-- Return `{ picked, started, failed_to_start, job_ids }`
-
-### Step 3: New Edge Function — `statement-chunk-worker/index.ts`
-
-- Load job from `statement_chunk_jobs`; validate `status='processing_chunked'`; no-op if terminal
-- Set `started_at=now()`
-- Download source: `source_type='drive'` → `downloadFile()` from `googleDriveRead.ts`; `source_type='storage'` → download from Supabase Storage using `storage_object_path` stored in the job record (the `file_id` column stores the `storage_object_path` for storage-mode jobs as a deterministic `source_ref`)
-- `splitPdfIntoPages()` → `chunkPages(pages, 5)`
-- Per chunk: OCR scanned pages → `extractStatementChunk()` → retry once on failure
-- `mergeChunkResults()` → dedupe
-- Hard rules: zero income; never `completed` with 0 transactions
-- Update job with lineage fields + final status (`completed` / `partial_success` / `chunk_processing_failed` / `dead_letter`)
-
-### Step 4: Update `ingest-tax-documents/index.ts`
-
-Modify `createStatementChunkJob()` to also INSERT into the `statement_chunk_jobs` table. For storage-mode uploads, `file_id` will store the `storage_object_path` as the deterministic source reference (so the worker can always locate the object regardless of source type), and `source_type` is set to `'storage'`. For drive-mode, `file_id` stores the Drive file ID and `source_type='drive'`. No other logic changes needed — async routing, response format, and aggregate accounting are already implemented.
-
-### Step 5: Update `supabase/config.toml`
-
-Add:
-```
-[functions.statement-chunk-dispatch]
-verify_jwt = false
-
-[functions.statement-chunk-worker]
-verify_jwt = false
+**New request contract (matches what AVT sends):**
+```json
+POST /functions/v1/faceswap-generate
+Header: X-Proxy-Secret: <COMPOSE_LOOK_PROXY_SECRET>
+Body: {
+  "mode": "submit",
+  "callbackUrl":    "https://qoyxgnkvjukovkrvdaiq.supabase.co/functions/v1/faceswap-callback?job_id=<avt_provider_jobs.id>",
+  "callbackSecret": "<shared with AVT faceswap-callback>",
+  "faceImageUrl":   "...",
+  "targetImageUrl": "...",
+  "gender":         "male|female|non-binary",
+  "workflowType":   "user_hair|target_hair",
+  "upscale":        true
+}
 ```
 
-### Step 6: Scheduling
+**Behaviour:**
+- Validate `X-Proxy-Secret` against `COMPOSE_LOOK_PROXY_SECRET` (unchanged).
+- Reject `mode !== "submit"` with 400 (room for future modes).
+- Validate `callbackUrl` is a `https://qoyxgnkvjukovkrvdaiq.supabase.co/...` URL (defence-in-depth — we will only ever POST results to AVT).
+- Build a signed token `t` = base64url(JSON{cb, cs, exp}) + "." + HMAC-SHA256(payload, COMPOSE_LOOK_PROXY_SECRET). `cb` = AVT callbackUrl, `cs` = callbackSecret, `exp` = now + 30 min. This is the only way CC will accept a Fal webhook call — Fal itself is unauthenticated, so the token in the URL is what authorises the relay.
+- Construct Fal webhook URL:
+  `https://wkzwcfmvnwolgrdpnygc.supabase.co/functions/v1/faceswap-generate-callback?t=<token>`
+- Submit to Fal queue:
+  `POST https://queue.fal.run/easel-ai/advanced-face-swap?fal_webhook=<encoded webhook URL>`
+  Body: same `{face_image_0, gender_0, target_image, workflow_type, upscale}` as today.
+- Use a 10s `AbortController` timeout on the submit fetch (replaces `POLL_MAX_MS`). No polling loop at all — that whole block is deleted.
+- Return `{ ok: true, providerJobId: <request_id> }` with 200. On Fal submit failure return the same `FAL_SUBMIT_FAILED` / `FAL_UNREACHABLE` shape as today so AVT keeps its existing error handling.
 
-Use the insert tool (not migration) to create a `pg_cron` schedule calling `statement-chunk-dispatch` every 2 minutes via `net.http_post`. Auth header uses the anon key from environment.
+**Deleted from current file:** `POLL_INTERVAL_MS`, `POLL_MAX_MS`, the whole `while (Date.now() - started < POLL_MAX_MS)` loop, the `responseUrl` fetch, the image-extraction block. None of that runs in the sync path anymore.
 
-### Step 7: Deploy + Validate
+## 2. `faceswap-generate-callback/index.ts` — new file
 
-Deploy all 26 edge functions. Run live validation for Sam Higgins 2022:
-1. `mode=list` — verify file listing
-2. `mode=process_single` for CHASE 2022/2022.pdf — assert:
-   - `status == 'requires_async_processing'` (NOT `processed`)
-   - `ingest_status == 'requires_async_processing'` (explicit check)
-   - `chunk_job_id` present
-   - `meta.version == 'async-chunk-v1'`
-3. `mode=aggregate` — assert `files_with_errors`, `statements_failed`, zero statement income
-4. Verify `statement_chunk_jobs` row exists in DB with correct status
+Receives Fal's webhook POST. Fal's webhook payload shape:
+```json
+{ "request_id": "...", "gateway_request_id": "...",
+  "status": "OK" | "ERROR",
+  "payload": { "image": { "url", "width", "height", "content_type" } },
+  "error": "..." }
+```
 
-### Files Changed
+**Behaviour:**
+- POST only. CORS preflight OK.
+- Read `?t=<token>` from URL. Split on `.`, verify HMAC with `COMPOSE_LOOK_PROXY_SECRET`, check `exp`. Reject with 401 on any failure. (No reliance on Fal auth — we trust the URL because only we could have minted that signature.)
+- Decode `cb` (AVT callback URL, already includes `?job_id=...`) and `cs` (AVT callbackSecret) from the token.
+- Parse Fal body. Map:
+  - Fal `status === "OK"` and `payload.image.url` present → `status: "succeeded"`, attach `fal_image_url`, `content_type`, `width`, `height`, `model: "easel-ai/advanced-face-swap"`, `provider_job_id: request_id`, `cost_cents: 5`.
+  - Otherwise → `status: "failed"`, `error: <fal error or "no image in fal payload">`, plus `provider_job_id`.
+- POST to AVT's `cb` with:
+  - `Content-Type: application/json`
+  - `X-Proxy-Secret: <cs>`
+  - body above
+- 10s timeout on the AVT POST. If AVT returns non-2xx, log to console (AVT callback is idempotent so Fal will retry the webhook on non-2xx from us, which re-triggers the relay). Return 200 to Fal on success, 502 on AVT failure so Fal retries.
+- Return 200 to Fal once relay succeeds.
 
-| File | Action |
-|------|--------|
-| Migration SQL | **Create** (table + indexes + RLS + trigger) |
-| `supabase/functions/statement-chunk-worker/index.ts` | **Create** |
-| `supabase/functions/statement-chunk-dispatch/index.ts` | **Create** |
-| `supabase/functions/ingest-tax-documents/index.ts` | **Edit** (~15 lines: add DB insert in `createStatementChunkJob`) |
-| `supabase/config.toml` | **Edit** (add 2 function blocks) |
-| pg_cron schedule | **Insert** via data tool |
+## 3. `supabase/config.toml` — append two blocks
 
+```toml
+[functions.faceswap-generate]
+verify_jwt = false
+
+[functions.faceswap-generate-callback]
+verify_jwt = false
+```
+
+`faceswap-generate` is currently missing from config.toml — adding it explicitly closes that gap. `verify_jwt = false` is required for both: AVT calls `faceswap-generate` with `X-Proxy-Secret` (no JWT), and Fal calls the callback with neither.
+
+---
+
+## What I'm NOT changing
+- No DB tables, no migrations, no RLS.
+- No other edge function (compose-look, statement-external-callback, AVT functions).
+- No frontend code.
+- Secrets: reusing `COMPOSE_LOOK_PROXY_SECRET` (already shared with AVT) and `FAL_API_KEY` (already set). No new secrets needed.
+
+## Deploy order after approval
+1. Write the two function files + config.toml.
+2. Deploy `faceswap-generate-callback` first (so the webhook URL is live before the next submit).
+3. Deploy `faceswap-generate`.
+4. Hand back to you to re-run Apply My Face end-to-end.
+
+Approve and I ship.
