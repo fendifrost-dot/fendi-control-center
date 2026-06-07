@@ -314,7 +314,7 @@ serve(async (req) => {
 
   try {
     const ctrl = new AbortController();
-    const timer = setTimeout(() => ctrl.abort(), 120_000);
+    const timer = setTimeout(() => ctrl.abort(), 170_000);
     let httpStatus = 0;
     let upstream: Record<string, unknown> = {};
     try {
