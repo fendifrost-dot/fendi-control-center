@@ -20,6 +20,7 @@
 import { serve } from "https://deno.land/std@0.224.0/http/server.ts";
 import {
   buildBasePhotoPrompt,
+  buildIdentityFillPrompt,
   buildComposePrompt,
   buildSegmentedInpaintStage1Prompt,
   constantTimeEqual,
@@ -621,6 +622,47 @@ serve(async (req) => {
       }
 
       falImageUrl = currentHumanUrl;
+    } else if (pipeline === "identity_inpaint") {
+      // Grok-canvas workflow: a fully-clothed stand-in image is the canvas;
+      // SAM-3 masks the head/neck and FLUX-LoRA-fill renders the artist's
+      // identity into it. Clothing pixels outside the mask are untouched.
+      if (!body.loraUrl) {
+        return json(400, { error: "lora_required_for_identity_inpaint" });
+      }
+      const canvas = (recipe.canonicalBaseImageUrl ?? "").trim();
+      if (!canvas) {
+        return json(400, { error: "canvas_required_for_identity_inpaint" });
+      }
+      stages.push({ stage: "identity_canvas", image_url: canvas });
+
+      const seg = await callFalSam3Segment(falKey, {
+        imageUrl: canvas,
+        prompt: "the person's head, face, hair, beard, ears, and neck",
+      });
+      if (!seg.mask_url) {
+        throw new Error("identity_region_not_found: SAM-3 could not isolate a head/neck region in the canvas image");
+      }
+      stages.push({
+        stage: "sam3_segment_identity",
+        request_id: seg.request_id,
+        image_url: seg.mask_url,
+      });
+      costCents += 2;
+
+      const fill = await callFalFluxLoraFill(falKey, {
+        prompt: buildIdentityFillPrompt(body.triggerWord ?? "", recipe.basePrompt),
+        imageUrl: canvas,
+        maskUrl: seg.mask_url,
+        garmentImageUrl: signedUrls.face ?? null,
+        loraUrl: body.loraUrl,
+      });
+      stages.push({
+        stage: "flux_fill_identity",
+        request_id: fill.request_id,
+        image_url: fill.image_url,
+      });
+      costCents += 7;
+      falImageUrl = fill.image_url;
     } else if (pipeline === "seedream_only") {
       const imageUrls: string[] = [];
       if (signedUrls.face) imageUrls.push(signedUrls.face);
@@ -913,12 +955,14 @@ async function callFalFluxLoraFill(
     imageUrl: string;
     maskUrl: string;
     garmentImageUrl?: string | null;
+    loraUrl?: string | null;
   },
 ): Promise<FalImageResult> {
   const body: Record<string, unknown> = {
     prompt: input.prompt,
     image_url: input.imageUrl,
     mask_url: input.maskUrl,
+    ...(input.loraUrl ? { loras: [{ path: input.loraUrl, scale: 1.0 }] } : {}),
     paste_back: true,
     resize_to_original: true,
     output_format: "png",

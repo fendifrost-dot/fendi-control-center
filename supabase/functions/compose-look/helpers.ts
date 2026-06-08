@@ -128,7 +128,8 @@ export type PipelineMode =
   | "seedream_only"
   | "kontext_multi"
   | "lora_idm_vton"
-  | "lora_segmented_inpaint";
+  | "lora_segmented_inpaint"
+  | "identity_inpaint";
 
 /** Stage 2 / Seedream text; falls back for older proxies that only sent basePrompt. */
 export function resolveComposePrompt(recipe: { basePrompt: string; composePrompt?: string | null }): string {
@@ -160,5 +161,20 @@ export function decidePipeline(requested: PipelineMode, hasLora: boolean): Exclu
   // seedream_only same as lora_seedream does.
   if (requested === "lora_idm_vton" && !hasLora) return "seedream_only";
   if (requested === "lora_segmented_inpaint" && !hasLora) return "seedream_only";
+  if (requested === "identity_inpaint" && !hasLora) return "seedream_only";
   return requested;
+}
+
+/** Identity-swap fill prompt — replace the stand-in model's head with the
+ *  artist inside an SAM-3 head/neck mask, leaving clothing pixels alone. */
+export function buildIdentityFillPrompt(trigger: string, base: string): string {
+  const t = trigger ? `${trigger}, ` : "";
+  return (
+    `${t}In the masked region only, render this artist's exact head and face: ` +
+    `photorealistic likeness, natural hairline and facial hair per the identity notes, ` +
+    `neck skin tone matching the artist. Keep the original photo's head pose, angle, ` +
+    `lighting direction, and shadow falloff so the head sits naturally on the body. ` +
+    `Do not alter clothing, hands, body, or background outside the mask. ` +
+    `No plastic or airbrushed skin. Identity notes: ${base}`
+  );
 }
