@@ -150,7 +150,10 @@ export function sortGarmentsForVtonChain<T extends { feature_type: string }>(gar
 }
 
 export function decidePipeline(requested: PipelineMode, hasLora: boolean): Exclude<PipelineMode, "auto"> {
-  if (requested === "auto") return hasLora ? "lora_seedream" : "seedream_only";
+  // Auto follows the proven pipeline: segmented inpaint preserved identity in
+  // every approved look (May 2026 bake-off); lora_seedream's Seedream re-render
+  // destroys likeness and is now opt-in only.
+  if (requested === "auto") return hasLora ? "lora_segmented_inpaint" : "seedream_only";
   if (requested === "lora_seedream" && !hasLora) return "seedream_only";
   // lora_idm_vton requires a LoRA for the Stage 1 base photo; without one,
   // there's no canonical human image for VTON to overlay. Fall back to
