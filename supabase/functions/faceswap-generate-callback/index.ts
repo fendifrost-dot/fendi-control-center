@@ -1,6 +1,6 @@
 // Control Center edge function — faceswap-generate-callback
 //
-// Receives Fal's webhook POST after an identity-conditioned inpaint job finishes
+// Receives Fal's webhook POST after an advanced-face-swap job finishes
 // (registered by faceswap-generate via ?fal_webhook=). Verifies the signed
 // `t` token in the URL (HMAC over the AVT callback URL + secret + exp),
 // then relays the result to AVT's faceswap-callback.
@@ -24,8 +24,8 @@ const corsHeaders = {
   "Access-Control-Allow-Methods": "POST, OPTIONS",
 };
 
-const MODEL = "fal-ai/flux-kontext-lora/inpaint";
-const COST_ESTIMATE_CENTS = 7;
+const MODEL = "fal-ai/face-swap";
+const COST_ESTIMATE_CENTS = 5;
 const AVT_POST_TIMEOUT_MS = 10_000;
 
 function json(status: number, body: unknown) {
@@ -133,21 +133,16 @@ serve(async (req) => {
 
   const requestId: string | undefined = fal?.request_id ?? fal?.gateway_request_id;
   const falStatus: string = (fal?.status ?? "").toString().toUpperCase();
-  const imageUrl: string | undefined =
-    fal?.payload?.images?.[0]?.url ??
-    fal?.payload?.image?.url;
+  const imageUrl: string | undefined = fal?.payload?.image?.url;
 
   let relay: RelayBody;
   if (falStatus === "OK" && imageUrl) {
     relay = {
       status: "succeeded",
       fal_image_url: imageUrl,
-      content_type:
-        fal?.payload?.images?.[0]?.content_type ??
-        fal?.payload?.image?.content_type ??
-        "image/png",
-      width: fal?.payload?.images?.[0]?.width ?? fal?.payload?.image?.width ?? undefined,
-      height: fal?.payload?.images?.[0]?.height ?? fal?.payload?.image?.height ?? undefined,
+      content_type: fal?.payload?.image?.content_type ?? "image/png",
+      width: fal?.payload?.image?.width ?? undefined,
+      height: fal?.payload?.image?.height ?? undefined,
       model: MODEL,
       provider_job_id: requestId,
       cost_cents: COST_ESTIMATE_CENTS,

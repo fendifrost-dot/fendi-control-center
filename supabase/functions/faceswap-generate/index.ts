@@ -3,20 +3,13 @@
 // AVT's faceswap-proxy is now submit-only. This function:
 //   1. Validates X-Proxy-Secret (COMPOSE_LOOK_PROXY_SECRET).
 //   2. Mints a signed token `t` that encodes AVT's callback URL + secret.
-//   3. SAM-3 segments the head/neck region on the target canvas (sync poll).
-//   4. Submits an identity-conditioned inpaint job (flux-kontext-lora/inpaint)
-//      with the SAM-3 mask + artist reference photo to the Fal QUEUE with
+//   3. Submits the Fal advanced-face-swap job to the Fal QUEUE with
 //      ?fal_webhook=<our faceswap-generate-callback URL>?t=<token>.
-//   5. Returns { ok: true, providerJobId } once Fal accepts the job.
-//
-// Pattern A from the PuLID-Flux upgrade handoff: preserve outfit/composition
-// via masked regional inpaint while conditioning on the identity reference.
-// fal-ai/flux-pulid has no mask/inpaint API on Fal, so we use
-// fal-ai/flux-kontext-lora/inpaint which accepts image_url + mask_url +
-// reference_image_url — the same wire-up the handoff describes.
+//   4. Returns { ok: true, providerJobId } in under 5s.
 //
 // When Fal finishes, it POSTs to faceswap-generate-callback, which verifies
-// `t` and relays the result to AVT's faceswap-callback.
+// `t` and relays the result to AVT's faceswap-callback. No polling here —
+// the old 150s edge wall is no longer the bottleneck.
 //
 // Env (CC secrets):
 //   - COMPOSE_LOOK_PROXY_SECRET   (shared with AVT — also used as HMAC key)
@@ -34,26 +27,22 @@ const corsHeaders = {
 };
 
 const FAL_QUEUE_URL = "https://queue.fal.run";
-// Identity-conditioned inpaint (mask + reference_image_url). Replaces fal-ai/face-swap.
-const MODEL = "fal-ai/flux-kontext-lora/inpaint";
-const COST_ESTIMATE_CENTS = 7; // SAM-3 ~2¢ + kontext inpaint ~5¢
+const MODEL = "fal-ai/face-swap"; // supported replacement for deprecated easel-ai/advanced-face-swap
+const COST_ESTIMATE_CENTS = 5;
 
+// Hard wall on the outbound submit fetch. Fal queue submit returns in <1s
+// normally; 10s is plenty.
 const FAL_SUBMIT_TIMEOUT_MS = 10_000;
-const SAM3_POLL_TIMEOUT_MS = 90_000;
 
+// Token lifetime — Fal jobs can sit in queue for a while. 30 min is safe.
 const TOKEN_TTL_SEC = 30 * 60;
 
+// CC base URL — used to build the fal_webhook target. This project's ref.
 const CC_FUNCTIONS_BASE = "https://wkzwcfmvnwolgrdpnygc.supabase.co/functions/v1";
+
+// Allow-list for AVT callback host to keep this function from being abused
+// as an arbitrary HTTP submitter.
 const AVT_CALLBACK_HOST = "qoyxgnkvjukovkrvdaiq.supabase.co";
-
-const IDENTITY_MASK_PROMPT = "the person's head, face, hair, beard, ears, and neck";
-
-const IDENTITY_INPAINT_PROMPT =
-  "In the masked region only, render this person's exact head and face: professional portrait, " +
-  "photorealistic, natural skin texture with visible pores, sharp focus, natural eye catchlights " +
-  "and specular highlights, 35mm camera. Keep the original photo's head pose, angle, lighting " +
-  "direction, and shadow falloff so the head sits naturally on the body. Do not alter clothing, " +
-  "hands, body, or background outside the mask. No plastic or airbrushed skin.";
 
 type SubmitBody = {
   mode?: string;
@@ -112,64 +101,6 @@ async function mintToken(
   return `${payloadB64}.${b64urlEncodeBuf(sig)}`;
 }
 
-async function pollFalUntilDone(
-  apiKey: string,
-  statusUrl: string,
-  responseUrl: string,
-  timeoutMs: number = SAM3_POLL_TIMEOUT_MS,
-): Promise<any> {
-  const start = Date.now();
-  const POLL_INTERVAL_MS = 1500;
-  while (Date.now() - start < timeoutMs) {
-    await new Promise((r) => setTimeout(r, POLL_INTERVAL_MS));
-    const statusResp = await fetch(statusUrl, {
-      headers: { Authorization: `Key ${apiKey}` },
-    });
-    if (!statusResp.ok) continue;
-    const status = await statusResp.json();
-    if (status?.status === "COMPLETED") {
-      const respResp = await fetch(responseUrl, {
-        headers: { Authorization: `Key ${apiKey}` },
-      });
-      if (!respResp.ok) {
-        throw new Error(`fal_response_${respResp.status}: ${await respResp.text().catch(() => "")}`);
-      }
-      return await respResp.json();
-    }
-    if (status?.status === "FAILED" || status?.status === "ERROR") {
-      throw new Error(`fal_failed: ${status?.error ?? "unknown"}`);
-    }
-  }
-  throw new Error("fal_poll_timeout");
-}
-
-async function callFalSam3Segment(
-  apiKey: string,
-  input: { imageUrl: string; prompt: string },
-): Promise<{ request_id: string; mask_url: string | null }> {
-  const submitResp = await fetch(`${FAL_QUEUE_URL}/fal-ai/sam-3/image`, {
-    method: "POST",
-    headers: {
-      Authorization: `Key ${apiKey}`,
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify({
-      image_url: input.imageUrl,
-      prompt: input.prompt,
-      apply_mask: false,
-      output_format: "png",
-      max_masks: 1,
-    }),
-  });
-  if (!submitResp.ok) {
-    throw new Error(`sam3_submit_${submitResp.status}: ${await submitResp.text().catch(() => "")}`);
-  }
-  const { request_id, status_url, response_url } = await submitResp.json();
-  const result = await pollFalUntilDone(apiKey, status_url, response_url);
-  const maskUrl = result?.masks?.[0]?.url ?? result?.image?.url ?? null;
-  return { request_id, mask_url: maskUrl };
-}
-
 serve(async (req) => {
   if (req.method === "OPTIONS") return new Response(null, { headers: corsHeaders });
   if (req.method !== "POST") return json(405, { ok: false, error: "method_not_allowed" });
@@ -218,6 +149,7 @@ serve(async (req) => {
     });
   }
 
+  // Defence-in-depth: only relay results back to AVT.
   let parsedCb: URL;
   try {
     parsedCb = new URL(callbackUrl);
@@ -232,51 +164,22 @@ serve(async (req) => {
     });
   }
 
-  // ---- SAM-3 head/neck mask (sync — reuses compose-look identity_inpaint prompt) ----
-  let maskUrl: string;
-  try {
-    const seg = await callFalSam3Segment(falKey, {
-      imageUrl: targetImageUrl,
-      prompt: IDENTITY_MASK_PROMPT,
-    });
-    if (!seg.mask_url) {
-      return json(400, {
-        ok: false,
-        errorCode: "MASK_NOT_FOUND",
-        errorMessage: "SAM-3 could not isolate a head/neck region in the target image.",
-        retryable: false,
-      });
-    }
-    maskUrl = seg.mask_url;
-    console.log(`[faceswap-generate] sam3 mask ready request_id=${seg.request_id}`);
-  } catch (err) {
-    return json(502, {
-      ok: false,
-      errorCode: "SAM3_FAILED",
-      errorMessage: String(err).slice(0, 300),
-      retryable: true,
-    });
-  }
-
+  // ---- build the Fal webhook (CC-internal callback receiver) ---------
   const token = await mintToken(expectedSecret, callbackUrl, callbackSecret, targetImageUrl);
   const ccWebhook =
     `${CC_FUNCTIONS_BASE}/faceswap-generate-callback?t=${encodeURIComponent(token)}`;
 
-  // fal-ai/flux-kontext-lora/inpaint — identity-conditioned regional fill.
-  // gender / workflowType / upscale from SubmitBody are legacy face-swap fields;
-  // AVT contract unchanged, fields ignored.
+  // fal-ai/face-swap schema:
+  //   base_image_url = the scene to paste a face onto (our targetImageUrl)
+  //   swap_image_url = the face to lift from (our faceImageUrl)
+  // gender / workflowType / upscale from SubmitBody are not part of this
+  // model's schema and are intentionally ignored. AVT contract unchanged.
   const input = {
-    image_url: targetImageUrl,
-    mask_url: maskUrl,
-    reference_image_url: faceImageUrl,
-    prompt: IDENTITY_INPAINT_PROMPT,
-    num_inference_steps: 28,
-    guidance_scale: 2.5,
-    strength: 0.85,
-    output_format: "png",
-    enable_safety_checker: false,
+    base_image_url: targetImageUrl,
+    swap_image_url: faceImageUrl,
   };
 
+  // ---- submit to Fal queue with webhook ------------------------------
   const falUrl = `${FAL_QUEUE_URL}/${MODEL}?fal_webhook=${encodeURIComponent(ccWebhook)}`;
   let submitJson: any;
   let submitStatus = 0;
@@ -320,7 +223,7 @@ serve(async (req) => {
   }
 
   console.log(
-    `[faceswap-generate] submitted model=${MODEL} request_id=${requestId} webhook->faceswap-generate-callback cb=${callbackUrl}`,
+    `[faceswap-generate] submitted request_id=${requestId} webhook->faceswap-generate-callback cb=${callbackUrl}`,
   );
 
   return json(200, {
