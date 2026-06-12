@@ -6,7 +6,7 @@
 //
 // Boundary contract:
 //   Header:  X-Proxy-Secret (must equal COMPOSE_LOOK_PROXY_SECRET)
-//   Input:   { recipe, signedUrls, loraUrl?, triggerWord? }
+//   Input:   { recipe, signedUrls, loraUrl?, triggerWord?, loraScale? }
 //   Output:  { fal_image_url, pipeline_used, cost_cents, generation_metadata }
 //
 // Env vars required:
@@ -97,6 +97,14 @@ type Body = {
   signedUrls: SignedUrls;
   loraUrl?: string;
   triggerWord?: string;
+  /**
+   * Optional identity-LoRA strength for the flux-lora-fill inpaint in the
+   * identity_inpaint pipeline. Defaults to 1.0 (full strength). Lower it
+   * (e.g. 0.8) if the LoRA's identity prior overrides the canvas head pose
+   * / lighting. Only consumed by identity_inpaint; other pipelines set their
+   * own scale.
+   */
+  loraScale?: number;
   // Async mode (Phase 4 refactor): when present, CC returns
   // `{ status: 'queued' }` immediately and runs the pipeline in the
   // background via EdgeRuntime.waitUntil. When the pipeline finishes (or
@@ -655,6 +663,7 @@ serve(async (req) => {
         maskUrl: seg.mask_url,
         garmentImageUrl: signedUrls.face ?? null,
         loraUrl: body.loraUrl,
+        loraScale: body.loraScale ?? 1.0,
       });
       stages.push({
         stage: "flux_fill_identity",
@@ -956,13 +965,14 @@ async function callFalFluxLoraFill(
     maskUrl: string;
     garmentImageUrl?: string | null;
     loraUrl?: string | null;
+    loraScale?: number;
   },
 ): Promise<FalImageResult> {
   const body: Record<string, unknown> = {
     prompt: input.prompt,
     image_url: input.imageUrl,
     mask_url: input.maskUrl,
-    ...(input.loraUrl ? { loras: [{ path: input.loraUrl, scale: 1.0 }] } : {}),
+    ...(input.loraUrl ? { loras: [{ path: input.loraUrl, scale: input.loraScale ?? 1.0 }] } : {}),
     paste_back: true,
     resize_to_original: true,
     output_format: "png",
