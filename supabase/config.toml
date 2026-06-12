@@ -110,6 +110,12 @@ verify_jwt = false
 [functions.train-style-lora]
 verify_jwt = false
 
+[functions.fal-storage-upload]
+verify_jwt = false
+
+[functions.fal-queue-poll]
+verify_jwt = false
+
 [functions.remote-bridge-api]
 verify_jwt = false
 

@@ -19,6 +19,8 @@ type Body = {
   steps?: number;
   callback_url?: string;
   artist_id?: string;
+  /** Submit to Fal and return queue URLs immediately — no inline poll. */
+  queue_only?: boolean;
 };
 
 const corsHeaders = {
@@ -143,8 +145,19 @@ serve(async (req) => {
       });
     }
 
-    // Sync fallback: submit, poll inline, return lora_url.
     const { request_id, status_url, response_url } = await submitTraining(falKey, body);
+
+    // Queue-only: return Fal poll URLs for a local/remote poller (identity LoRA kickoff).
+    if (body.queue_only) {
+      return json(200, {
+        status: "queued",
+        request_id,
+        status_url,
+        response_url,
+      });
+    }
+
+    // Sync fallback: submit, poll inline, return lora_url.
     if (!status_url || !response_url) {
       throw new Error("train_submit_missing_queue_urls");
     }
