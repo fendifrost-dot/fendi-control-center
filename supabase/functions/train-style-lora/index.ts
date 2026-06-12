@@ -15,6 +15,8 @@ type Body = {
   images_data_url?: string;
   trigger_word?: string;
   is_style?: boolean;
+  create_masks?: boolean;
+  steps?: number;
   callback_url?: string;
   artist_id?: string;
 };
@@ -90,8 +92,8 @@ async function submitTraining(
       images_data_url: body.images_data_url,
       trigger_word: body.trigger_word ?? "FENDIFITS",
       is_style: body.is_style ?? true,
-      create_masks: false,
-      steps: 300,
+      create_masks: body.create_masks ?? false,
+      steps: body.steps ?? 300,
     }),
   });
   if (!submitResp.ok) {
