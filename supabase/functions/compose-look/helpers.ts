@@ -170,11 +170,14 @@ export function decidePipeline(requested: PipelineMode, hasLora: boolean): Exclu
 export function buildIdentityFillPrompt(trigger: string, base: string): string {
   const t = trigger ? `${trigger}, ` : "";
   return (
-    `${t}In the masked region only, render this artist's exact head and face: ` +
-    `photorealistic likeness, natural hairline and facial hair per the identity notes, ` +
-    `neck skin tone matching the artist. Keep the original photo's head pose, angle, ` +
-    `lighting direction, and shadow falloff so the head sits naturally on the body. ` +
-    `Do not alter clothing, hands, body, or background outside the mask. ` +
-    `No plastic or airbrushed skin. Identity notes: ${base}`
+    `${t}a raw cinematic portrait. In the masked region only, render this artist's ` +
+    `exact head and face with hyper-detailed skin texture, visible skin pores, natural ` +
+    `oil sheen on forehead and cheeks, coarse individual beard hairs, scalp stubble, ` +
+    `subtle under-eye and skin asymmetry, authentic micro-imperfections. Shot on 35mm ` +
+    `film, Arri Alexa 35 filmic look, natural subsurface scattering, real lens softness. ` +
+    `Match the exact head pose, angle, lighting direction, and shadow falloff from the ` +
+    `base image so the head sits naturally on the body. Do not alter clothing, hands, ` +
+    `body, or background outside the mask. No airbrushing, no smooth-skin filter, no ` +
+    `CGI finish, no plastic skin. Identity notes: ${base}`
   );
 }
