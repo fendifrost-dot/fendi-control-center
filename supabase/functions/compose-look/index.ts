@@ -664,7 +664,7 @@ serve(async (req) => {
         garmentImageUrl: signedUrls.face ?? null,
         loraUrl: body.loraUrl,
         loraScale: body.loraScale ?? 0.85,
-        guidanceScale: 5.0,
+        guidanceScale: 28,
         numInferenceSteps: 32,
       });
       stages.push({
