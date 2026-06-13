@@ -664,6 +664,8 @@ serve(async (req) => {
         garmentImageUrl: signedUrls.face ?? null,
         loraUrl: body.loraUrl,
         loraScale: body.loraScale ?? 1.0,
+        guidanceScale: 3.5,
+        numInferenceSteps: 32,
       });
       stages.push({
         stage: "flux_fill_identity",
@@ -966,6 +968,8 @@ async function callFalFluxLoraFill(
     garmentImageUrl?: string | null;
     loraUrl?: string | null;
     loraScale?: number;
+    guidanceScale?: number;
+    numInferenceSteps?: number;
   },
 ): Promise<FalImageResult> {
   const body: Record<string, unknown> = {
@@ -977,8 +981,8 @@ async function callFalFluxLoraFill(
     resize_to_original: true,
     output_format: "png",
     enable_safety_checker: false,
-    num_inference_steps: 28,
-    guidance_scale: 30,
+    num_inference_steps: input.numInferenceSteps ?? 28,
+    guidance_scale: input.guidanceScale ?? 30,
   };
   if (input.garmentImageUrl) {
     body.fill_image = { image_url: input.garmentImageUrl };
