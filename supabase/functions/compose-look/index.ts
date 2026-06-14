@@ -692,32 +692,16 @@ serve(async (req) => {
       costCents += 4;
       let currentImageUrl = refine.image_url;
 
-      // Phase 3 — Runway gen4_image polish (optional final stage).
-      // Cinematic finish on top of the clarity-upscaler texture pass.
-      // Wrapped in try/catch: if RUNWAY_API_KEY isn't set or the call
-      // fails, fall back cleanly to the Phase 2 output. The look still
-      // completes; the stage log records the skip/failure for debug.
-      if (runwayKey) {
-        try {
-          const polish = await callRunwayPolish(runwayKey, {
-            imageUrl: currentImageUrl,
-          });
-          stages.push({
-            stage: "runway_polish",
-            request_id: polish.request_id,
-            image_url: polish.image_url,
-          });
-          costCents += 10;
-          currentImageUrl = polish.image_url;
-        } catch (err: any) {
-          stages.push({
-            stage: "runway_polish_failed",
-            error: String(err?.message ?? err).slice(0, 200),
-          });
-        }
-      } else {
-        stages.push({ stage: "runway_polish_skipped_no_key" });
-      }
+      // Phase 3 — Runway gen4_image polish: DISABLED.
+      // Smoke test on Pair 2 (look b046aaaf) showed Runway gen4_image
+      // text_to_image with referenceImages rebuilds the face from its
+      // own prior — quality is photographic but identity is lost
+      // ("That doesn't look like me"). Wrong architectural fit; Runway
+      // gen4 is a generator, not a low-denoise refiner. Keeping the
+      // helper for reference (a future Magnific or Act-Two integration
+      // can replace it). Production output is the Phase 2 clarity-
+      // upscaler refinement.
+      stages.push({ stage: "runway_polish_disabled_identity_drift" });
       falImageUrl = currentImageUrl;
     } else if (pipeline === "seedream_only") {
       const imageUrls: string[] = [];
