@@ -673,7 +673,22 @@ serve(async (req) => {
         image_url: fill.image_url,
       });
       costCents += 7;
-      falImageUrl = fill.image_url;
+
+      // Phase 2 — clarity-upscaler refinement pass. flux-lora-fill at the
+      // Fal-floor guidance of 28 locks identity but leaves a plastic-skin
+      // ceiling. SUPIR-family upscaler injects pore-level texture without
+      // shifting facial geometry (creativity 0.3 + resemblance 2.0 = lock
+      // structure, rework surface).
+      const refine = await callFalClarityUpscaler(falKey, {
+        imageUrl: fill.image_url,
+      });
+      stages.push({
+        stage: "clarity_upscaler_refine",
+        request_id: refine.request_id,
+        image_url: refine.image_url,
+      });
+      costCents += 4;
+      falImageUrl = refine.image_url;
     } else if (pipeline === "seedream_only") {
       const imageUrls: string[] = [];
       if (signedUrls.face) imageUrls.push(signedUrls.face);
@@ -1002,6 +1017,46 @@ async function callFalFluxLoraFill(
   const result = await pollFalUntilDone(apiKey, request_id, status_url, response_url, 120_000);
   const url = result?.images?.[0]?.url;
   if (!url) throw new Error("flux_fill_no_image");
+  return { request_id, image_url: url };
+}
+
+// Clarity-upscaler (SUPIR-family) — refinement pass that injects
+// pore-level skin texture without shifting facial geometry.
+async function callFalClarityUpscaler(
+  apiKey: string,
+  input: {
+    imageUrl: string;
+    prompt?: string;
+    negativePrompt?: string;
+  },
+): Promise<FalImageResult> {
+  const submitResp = await fetch("https://queue.fal.run/fal-ai/clarity-upscaler", {
+    method: "POST",
+    headers: {
+      Authorization: `Key ${apiKey}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      image_url: input.imageUrl,
+      prompt: input.prompt ?? "raw cinematic photograph, visible skin pores and natural texture, beard hair detail, 35mm film grain, Arri Alexa 35",
+      negative_prompt: input.negativePrompt ?? "plastic skin, airbrushed, smooth skin filter, CGI, blurred edges, doll-like, glossy",
+      upscale_factor: 2,
+      creativity: 0.3,
+      resemblance: 2.0,
+      dynamic: 6,
+      num_inference_steps: 18,
+      guidance_scale: 4,
+      enable_safety_checker: false,
+      output_format: "png",
+    }),
+  });
+  if (!submitResp.ok) {
+    throw new Error(`clarity_upscaler_submit_${submitResp.status}: ${await submitResp.text().catch(() => "")}`);
+  }
+  const { request_id, status_url, response_url } = await submitResp.json();
+  const result = await pollFalUntilDone(apiKey, request_id, status_url, response_url, 120_000);
+  const url = result?.image?.url ?? result?.images?.[0]?.url;
+  if (!url) throw new Error("clarity_upscaler_no_image");
   return { request_id, image_url: url };
 }
 
