@@ -1102,7 +1102,11 @@ async function callRunwayPolish(
 ): Promise<{ request_id: string; image_url: string }> {
   const promptText = input.prompt ??
     "raw cinematic photograph, Arri Alexa 35 filmic rendering, natural skin texture and pores, real beard hair detail, soft anamorphic lens, 35mm film grain, photographic micro-imperfections — preserve face, outfit, pose, and background exactly";
-  const submitResp = await fetch("https://api.dev.runwayml.com/v1/image_to_image", {
+  // Runway's gen4_image polish endpoint is text_to_image with a
+  // reference image — there is no separate /image_to_image route.
+  // Ratio must match one of Runway's supported aspect ratios; 720:1280
+  // is the portrait option closest to our 1152x1728 (2:3) input.
+  const submitResp = await fetch("https://api.dev.runwayml.com/v1/text_to_image", {
     method: "POST",
     headers: {
       Authorization: `Bearer ${apiKey}`,
@@ -1111,9 +1115,9 @@ async function callRunwayPolish(
     },
     body: JSON.stringify({
       model: "gen4_image",
-      promptImage: input.imageUrl,
       promptText,
-      ratio: "1152:1728",
+      referenceImages: [{ uri: input.imageUrl, tag: "source" }],
+      ratio: "720:1280",
     }),
   });
   if (!submitResp.ok) {
