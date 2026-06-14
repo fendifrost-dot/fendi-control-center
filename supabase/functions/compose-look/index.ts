@@ -141,6 +141,7 @@ serve(async (req) => {
   // ---- env --------------------------------------------------------------
   const falKey = Deno.env.get("FAL_API_KEY") ?? "";
   const proxySecret = Deno.env.get("COMPOSE_LOOK_PROXY_SECRET") ?? "";
+  const runwayKey = Deno.env.get("RUNWAY_API_KEY") ?? "";
   if (!falKey || !proxySecret) {
     return json(500, { error: "server_misconfigured" });
   }
@@ -689,7 +690,35 @@ serve(async (req) => {
         image_url: refine.image_url,
       });
       costCents += 4;
-      falImageUrl = refine.image_url;
+      let currentImageUrl = refine.image_url;
+
+      // Phase 3 — Runway gen4_image polish (optional final stage).
+      // Cinematic finish on top of the clarity-upscaler texture pass.
+      // Wrapped in try/catch: if RUNWAY_API_KEY isn't set or the call
+      // fails, fall back cleanly to the Phase 2 output. The look still
+      // completes; the stage log records the skip/failure for debug.
+      if (runwayKey) {
+        try {
+          const polish = await callRunwayPolish(runwayKey, {
+            imageUrl: currentImageUrl,
+          });
+          stages.push({
+            stage: "runway_polish",
+            request_id: polish.request_id,
+            image_url: polish.image_url,
+          });
+          costCents += 10;
+          currentImageUrl = polish.image_url;
+        } catch (err: any) {
+          stages.push({
+            stage: "runway_polish_failed",
+            error: String(err?.message ?? err).slice(0, 200),
+          });
+        }
+      } else {
+        stages.push({ stage: "runway_polish_skipped_no_key" });
+      }
+      falImageUrl = currentImageUrl;
     } else if (pipeline === "seedream_only") {
       const imageUrls: string[] = [];
       if (signedUrls.face) imageUrls.push(signedUrls.face);
@@ -1057,6 +1086,66 @@ async function callFalClarityUpscaler(
   const url = result?.image?.url ?? result?.images?.[0]?.url;
   if (!url) throw new Error("clarity_upscaler_no_image");
   return { request_id, image_url: url };
+}
+
+// Runway gen4_image polish — cinematic finish pass on top of Phase 2.
+// Uses Runway's official Image-to-Image API. The request body shape and
+// response shape may need iteration; the call site wraps this in
+// try/catch so a 4xx surface here doesn't break looks. See runway_polish
+// or runway_polish_failed stage entries to debug.
+async function callRunwayPolish(
+  apiKey: string,
+  input: {
+    imageUrl: string;
+    prompt?: string;
+  },
+): Promise<{ request_id: string; image_url: string }> {
+  const promptText = input.prompt ??
+    "raw cinematic photograph, Arri Alexa 35 filmic rendering, natural skin texture and pores, real beard hair detail, soft anamorphic lens, 35mm film grain, photographic micro-imperfections — preserve face, outfit, pose, and background exactly";
+  const submitResp = await fetch("https://api.dev.runwayml.com/v1/image_to_image", {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${apiKey}`,
+      "X-Runway-Version": "2024-11-06",
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      model: "gen4_image",
+      promptImage: input.imageUrl,
+      promptText,
+      ratio: "1152:1728",
+    }),
+  });
+  if (!submitResp.ok) {
+    throw new Error(`runway_submit_${submitResp.status}: ${await submitResp.text().catch(() => "")}`);
+  }
+  const submit = await submitResp.json();
+  const taskId = submit?.id;
+  if (!taskId) throw new Error("runway_no_task_id");
+
+  const start = Date.now();
+  const POLL_INTERVAL_MS = 2000;
+  const POLL_TIMEOUT_MS = 180_000;
+  while (Date.now() - start < POLL_TIMEOUT_MS) {
+    await new Promise((r) => setTimeout(r, POLL_INTERVAL_MS));
+    const statusResp = await fetch(`https://api.dev.runwayml.com/v1/tasks/${taskId}`, {
+      headers: {
+        Authorization: `Bearer ${apiKey}`,
+        "X-Runway-Version": "2024-11-06",
+      },
+    });
+    if (!statusResp.ok) continue;
+    const status = await statusResp.json();
+    if (status?.status === "SUCCEEDED") {
+      const url = status?.output?.[0] ?? status?.output_url ?? status?.outputs?.[0]?.url;
+      if (!url) throw new Error("runway_no_output_url");
+      return { request_id: taskId, image_url: url };
+    }
+    if (status?.status === "FAILED") {
+      throw new Error(`runway_failed: ${status?.failure ?? "unknown"}`);
+    }
+  }
+  throw new Error("runway_poll_timeout");
 }
 
 // Leffa Virtual Try-On (fal-ai/leffa/virtual-tryon). Garment-overlay
