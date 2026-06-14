@@ -677,8 +677,9 @@ serve(async (req) => {
       // Phase 2 — clarity-upscaler refinement pass. flux-lora-fill at the
       // Fal-floor guidance of 28 locks identity but leaves a plastic-skin
       // ceiling. SUPIR-family upscaler injects pore-level texture without
-      // shifting facial geometry (creativity 0.3 + resemblance 2.0 = lock
-      // structure, rework surface).
+      // shifting facial geometry (creativity 0.3 + resemblance 0.85 = lock
+      // structure, rework surface). resemblance is ControlNet strength on a
+      // 0-1 scale; upscale_factor 1 refines at native res without enlarging.
       const refine = await callFalClarityUpscaler(falKey, {
         imageUrl: fill.image_url,
       });
@@ -1040,14 +1041,12 @@ async function callFalClarityUpscaler(
       image_url: input.imageUrl,
       prompt: input.prompt ?? "raw cinematic photograph, visible skin pores and natural texture, beard hair detail, 35mm film grain, Arri Alexa 35",
       negative_prompt: input.negativePrompt ?? "plastic skin, airbrushed, smooth skin filter, CGI, blurred edges, doll-like, glossy",
-      upscale_factor: 2,
+      upscale_factor: 1,
       creativity: 0.3,
-      resemblance: 2.0,
-      dynamic: 6,
+      resemblance: 0.85,
       num_inference_steps: 18,
       guidance_scale: 4,
       enable_safety_checker: false,
-      output_format: "png",
     }),
   });
   if (!submitResp.ok) {
