@@ -58,7 +58,7 @@ type FalStatusResp = {
   };
 };
 
-const FAL_KLING_ENDPOINT = "https://queue.fal.run/fal-ai/kling-video/v2.1/master/video-to-video";
+const FAL_KLING_ENDPOINT = "https://queue.fal.run/fal-ai/kling-video/o1/video-to-video/edit";
 const POLL_INTERVAL_MS = 3_000;
 const SYNC_POLL_TIMEOUT_MS = 140_000;
 const ASYNC_POLL_TIMEOUT_MS = 600_000;
@@ -172,8 +172,8 @@ serve(async (req) => {
       });
     }
 
-    // Estimate cost (Kling pricing varies; placeholder for 5s at ~$0.15)
-    const costCents = 15;
+    // Kling O1 Edit pricing: $0.168/sec, 5s = $0.84 = 84 cents
+    const costCents = 84;
 
     return json(200, {
       output_video_url: outputUrl,
@@ -245,12 +245,10 @@ async function submitKlingJob(
     prompt: string;
   },
 ): Promise<FalQueueResp> {
-  // Fal queue submission for Kling video-to-video.
+  // Fal queue submission for Kling O1 Edit (video-to-video natural language editor).
   const requestBody = {
     video_url: input.sourceVideoUrl,
     prompt: input.prompt,
-    cfg: 7.5,
-    duration: 5,
   };
 
   const resp = await fetch(FAL_KLING_ENDPOINT, {
