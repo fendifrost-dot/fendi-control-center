@@ -164,11 +164,20 @@ serve(async (req) => {
       });
     }
 
-    const outputUrl = final.result?.video?.url || final.result?.video_url;
+    // Try multiple possible field names for Kling output video
+    const outputUrl = final.result?.video?.url
+      || final.result?.video_url
+      || final.result?.output_video
+      || final.result?.edited_video
+      || (final.result as any)?.video?.url
+      || (final.result as any)?.output?.url;
+
     if (!outputUrl) {
       return json(502, {
         error: "kling_no_video_url",
         request_id: requestId,
+        debug_result_keys: Object.keys(final.result || {}),
+        debug_result: JSON.stringify(final.result).slice(0, 500),
       });
     }
 
