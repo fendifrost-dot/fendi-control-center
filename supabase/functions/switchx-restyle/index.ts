@@ -282,7 +282,9 @@ async function submitSwitchXJob(
     source_uri: input.sourceVideoUrl,
     prompt: input.prompt,
     alpha_mode: input.mode,
-    max_resolution: "720p",
+    // Beeble wants max_resolution as an integer (vertical pixels), not "720p".
+    // 720 = 720p, 1080 = 1080p. We default to 720 for cost (10c/30 frames).
+    max_resolution: 720,
   };
   if (input.referenceImageUrl) {
     requestBody.reference_image_uri = input.referenceImageUrl;
