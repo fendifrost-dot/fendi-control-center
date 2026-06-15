@@ -37,7 +37,13 @@
 //                for full scene replacements (b-roll, lyric visuals).
 
 import { serve } from "https://deno.land/std@0.224.0/http/server.ts";
-import { constantTimeEqual } from "../compose-look/helpers.ts";
+
+function constantTimeEqual(a: string, b: string): boolean {
+  if (a.length !== b.length) return false;
+  let diff = 0;
+  for (let i = 0; i < a.length; i++) diff |= a.charCodeAt(i) ^ b.charCodeAt(i);
+  return diff === 0;
+}
 
 type SwitchXMode = "custom" | "auto";
 
