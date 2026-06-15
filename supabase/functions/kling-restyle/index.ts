@@ -41,7 +41,7 @@ type Body = {
 type FalQueueResp = {
   request_id: string;
   status_url: string;
-  result_url: string;
+  response_url: string;
 };
 
 type FalStatusResp = {
@@ -130,8 +130,8 @@ serve(async (req) => {
 
     const requestId = submit?.request_id;
     const statusUrl = submit?.status_url;
-    const resultUrl = submit?.result_url;
-    if (!requestId || !statusUrl || !resultUrl) {
+    const responseUrl = submit?.response_url;
+    if (!requestId || !statusUrl || !responseUrl) {
       return json(502, {
         error: "kling_no_request_id",
         detail: JSON.stringify(submit).slice(0, 300),
@@ -141,7 +141,7 @@ serve(async (req) => {
     const timeoutMs = body.callback_url ? ASYNC_POLL_TIMEOUT_MS : SYNC_POLL_TIMEOUT_MS;
     let final: FalStatusResp;
     try {
-      final = await pollFalUntilDone(falKey, statusUrl, resultUrl, timeoutMs);
+      final = await pollFalUntilDone(falKey, statusUrl, responseUrl, timeoutMs);
     } catch (err: any) {
       return json(502, {
         error: "kling_poll_failed",
@@ -265,7 +265,7 @@ async function submitKlingJob(
 async function pollFalUntilDone(
   apiKey: string,
   statusUrl: string,
-  resultUrl: string,
+  responseUrl: string,
   timeoutMs: number,
 ): Promise<FalStatusResp> {
   const start = Date.now();
@@ -282,15 +282,15 @@ async function pollFalUntilDone(
     const status: FalStatusResp = await resp.json();
     const s = (status.status || "").toUpperCase();
     if (s === "COMPLETED") {
-      // Fetch final result from result_url
-      const resultResp = await fetch(resultUrl, {
+      // Fetch final result from response_url
+      const respResp = await fetch(responseUrl, {
         headers: { Authorization: `Key ${apiKey}` },
       });
-      if (!resultResp.ok) {
-        const errText = await resultResp.text().catch(() => "");
-        throw new Error(`kling_result_${resultResp.status}: ${errText.slice(0, 300)}`);
+      if (!respResp.ok) {
+        const errText = await respResp.text().catch(() => "");
+        throw new Error(`kling_response_${respResp.status}: ${errText.slice(0, 300)}`);
       }
-      const finalResult: FalStatusResp = await resultResp.json();
+      const finalResult: FalStatusResp = await respResp.json();
       return { ...status, result: finalResult.result };
     }
     if (s === "FAILED") {
