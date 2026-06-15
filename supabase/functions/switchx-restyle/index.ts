@@ -273,23 +273,19 @@ async function submitSwitchXJob(
     referenceImageUrl?: string | null;
   },
 ): Promise<BeebleSubmitResp> {
-  // Beeble API request body. Exact field names verified against
-  // docs.beeble.ai/beeble/switchx. SwitchX accepts source media as a
-  // HTTPS URL pointing to the video file (MP4 or MOV, H.264 or HEVC,
-  // max 240 frames per job).
+  // Beeble API request body. Field names per docs.beeble.ai/beeble/switchx
+  // — flat top-level fields, NOT nested source/reference objects. Required
+  // fields: generation_type, source_uri, prompt. Optional: reference_image_uri,
+  // alpha_uri, alpha_mode, max_resolution.
   const requestBody: Record<string, unknown> = {
-    source: {
-      type: "video",
-      url: input.sourceVideoUrl,
-    },
+    generation_type: "video",
+    source_uri: input.sourceVideoUrl,
     prompt: input.prompt,
-    mode: input.mode,
+    alpha_mode: input.mode,
+    max_resolution: "720p",
   };
   if (input.referenceImageUrl) {
-    requestBody.reference = {
-      type: "image",
-      url: input.referenceImageUrl,
-    };
+    requestBody.reference_image_uri = input.referenceImageUrl;
   }
 
   const resp = await fetch(SWITCHX_SUBMIT_URL, {
@@ -302,7 +298,9 @@ async function submitSwitchXJob(
   });
   if (!resp.ok) {
     const errText = await resp.text().catch(() => "");
-    throw new Error(`beeble_submit_${resp.status}: ${errText.slice(0, 400)}`);
+    // Bump error truncation to 1500 chars so 422 validation lists with
+    // multiple missing-field entries don't get cut mid-sentence.
+    throw new Error(`beeble_submit_${resp.status}: ${errText.slice(0, 1500)}`);
   }
   return await resp.json();
 }
