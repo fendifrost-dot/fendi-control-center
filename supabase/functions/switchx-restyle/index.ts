@@ -75,7 +75,9 @@ type BeebleStatusResp = {
   id: string;
   status: string; // "queued" | "processing" | "succeeded" | "failed"
   result?: {
-    output_url?: string;
+    render?: string; // The restyled video (what we want)
+    source?: string; // Original echoed back
+    alpha?: string; // Alpha matte
     frames_processed?: number;
     resolution?: string; // "720p" | "1080p" | etc.
   };
@@ -184,10 +186,10 @@ serve(async (req) => {
       });
     }
 
-    const outputUrl = final.result?.output_url;
+    const outputUrl = final.result?.render;
     if (!outputUrl) {
       return json(502, {
-        error: "beeble_no_output_url",
+        error: "beeble_no_render_url",
         beeble_job_id: jobId,
       });
     }
