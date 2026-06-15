@@ -128,13 +128,19 @@ serve(async (req) => {
       });
     }
 
-    const requestId = submit?.request_id;
-    const statusUrl = submit?.status_url;
-    const responseUrl = submit?.response_url || statusUrl; // response_url mirrors status_url usually
-    if (!requestId || !statusUrl) {
+    const requestId = submit?.request_id || submit?.["request_id"];
+    const statusUrl = submit?.status_url || submit?.["status_url"];
+    const responseUrl = submit?.response_url || submit?.["response_url"] || statusUrl;
+    if (!requestId) {
       return json(502, {
         error: "kling_no_request_id",
-        detail: JSON.stringify(submit).slice(0, 500),
+        detail: `submit=${JSON.stringify(submit)}`,
+      });
+    }
+    if (!statusUrl) {
+      return json(502, {
+        error: "kling_no_status_url",
+        detail: `submit=${JSON.stringify(submit)}`,
       });
     }
 

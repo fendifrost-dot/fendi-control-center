@@ -1,0 +1,10 @@
+{
+  "submitted_at": "2026-06-12T14:40:25.718874Z",
+  "via_cc": true,
+  "request_id": "019ebc46-edff-7080-a9b8-c9fd7b60c54f",
+  "status_url": "https://queue.fal.run/fal-ai/flux-lora-fast-training/requests/019ebc46-edff-7080-a9b8-c9fd7b60c54f/status",
+  "response_url": "https://queue.fal.run/fal-ai/flux-lora-fast-training/requests/019ebc46-edff-7080-a9b8-c9fd7b60c54f",
+  "images_data_url": "https://v3b.fal.media/files/b/0a9e0298/YYimVcvVTopZ8EqiGmkct_FENDIFROST_lora_training_set.zip",
+  "trigger_word": "FENDIFROST",
+  "steps": 1500
+}
