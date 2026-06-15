@@ -130,11 +130,11 @@ serve(async (req) => {
 
     const requestId = submit?.request_id;
     const statusUrl = submit?.status_url;
-    const responseUrl = submit?.response_url;
-    if (!requestId || !statusUrl || !responseUrl) {
+    const responseUrl = submit?.response_url || statusUrl; // response_url mirrors status_url usually
+    if (!requestId || !statusUrl) {
       return json(502, {
         error: "kling_no_request_id",
-        detail: JSON.stringify(submit).slice(0, 300),
+        detail: JSON.stringify(submit).slice(0, 500),
       });
     }
 
