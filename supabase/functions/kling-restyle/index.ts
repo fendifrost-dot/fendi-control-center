@@ -60,7 +60,7 @@ type FalStatusResp = {
 
 const FAL_KLING_ENDPOINT = "https://queue.fal.run/fal-ai/kling-video/o1/video-to-video/edit";
 const POLL_INTERVAL_MS = 3_000;
-const SYNC_POLL_TIMEOUT_MS = 140_000;
+const SYNC_POLL_TIMEOUT_MS = 200_000; // 200s for Kling O1, which takes 1-3 min
 const ASYNC_POLL_TIMEOUT_MS = 600_000;
 
 const corsHeaders = {
