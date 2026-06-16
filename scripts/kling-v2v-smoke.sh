@@ -61,27 +61,18 @@ submit_cc() {
   curl -sf -X POST "${CC_BASE}/kling-restyle" \
     -H "X-Proxy-Secret: ${KLING_PROXY_SECRET}" \
     -H "Content-Type: application/json" \
-    -d "$(python3 -c "
-import json
-print(json.dumps({
-  'sourceVideoUrl': '''$SOURCE_VIDEO_URL''',
-  'prompt': '''$PROMPT''',
-  'queue_only': True,
-}))
-")"
+    -d @- <<EOF
+$(jq -n --arg url "$SOURCE_VIDEO_URL" --arg prompt "$PROMPT" '{sourceVideoUrl: $url, prompt: $prompt, queue_only: true}')
+EOF
 }
 
 submit_direct() {
   curl -sf -X POST "https://queue.fal.run/fal-ai/kling-video/o1/video-to-video/edit" \
     -H "Authorization: Key ${FAL_API_KEY}" \
     -H "Content-Type: application/json" \
-    -d "$(python3 -c "
-import json
-print(json.dumps({
-  'video_url': '''$SOURCE_VIDEO_URL''',
-  'prompt': '''$PROMPT''',
-}))
-")"
+    -d @- <<EOF
+$(jq -n --arg url "$SOURCE_VIDEO_URL" --arg prompt "$PROMPT" '{video_url: $url, prompt: $prompt}')
+EOF
 }
 
 poll_once_cc() {
@@ -89,10 +80,9 @@ poll_once_cc() {
   curl -sf -X POST "${CC_BASE}/fal-queue-poll" \
     -H "X-Proxy-Secret: ${COMPOSE_LOOK_PROXY_SECRET}" \
     -H "Content-Type: application/json" \
-    -d "$(python3 -c "
-import json
-print(json.dumps({'status_url': '$status_url', 'response_url': '$response_url'}))
-")"
+    -d @- <<EOF
+$(jq -n --arg status_url "$status_url" --arg response_url "$response_url" '{status_url: $status_url, response_url: $response_url}')
+EOF
 }
 
 poll_once_direct() {
