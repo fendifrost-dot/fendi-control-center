@@ -176,8 +176,7 @@ serve(async (req) => {
       return json(502, {
         error: "kling_no_video_url",
         request_id: requestId,
-        debug_result_keys: Object.keys(final.result || {}),
-        debug_result: JSON.stringify(final.result).slice(0, 500),
+        debug_result: JSON.stringify(final.result).slice(0, 800),
       });
     }
 
