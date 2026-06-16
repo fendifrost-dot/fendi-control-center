@@ -130,23 +130,21 @@ else
   SUBMIT_JSON="$(submit_direct)"
 fi
 
-REQUEST_ID="$(echo "$SUBMIT_JSON" | python3 -c "import sys,json; print(json.load(sys.stdin)['request_id'])")"
-STATUS_URL="$(echo "$SUBMIT_JSON" | python3 -c "import sys,json; print(json.load(sys.stdin)['status_url'])")"
-RESPONSE_URL="$(echo "$SUBMIT_JSON" | python3 -c "import sys,json; print(json.load(sys.stdin)['response_url'])")"
+REQUEST_ID="$(echo "$SUBMIT_JSON" | jq -r '.request_id')"
+STATUS_URL="$(echo "$SUBMIT_JSON" | jq -r '.status_url')"
+RESPONSE_URL="$(echo "$SUBMIT_JSON" | jq -r '.response_url')"
 
-python3 -c "
-import json, datetime
-print(json.dumps({
-  'submitted_at': datetime.datetime.utcnow().isoformat() + 'Z',
-  'via_cc': $USE_CC,
-  'prompt_index': $PROMPT_INDEX,
-  'prompt': '''$PROMPT''',
-  'request_id': '$REQUEST_ID',
-  'status_url': '$STATUS_URL',
-  'response_url': '$RESPONSE_URL',
-  'source_video_url': '''$SOURCE_VIDEO_URL''',
-}, indent=2))
-" >"$JOB_FILE"
+jq -n \
+  --arg submitted_at "$(date -u +'%Y-%m-%dT%H:%M:%SZ')" \
+  --argjson via_cc "$USE_CC" \
+  --arg prompt_index "$PROMPT_INDEX" \
+  --arg prompt "$PROMPT" \
+  --arg request_id "$REQUEST_ID" \
+  --arg status_url "$STATUS_URL" \
+  --arg response_url "$RESPONSE_URL" \
+  --arg source_video_url "$SOURCE_VIDEO_URL" \
+  '{submitted_at: $submitted_at, via_cc: $via_cc, prompt_index: $prompt_index, prompt: $prompt, request_id: $request_id, status_url: $status_url, response_url: $response_url, source_video_url: $source_video_url}' \
+  >"$JOB_FILE"
 
 echo "==> Queued. request_id=$REQUEST_ID"
 echo "==> Job metadata: $JOB_FILE"
