@@ -20,6 +20,89 @@ CC side is built. This doc covers what's left: AVT proxy + secrets + push.
 - **Response (sync):** `{ output_video_url, frames_processed, cost_cents, beeble_job_id, generation_metadata }`
 - **Response (async, with callback_url):** `{ status: "queued" }` immediately. Result POSTed to callback when done.
 
+## Wardrobe mode — clothing swap with identity lock (`mode: "wardrobe"`)
+
+Swaps the subject's **clothing** to match a reference outfit while preserving **face, body, motion, and lipsync**. Audio is untouched — the downstream build owns it.
+
+### Call shape
+
+```json
+{
+  "sourceVideoUrl": "https://...signed-source.mp4",
+  "prompt": "a tailored charcoal Fendi pinstripe wool suit with a crisp white shirt",
+  "mode": "wardrobe",
+  "wardrobeReferenceImageUrl": "https://...signed-outfit-ref.jpg",
+  "keepMaskUrl": "https://...optional-first-frame-keepmask.png",
+  "invertMask": true,
+  "queue_only": true,
+  "callback_url": "https://avt.supabase.co/functions/v1/switchx-restyle-callback"
+}
+```
+
+- `wardrobeReferenceImageUrl` — **required**. Signed URL to the target outfit image.
+- `prompt` — describe the **garment only**. The function prepends `"Same subject, identical face and pose, wearing "` before sending to Beeble.
+- `keepMaskUrl` — **optional**. If supplied, used verbatim as the alpha. If omitted, generated from the source video (see below). Needs `FAL_API_KEY` to be set when omitted.
+- `invertMask` — optional, default `true`. Inverts the auto-generated SAM mask into Beeble polarity. Set `false` only if you pre-supply a `keepMaskUrl` already in Beeble polarity.
+- `queue_only` — optional. Returns `{ beeble_job_id }` immediately (no polling); poll `beeble-poll-debug?job_id=<id>` yourself. Used by the smoke script to dodge the 150s sync wall.
+
+Internally this submits to Beeble SwitchX with **exactly**:
+
+```json
+{
+  "generation_type": "video",
+  "source_uri": "<signed source video URL>",
+  "reference_image_uri": "<signed wardrobe reference URL>",
+  "alpha_uri": "<first-frame keep-mask PNG URL>",
+  "alpha_mode": "select",
+  "alpha_keyframe_index": 0,
+  "max_resolution": 1080,
+  "prompt": "Same subject, identical face and pose, wearing <caller prompt>"
+}
+```
+
+`alpha_mode: "select"` needs only ONE first-frame mask — Beeble's internal SAM3 propagates it across the clip. We pass signed HTTPS URLs straight through (Beeble accepts them; the `beeble://` presign upload flow is optional and not used).
+
+### ⚠️ Keep-mask polarity gotcha
+
+**Beeble docs, verbatim: `WHITE = regenerate, BLACK = preserve`.**
+
+So the keep-mask must be **BLACK on the parts to KEEP** (face, hands, hair, exposed skin) and **WHITE everywhere else** (the clothing we want SwitchX to regenerate). Identity is preserved by *inverting* the usual "mask the thing you're changing" logic — here we mask the things we're keeping.
+
+Fal **SAM-3 returns the OPPOSITE** convention: WHITE on the prompted region (face/hands/hair/skin), BLACK on background. So the auto-generated mask is **inverted** before it reaches Beeble. That's what `invertMask` (default `true`) controls. If you hand-author a `keepMaskUrl`, paint it in **Beeble** polarity (black = keep) and pass `invertMask: false`.
+
+### Auto keep-mask generation (`generateKeepMask`)
+
+When no `keepMaskUrl` is supplied, the function builds one inline (needs `FAL_API_KEY`):
+
+1. **First frame** — `fal-ai/ffmpeg-api/extract-frame` (`frame_type: "first"`) → PNG URL.
+2. **Segment** — `fal-ai/sam-3/image` with prompt `"face, hands, hair, exposed skin"` → mask PNG (WHITE on those regions).
+3. **Invert** — flip luminance (ImageScript, pure-Deno) so keep regions become BLACK = Beeble's preserve polarity.
+4. **Host** — upload the PNG to **Fal CDN** (`storage/upload/initiate` + PUT) → public HTTPS URL handed to Beeble as `alpha_uri`.
+
+**Hosting choice:** the mask is hosted on **Fal CDN, not Supabase Storage**, so the whole wardrobe path needs exactly one extra secret (`FAL_API_KEY`) instead of also wiring a Supabase Storage bucket + service-role signing. The mask is a non-sensitive black/white silhouette and Beeble accepts any fetchable HTTPS URL. To switch to Supabase Storage later, replace `uploadPngToFalCdn` with a `supabase.storage.from(<bucket>).upload(...)` + `createSignedUrl(...)`.
+
+### New CC secret for wardrobe mode
+
+In addition to `BEEBLE_API_KEY` and `SWITCHX_PROXY_SECRET`:
+
+3. **`FAL_API_KEY`** — already set on CC (used by `compose-look` / `kling-restyle`). Only needed for wardrobe mode when `keepMaskUrl` is omitted (frame extraction + SAM-3 + Fal CDN hosting). If you always pass `keepMaskUrl`, it's not required.
+
+### Smoke test
+
+`scripts/switchx-wardrobe-smoke.sh` — submits a wardrobe job (queue_only) and polls `beeble-poll-debug`:
+
+```bash
+export SWITCHX_PROXY_SECRET="..."
+export WARDROBE_REF_URL="https://...signed-outfit-ref.jpg"
+./scripts/switchx-wardrobe-smoke.sh 1   # prompt_index 1–4
+```
+
+Reuses the staged Fendi source clip from `scripts/.kling-v2v-smoke-job.json` (override with `SWITCHX_SOURCE_VIDEO_URL`). Writes result to `scripts/.switchx-wardrobe-smoke-job.json`.
+
+### config.toml
+
+`switchx-restyle` and `beeble-poll-debug` were missing from `supabase/config.toml`; both now have `verify_jwt = false` so they're callable with just `X-Proxy-Secret` (switchx) / `job_id` (poll-debug), matching `kling-restyle`.
+
 ## Required CC secrets (not yet set)
 
 Add via CC Lovable chat at `https://lovable.dev/projects/7fce9fc6-fd96-4a31-8a89-649f00298c51`:
