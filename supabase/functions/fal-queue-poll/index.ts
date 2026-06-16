@@ -83,9 +83,11 @@ serve(async (req) => {
     }
     const result = await respResp.json();
     const loraFile = result?.diffusers_lora_file as { url?: string } | undefined;
+    const videoFile = result?.video as { url?: string } | undefined;
     return json(200, {
       status: "COMPLETED",
       lora_url: loraFile?.url ?? null,
+      video_url: videoFile?.url ?? null,
       result,
     });
   } catch (err: unknown) {

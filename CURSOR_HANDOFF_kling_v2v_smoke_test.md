@@ -1,6 +1,28 @@
 # Kling O1 Edit Video-to-Video Smoke Test — Debugging Handoff
 
-**Status:** BLOCKED on Supabase Edge platform timeout limits. Need to either fix async handling or find alternative approach.
+**Status:** RESOLVED (platform limit confirmed; workaround shipped). Sync mode cannot complete Kling O1 jobs — use `queue_only` or `callback_url` async mode instead.
+
+**Cursor execution (2026-06-15):**
+- Confirmed Fal endpoint `fal-ai/kling-video/o1/video-to-video/edit` exists; output schema is `{ video: { url } }`.
+- Fixed bug: `pollFalUntilDone` was reading `finalResult.result` but Fal's `response_url` returns `{ video: { url } }` at top level.
+- Added `queue_only` mode (mirrors `train-style-lora`) — submit returns `request_id` + poll URLs immediately.
+- Refactored async mode to submit first, return `request_id` in `{ status: "queued" }`, poll in `waitUntil` background (600s).
+- Added `scripts/kling-v2v-smoke.sh` — client-side polling bypasses Edge 150s IDLE_TIMEOUT.
+- Extended `fal-queue-poll` to return `video_url` for Kling jobs.
+
+**Run smoke test:**
+```bash
+export KLING_PROXY_SECRET="..."          # CC Edge Functions → Secrets
+export COMPOSE_LOOK_PROXY_SECRET="..."   # for fal-queue-poll
+export KLING_SOURCE_VIDEO_URL="https://...signed-720p.mp4"
+./scripts/kling-v2v-smoke.sh 1           # prompts 1–4
+```
+
+Deploy: `supabase functions deploy kling-restyle fal-queue-poll`
+
+---
+
+**Status (original):** BLOCKED on Supabase Edge platform timeout limits. Need to either fix async handling or find alternative approach.
 
 **Goal:** Test Kling O1 Edit (`fal-ai/kling-video/o1/video-to-video/edit`) for wardrobe + identity swap on Fendi's 5s performance clip (720×1280, 30fps).
 

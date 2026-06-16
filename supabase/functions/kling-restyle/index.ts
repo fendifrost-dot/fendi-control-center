@@ -7,12 +7,15 @@
 //   Input:   {
 //     sourceVideoUrl: string,            // HTTPS URL Fal can fetch (signed)
 //     prompt: string,                    // Output scene description
-//     callback_url?: string,             // Optional async callback
+//     callback_url?: string,             // Async: poll in background, POST callback
+//     queue_only?: boolean,              // Submit only — return Fal poll URLs (smoke tests)
 //   }
-//   Output (sync mode, no callback_url):
+//   Output (sync mode):
 //     { output_video_url, request_id, cost_cents }
 //   Output (async mode, callback_url present):
-//     { status: "queued" }                 (Background job POSTs callback)
+//     { status: "queued", request_id }     (Background job POSTs callback)
+//   Output (queue_only):
+//     { status: "queued", request_id, status_url, response_url }
 //
 // Env vars required:
 //   - FAL_API_KEY              (https://fal.ai/)
@@ -36,6 +39,8 @@ type Body = {
   sourceVideoUrl: string;
   prompt: string;
   callback_url?: string;
+  /** Submit to Fal and return queue URLs immediately — no inline poll. */
+  queue_only?: boolean;
 };
 
 type FalQueueResp = {
@@ -60,7 +65,9 @@ type FalStatusResp = {
 
 const FAL_KLING_ENDPOINT = "https://queue.fal.run/fal-ai/kling-video/o1/video-to-video/edit";
 const POLL_INTERVAL_MS = 3_000;
-const SYNC_POLL_TIMEOUT_MS = 200_000; // 200s for Kling O1, which takes 1-3 min
+// Kling O1 Edit runs 60–180s; Supabase Edge sync wall is ~150s idle timeout.
+// Sync mode is for quick curls only — use queue_only or callback_url for real jobs.
+const SYNC_POLL_TIMEOUT_MS = 140_000;
 const ASYNC_POLL_TIMEOUT_MS = 600_000;
 
 const corsHeaders = {
@@ -114,36 +121,46 @@ serve(async (req) => {
   }
 
   // ---- execution --------------------------------------------------------
-  const executeJob = async (): Promise<Response> => {
-    let submit: FalQueueResp;
-    try {
-      submit = await submitKlingJob(falKey, {
-        sourceVideoUrl: body.sourceVideoUrl,
-        prompt: body.prompt,
-      });
-    } catch (err: any) {
-      return json(502, {
-        error: "kling_submit_failed",
-        detail: String(err?.message ?? err).slice(0, 500),
-      });
-    }
+  let submit: FalQueueResp;
+  try {
+    submit = await submitKlingJob(falKey, {
+      sourceVideoUrl: body.sourceVideoUrl,
+      prompt: body.prompt,
+    });
+  } catch (err: any) {
+    return json(502, {
+      error: "kling_submit_failed",
+      detail: String(err?.message ?? err).slice(0, 500),
+    });
+  }
 
-    const requestId = submit?.request_id || submit?.["request_id"];
-    const statusUrl = submit?.status_url || submit?.["status_url"];
-    const responseUrl = submit?.response_url || submit?.["response_url"] || statusUrl;
-    if (!requestId) {
-      return json(502, {
-        error: "kling_no_request_id",
-        detail: `submit=${JSON.stringify(submit)}`,
-      });
-    }
-    if (!statusUrl) {
-      return json(502, {
-        error: "kling_no_status_url",
-        detail: `submit=${JSON.stringify(submit)}`,
-      });
-    }
+  const requestId = submit?.request_id || submit?.["request_id"];
+  const statusUrl = submit?.status_url || submit?.["status_url"];
+  const responseUrl = submit?.response_url || submit?.["response_url"] || statusUrl;
+  if (!requestId) {
+    return json(502, {
+      error: "kling_no_request_id",
+      detail: `submit=${JSON.stringify(submit)}`,
+    });
+  }
+  if (!statusUrl) {
+    return json(502, {
+      error: "kling_no_status_url",
+      detail: `submit=${JSON.stringify(submit)}`,
+    });
+  }
 
+  // QUEUE-ONLY — return Fal poll URLs for client-side polling (smoke tests).
+  if (body.queue_only) {
+    return json(200, {
+      status: "queued",
+      request_id: requestId,
+      status_url: statusUrl,
+      response_url: responseUrl,
+    });
+  }
+
+  const finishJob = async (): Promise<Response> => {
     const timeoutMs = body.callback_url ? ASYNC_POLL_TIMEOUT_MS : SYNC_POLL_TIMEOUT_MS;
     let final: FalStatusResp;
     try {
@@ -164,19 +181,12 @@ serve(async (req) => {
       });
     }
 
-    // Try multiple possible field names for Kling output video
-    const outputUrl = final.result?.video?.url
-      || final.result?.video_url
-      || final.result?.output_video
-      || final.result?.edited_video
-      || (final.result as any)?.video?.url
-      || (final.result as any)?.output?.url;
-
+    const outputUrl = extractKlingVideoUrl(final);
     if (!outputUrl) {
       return json(502, {
         error: "kling_no_video_url",
         request_id: requestId,
-        debug_result: JSON.stringify(final.result).slice(0, 800),
+        debug_result: JSON.stringify(final.result ?? final).slice(0, 800),
       });
     }
 
@@ -194,17 +204,18 @@ serve(async (req) => {
     });
   };
 
-  // ASYNC MODE — return 200 queued immediately, finish in background.
+  // ASYNC MODE — return queued immediately, finish in background.
   if (body.callback_url) {
     const callbackUrl = body.callback_url;
     const background = (async () => {
       let resp: Response;
       try {
-        resp = await executeJob();
+        resp = await finishJob();
       } catch (err: any) {
         await postCallback(callbackUrl, proxySecret, {
           status: "failed",
           error: `cc_unhandled: ${String(err?.message ?? err).slice(0, 500)}`,
+          request_id: requestId,
         });
         return;
       }
@@ -215,7 +226,7 @@ serve(async (req) => {
         await postCallback(callbackUrl, proxySecret, {
           status: "complete",
           output_video_url: parsed.output_video_url,
-          request_id: parsed.request_id,
+          request_id: parsed.request_id ?? requestId,
           cost_cents: parsed.cost_cents,
           generation_metadata: parsed.generation_metadata,
         });
@@ -225,6 +236,7 @@ serve(async (req) => {
         await postCallback(callbackUrl, proxySecret, {
           status: "failed",
           error: `${errMsg}${detail}`.slice(0, 500),
+          request_id: requestId,
         });
       }
     })();
@@ -236,16 +248,26 @@ serve(async (req) => {
     } else {
       background.catch(() => {});
     }
-    return json(200, { status: "queued" });
+    return json(200, { status: "queued", request_id: requestId });
   }
 
-  // SYNC MODE — for curl smoke tests only. 140s ceiling.
-  return await executeJob();
+  // SYNC MODE — for curl smoke tests only. ~140s ceiling before IDLE_TIMEOUT.
+  return await finishJob();
 });
 
 // ---------------------------------------------------------------------------
 // Fal Kling API helpers
 // ---------------------------------------------------------------------------
+function extractKlingVideoUrl(payload: FalStatusResp | Record<string, unknown>): string | null {
+  const result = (payload as FalStatusResp).result ?? payload;
+  const r = result as Record<string, unknown>;
+  const video = r?.video as { url?: string } | undefined;
+  if (video?.url) return video.url;
+  if (typeof r?.video_url === "string") return r.video_url;
+  const output = r?.output as { url?: string } | undefined;
+  if (output?.url) return output.url;
+  return null;
+}
 async function submitKlingJob(
   apiKey: string,
   input: {
@@ -294,7 +316,6 @@ async function pollFalUntilDone(
     const status: FalStatusResp = await resp.json();
     const s = (status.status || "").toUpperCase();
     if (s === "COMPLETED") {
-      // Fetch final result from response_url
       const respResp = await fetch(responseUrl, {
         headers: { Authorization: `Key ${apiKey}` },
       });
@@ -302,8 +323,10 @@ async function pollFalUntilDone(
         const errText = await respResp.text().catch(() => "");
         throw new Error(`kling_response_${respResp.status}: ${errText.slice(0, 300)}`);
       }
-      const finalResult: FalStatusResp = await respResp.json();
-      return { ...status, result: finalResult.result };
+      // Fal response_url returns { video: { url } } directly (see Fal output schema).
+      const payload = await respResp.json();
+      const result = payload?.result ?? payload;
+      return { ...status, result };
     }
     if (s === "FAILED") {
       return status;

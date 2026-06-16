@@ -116,6 +116,9 @@ verify_jwt = false
 [functions.fal-queue-poll]
 verify_jwt = false
 
+[functions.kling-restyle]
+verify_jwt = false
+
 [functions.remote-bridge-api]
 verify_jwt = false
 
