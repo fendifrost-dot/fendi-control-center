@@ -9,60 +9,87 @@
 //   Input:   {
 //     sourceVideoUrl: string,            // HTTPS URL Beeble can fetch (signed)
 //     prompt: string,                    // Output scene / wardrobe description
-//     mode?: "custom" | "auto" | "wardrobe",   // Default "auto"
-//     referenceImageUrl?: string | null, // Optional location/style ref (auto/custom)
-//     // --- wardrobe mode only ---
-//     wardrobeReferenceImageUrl?: string,// REQUIRED for wardrobe: target outfit ref
-//     keepMaskUrl?: string | null,       // Optional: first-frame keep-mask PNG (alpha).
-//                                        //   If omitted, generated from the source video.
-//     invertMask?: boolean,              // Optional (default true): invert the SAM mask
-//                                        //   so prompted regions become BLACK (preserve).
-//     callback_url?: string,             // Optional async callback (AVT proxy)
+//     mode?: "background" | "wardrobe" | "both" | "auto" | "custom",
+//                                        //   Default "background". "auto" is a
+//                                        //   back-compat alias for "background".
+//     referenceImageUrl?: string | null, // Scene/lighting ref (background/auto/custom)
+//     // --- wardrobe / both ---
+//     wardrobeReferenceImageUrl?: string,// REQUIRED for wardrobe/both: target outfit ref
+//     alphaUrl?: string | null,          // Optional: pre-built per-frame grayscale alpha
+//                                        //   VIDEO (Beeble custom polarity:
+//                                        //   WHITE=preserve, BLACK=regenerate). If
+//                                        //   omitted for wardrobe, generated from the
+//                                        //   source via Fal SAM-3 video-rle.
+//     keepMaskUrl?: string | null,       // DEPRECATED alias for alphaUrl.
+//     polarityOverride?: "auto" | "invert",
+//                                        //   "auto" (default): use the SAM-3 matte as
+//                                        //   returned (prompted regions WHITE = preserve).
+//                                        //   "invert": NOT supported in-function — see
+//                                        //   note below. Supply a pre-inverted alphaUrl.
+//     // --- both ---
+//     backgroundReferenceImageUrl?: string,// Optional bg/scene ref for the 2nd (auto) pass
+//     // --- async / smoke ---
+//     queue_only?: boolean,              // single-mode only; submit + return job id
+//     callback_url?: string,             // run in background, POST result to callback
 //   }
-//   Output (sync mode, no callback_url):
-//     { output_video_url, frames_processed, cost_cents, beeble_job_id,
-//       generation_metadata }
-//   Output (async mode, callback_url present):
-//     { status: "queued" }                 (Background job POSTs callback)
+//   Output (sync, no callback_url):
+//     background/wardrobe: { output_video_url, frames_processed, cost_cents,
+//                           beeble_job_id, generation_metadata }
+//     both:               { output_video_url, interim_video_url,
+//                           wardrobe_job_id, background_job_id, generation_metadata }
+//   Output (queue_only, single mode):
+//     { status: "queued", beeble_job_id, generation_metadata }
+//   Output (async, callback_url present):
+//     { status: "queued" }   (background job POSTs the result to callback_url)
 //
 // Env vars required:
 //   - BEEBLE_API_KEY              (https://developer.beeble.ai/)
 //   - SWITCHX_PROXY_SECRET        (shared with AVT switchx-restyle-proxy)
-//   - FAL_API_KEY                 (only for wardrobe mode WITHOUT a supplied
-//                                  keepMaskUrl — used for first-frame extraction,
-//                                  SAM-3 segmentation, and Fal CDN mask hosting)
+//   - FAL_API_KEY                 (wardrobe/both WITHOUT a supplied alphaUrl —
+//                                  used for SAM-3 body-parts segmentation + Fal CDN)
 //
 // Pricing (verified 2026-06-14 from developer.beeble.ai/pricing):
-//   - 720p: $0.10 per 30 frames
-//   - 1080p: $0.30 per 30 frames
-//   - Same rates for images
-//   - Max 240 frames per job (~8s at 30fps)
+//   - 720p: $0.10 per 30 frames | 1080p: $0.30 per 30 frames
+//   - Max 240 frames per job (~8s at 30fps), max 2.77 MP/frame
 //   - Pay-as-you-go, $50 min topup
 //
-// Modes:
-//   - "custom"   — precision wardrobe / object swap, keeps face + hands intact.
-//                  Caller supplies the full per-frame alpha (alpha_mode=custom).
-//   - "auto"     — first-frame subject detection + propagation. Faster, good
-//                  for full scene replacements (b-roll, lyric visuals).
-//   - "wardrobe" — swap a subject's CLOTHING while preserving face, body, motion,
-//                  and lipsync. Identity is held by INVERTING the alpha polarity:
-//                  we mask the parts to KEEP (face, hands, hair, exposed skin) and
-//                  let SwitchX regenerate everything else (the clothing). Uses
-//                  Beeble alpha_mode="select": ONE first-frame keep-mask PNG that
-//                  Beeble's internal SAM3 propagates across the whole clip.
+// ---------------------------------------------------------------------------
+// THREE MODES
+// ---------------------------------------------------------------------------
+//   "background" (alias "auto") -> Beeble alpha_mode "auto"
+//       Swap the BACKGROUND/scene only; subject + clothing preserved. The proven
+//       path. Uses prompt + referenceImageUrl as the scene/lighting reference.
+//       No mask generation.
 //
-//   KEEP-MASK POLARITY (verbatim from developer.beeble.ai docs):
-//       WHITE = regenerate, BLACK = preserve.
-//   So the keep-mask is BLACK on face/hands/hair/skin and WHITE everywhere else.
-//   Fal SAM-3 returns the OPPOSITE convention (WHITE on the prompted region), so
-//   we invert it before handing it to Beeble. `invertMask:false` disables that if
-//   the caller pre-supplies a mask already in Beeble polarity.
+//   "wardrobe" -> Beeble alpha_mode "custom"
+//       Swap CLOTHING only, preserve face/skin/hair. We build a per-frame
+//       grayscale alpha VIDEO from Fal SAM-3 (body-parts segmenter): the kept
+//       regions (face, hands, hair, exposed skin, neck) are WHITE = preserve;
+//       clothing (and background) is BLACK = regenerate. wardrobeReferenceImageUrl
+//       drives the new costume (Beeble: reference carries "wardrobe/costumes",
+//       applied into the BLACK regions). Prompt is wrapped to lock identity.
+//
+//   "both" -> two-pass chain (custom then auto)
+//       Pass 1 = wardrobe (custom alpha, keep face/hands/hair/skin WHITE, clothes
+//       + background BLACK) -> interim render. Pass 2 = background (auto) on the
+//       interim render -> final. Returns BOTH urls. Multi-minute: REQUIRES the
+//       callback_url (async) path, or sync only for a short probe clip.
+//
+// ALPHA POLARITY (Beeble custom mode, verified from beeble.ai/features/switchx
+// + docs.beeble.ai/beeble/switchx):
+//       WHITE = preserve (kept from source, relit/restyled)
+//       BLACK = regenerate (generated from prompt + reference)
+// Fal SAM-3 (apply_mask:false) returns the prompted regions as WHITE, which IS
+// the correct "preserve" polarity for our keep-regions -> NO inversion needed in
+// the happy path. `polarityOverride:"invert"` exists for the case the first probe
+// shows the polarity reversed, BUT inverting a *video* is not possible in this
+// runtime (no fal video-negate endpoint, no in-Deno H.264 encoder), so it throws
+// with guidance — supply a pre-inverted alphaUrl instead. See SWITCHX_HANDOFF.md.
 //
 //   NOTE: this function does NOT touch audio. Lipsync/audio is preserved by the
 //   downstream build, not here.
 
 import { serve } from "https://deno.land/std@0.224.0/http/server.ts";
-import { Image } from "https://deno.land/x/imagescript@1.2.15/mod.ts";
 
 function constantTimeEqual(a: string, b: string): boolean {
   if (a.length !== b.length) return false;
@@ -71,48 +98,57 @@ function constantTimeEqual(a: string, b: string): boolean {
   return diff === 0;
 }
 
-type SwitchXMode = "custom" | "auto" | "wardrobe";
+// Caller-facing mode. "auto" is a back-compat alias for "background".
+type SwitchXMode = "background" | "wardrobe" | "both" | "auto" | "custom";
 
-// Beeble's alpha_mode is its own enum (auto|fill|custom|select), distinct from
-// our caller-facing `mode`. wardrobe maps to "select" (single keyframe mask,
-// SAM3-propagated); auto/custom pass through 1:1.
-const BEEBLE_ALPHA_MODE: Record<SwitchXMode, string> = {
+// Beeble's alpha_mode enum (auto|fill|custom|select) is distinct from our
+// caller-facing `mode`. background/auto -> "auto"; wardrobe -> "custom" (the real
+// fix: "select" is a SAM3 subject-tracker that re-expands a skin seed to the full
+// clothed silhouette, so it could never swap wardrobe). custom passes through for
+// advanced callers supplying their own alpha. "both" is orchestration, not a
+// single alpha_mode, so it's absent here.
+const BEEBLE_ALPHA_MODE: Record<Exclude<SwitchXMode, "both">, string> = {
+  background: "auto",
   auto: "auto",
+  wardrobe: "custom",
   custom: "custom",
-  wardrobe: "select",
 };
 
-// Prompt prefix injected for wardrobe mode so SwitchX locks identity + pose and
-// only regenerates the garment.
-const WARDROBE_PROMPT_PREFIX = "Same subject, identical face and pose, wearing ";
+// SAM-3 body-parts segmenter prompts (comma-separated single string per the Fal
+// sam-3/video-rle schema). These regions become WHITE = preserve.
+const SAM_KEEP_PROMPTS = ["face", "hands", "hair", "exposed skin", "neck"];
+
+// Wardrobe prompt wrapper — locks identity, pose, and background; only the
+// garment (the BLACK region driven by the reference costume) changes.
+function buildWardrobePrompt(garment: string): string {
+  return `Same subject, identical face, hair, pose, and background, wearing ${garment}`;
+}
 
 type Body = {
   sourceVideoUrl: string;
   prompt: string;
   mode?: SwitchXMode;
   referenceImageUrl?: string | null;
-  // --- wardrobe mode ---
+  // --- wardrobe / both ---
   wardrobeReferenceImageUrl?: string;
-  keepMaskUrl?: string | null;
-  invertMask?: boolean;
+  alphaUrl?: string | null;
+  keepMaskUrl?: string | null; // DEPRECATED alias for alphaUrl
+  polarityOverride?: "auto" | "invert";
+  // --- both ---
+  backgroundReferenceImageUrl?: string;
   /**
-   * Fire-and-forget submit (smoke tests). When true (and no callback_url),
-   * the function resolves the keep-mask, submits the Beeble job, and returns
-   * `{ status: "queued", beeble_job_id, generation_metadata }` immediately —
-   * WITHOUT polling. The caller polls `beeble-poll-debug?job_id=<id>` itself.
-   * This sidesteps the Edge 150s sync wall for slow 1080p wardrobe jobs.
+   * Fire-and-forget submit (smoke tests, single mode only). When true (and no
+   * callback_url), the function resolves the alpha, submits ONE Beeble job, and
+   * returns `{ status: "queued", beeble_job_id, generation_metadata }`
+   * immediately — WITHOUT polling. The caller polls `beeble-poll-debug?job_id=`.
+   * Not supported for mode "both" (two sequential jobs — use callback_url, or let
+   * the smoke script chain two queue_only single-mode calls).
    */
   queue_only?: boolean;
   /**
-   * Async mode: when present, the function returns `{ status: 'queued' }`
-   * immediately and runs the SwitchX job in the background via
-   * EdgeRuntime.waitUntil. When the job finishes (or fails), CC POSTs the
-   * result to `callback_url` with the X-Proxy-Secret header so the AVT
-   * proxy can update the restyle-job row.
-   *
-   * SwitchX jobs commonly run 30-90s for 720p / 5s clips and can exceed
-   * Supabase Edge's ~150s sync wall for 1080p / 8s clips. Always use the
-   * callback path when integrating with a UI; sync is for curl smoke tests.
+   * Async mode: return `{ status: 'queued' }` immediately and run the job(s) in
+   * the background via EdgeRuntime.waitUntil, POSTing the result to callback_url
+   * with the X-Proxy-Secret header. REQUIRED for "both" (multi-minute chain).
    */
   callback_url?: string;
 };
@@ -140,13 +176,15 @@ const SWITCHX_SUBMIT_URL = `${BEEBLE_API_BASE}/switchx/generations`;
 const POLL_INTERVAL_MS = 3_000;
 const SYNC_POLL_TIMEOUT_MS = 140_000; // Stay under platform sync wall
 const ASYNC_POLL_TIMEOUT_MS = 600_000; // 10 min for 1080p / 8s clips
+// "both" chains two jobs; give each pass its own budget inside the bg task.
+const BOTH_PASS_TIMEOUT_MS = 480_000;
 
 const FAL_QUEUE_BASE = "https://queue.fal.run";
-const FAL_EXTRACT_FRAME_URL = `${FAL_QUEUE_BASE}/fal-ai/ffmpeg-api/extract-frame`;
-const FAL_SAM3_URL = `${FAL_QUEUE_BASE}/fal-ai/sam-3/image`;
+// SAM-3 video segmentation (per-frame body-parts matte). apply_mask:false ->
+// the segmented MASK video (prompted regions WHITE), not an overlay.
+const FAL_SAM3_VIDEO_URL = `${FAL_QUEUE_BASE}/fal-ai/sam-3/video-rle`;
 const FAL_CDN_INITIATE_URL =
   "https://rest.alpha.fal.ai/storage/upload/initiate?storage_type=fal-cdn-v3";
-const SAM_KEEP_PROMPT = "face, hands, hair, exposed skin";
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
@@ -160,6 +198,26 @@ function json(status: number, body: unknown) {
     status,
     headers: { ...corsHeaders, "Content-Type": "application/json" },
   });
+}
+
+// Normalize caller mode + aliases to a canonical mode.
+function normalizeMode(raw: unknown): SwitchXMode {
+  switch (raw) {
+    case "wardrobe":
+      return "wardrobe";
+    case "both":
+      return "both";
+    case "custom":
+      return "custom";
+    case "background":
+    case "auto":
+    case undefined:
+    case null:
+    case "":
+      return "background";
+    default:
+      return "background";
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -245,41 +303,58 @@ serve(async (req) => {
   if (!body.prompt || body.prompt.trim().length < 4) {
     return json(400, { error: "prompt_too_short" });
   }
-  const mode: SwitchXMode =
-    body.mode === "custom" ? "custom" : body.mode === "wardrobe" ? "wardrobe" : "auto";
 
-  // ---- wardrobe-mode validation ----------------------------------------
-  if (mode === "wardrobe") {
+  const mode = normalizeMode(body.mode);
+  // alphaUrl is canonical; keepMaskUrl is the deprecated alias.
+  const suppliedAlphaUrl = body.alphaUrl ?? body.keepMaskUrl ?? null;
+  const polarityOverride = body.polarityOverride === "invert" ? "invert" : "auto";
+
+  // ---- per-mode validation ---------------------------------------------
+  if (mode === "wardrobe" || mode === "both") {
     if (!body.wardrobeReferenceImageUrl || typeof body.wardrobeReferenceImageUrl !== "string") {
       return json(400, { error: "missing_wardrobe_reference_image_url" });
     }
-    // We need FAL_API_KEY only to GENERATE a mask. If the caller pre-supplies
-    // keepMaskUrl we can run wardrobe with no Fal dependency at all.
-    if (!body.keepMaskUrl && !falKey) {
+    // Need FAL_API_KEY only to GENERATE the alpha. If alphaUrl is supplied we
+    // can run with no Fal dependency at all.
+    if (!suppliedAlphaUrl && !falKey) {
       return json(400, {
-        error: "keep_mask_required",
+        error: "alpha_required",
         detail:
-          "wardrobe mode needs either keepMaskUrl (verbatim alpha PNG) or FAL_API_KEY " +
-          "configured so the keep-mask can be auto-generated from the source video.",
+          "wardrobe/both needs either alphaUrl (a per-frame grayscale alpha VIDEO, " +
+          "Beeble polarity: WHITE=preserve, BLACK=regenerate) or FAL_API_KEY configured " +
+          "so the alpha can be auto-generated from the source via SAM-3.",
       });
     }
   }
 
-  // ---- execution --------------------------------------------------------
-  // pollForResult=false → resolve mask + submit, return job id, skip polling.
-  const executeJob = async (pollForResult: boolean): Promise<Response> => {
-    // Resolve the wardrobe keep-mask up front (provided verbatim, or generated).
-    let resolvedKeepMaskUrl: string | null = body.keepMaskUrl ?? null;
-    let keepMaskGenerated = false;
-    if (mode === "wardrobe" && !resolvedKeepMaskUrl) {
+  // "both" is a multi-minute two-job chain. queue_only can't represent two jobs
+  // with one id, so require either callback_url (production async) or sync (short
+  // probe clips only).
+  if (mode === "both" && body.queue_only && !body.callback_url) {
+    return json(400, {
+      error: "both_requires_callback_or_sync",
+      detail:
+        "mode 'both' chains two sequential Beeble jobs and cannot run as queue_only. " +
+        "Use callback_url (async, recommended) or omit queue_only for a sync probe clip. " +
+        "The smoke script chains two queue_only single-mode calls instead.",
+    });
+  }
+
+  // ---- single-mode execution -------------------------------------------
+  // pollForResult=false -> resolve alpha + submit, return job id, skip polling.
+  const executeSingle = async (pollForResult: boolean): Promise<Response> => {
+    let resolvedAlphaUrl: string | null = suppliedAlphaUrl;
+    let alphaGenerated = false;
+    if (mode === "wardrobe" && !resolvedAlphaUrl) {
       try {
-        resolvedKeepMaskUrl = await generateKeepMask(falKey, body.sourceVideoUrl, {
-          invert: body.invertMask !== false, // default true
+        resolvedAlphaUrl = await generateBodyPartsAlphaVideo(falKey, body.sourceVideoUrl, {
+          keepPrompts: SAM_KEEP_PROMPTS,
+          polarityOverride,
         });
-        keepMaskGenerated = true;
+        alphaGenerated = true;
       } catch (err: any) {
         return json(502, {
-          error: "keep_mask_generation_failed",
+          error: "alpha_generation_failed",
           detail: String(err?.message ?? err).slice(0, 500),
         });
       }
@@ -290,10 +365,12 @@ serve(async (req) => {
       submit = await submitSwitchXJob(beebleKey, {
         sourceVideoUrl: body.sourceVideoUrl,
         prompt: body.prompt,
-        mode,
+        // executeSingle is never reached for "both" (routed to executeBoth, and
+        // "both"+queue_only is rejected earlier), so the cast is safe.
+        mode: mode as Exclude<SwitchXMode, "both">,
         referenceImageUrl: body.referenceImageUrl ?? null,
         wardrobeReferenceImageUrl: body.wardrobeReferenceImageUrl ?? null,
-        keepMaskUrl: resolvedKeepMaskUrl,
+        alphaUrl: resolvedAlphaUrl,
       });
     } catch (err: any) {
       return json(502, {
@@ -309,16 +386,16 @@ serve(async (req) => {
 
     const baseMetadata = {
       mode,
+      beeble_alpha_mode: BEEBLE_ALPHA_MODE[mode as Exclude<SwitchXMode, "both">],
       source_video_url: body.sourceVideoUrl,
       reference_image_url: body.referenceImageUrl ?? null,
       wardrobe_reference_image_url: body.wardrobeReferenceImageUrl ?? null,
-      keep_mask_url: resolvedKeepMaskUrl,
-      keep_mask_generated: keepMaskGenerated,
+      alpha_url: resolvedAlphaUrl,
+      alpha_generated: alphaGenerated,
+      polarity_override: polarityOverride,
       prompt: body.prompt,
     };
 
-    // queue_only — hand back the Beeble job id and let the caller poll
-    // beeble-poll-debug. No sync wall to fight.
     if (!pollForResult) {
       return json(200, {
         status: "queued",
@@ -349,10 +426,7 @@ serve(async (req) => {
 
     const outputUrl = final.result?.render;
     if (!outputUrl) {
-      return json(502, {
-        error: "beeble_no_render_url",
-        beeble_job_id: jobId,
-      });
+      return json(502, { error: "beeble_no_render_url", beeble_job_id: jobId });
     }
 
     const frames = final.result?.frames_processed ?? 0;
@@ -369,9 +443,153 @@ serve(async (req) => {
     });
   };
 
-  // QUEUE-ONLY MODE — submit + return job id, caller polls beeble-poll-debug.
+  // ---- "both" execution (two-pass chain) -------------------------------
+  // Pass 1: wardrobe (custom) -> interim render. Pass 2: background (auto) on the
+  // interim render -> final. Polls each pass to completion, so this only runs in
+  // the async (callback) path or a sync probe — never queue_only.
+  const executeBoth = async (): Promise<Response> => {
+    // --- alpha for pass 1 ---
+    let resolvedAlphaUrl: string | null = suppliedAlphaUrl;
+    let alphaGenerated = false;
+    if (!resolvedAlphaUrl) {
+      try {
+        resolvedAlphaUrl = await generateBodyPartsAlphaVideo(falKey, body.sourceVideoUrl, {
+          keepPrompts: SAM_KEEP_PROMPTS,
+          polarityOverride,
+        });
+        alphaGenerated = true;
+      } catch (err: any) {
+        return json(502, {
+          error: "alpha_generation_failed",
+          detail: String(err?.message ?? err).slice(0, 500),
+        });
+      }
+    }
+
+    // --- pass 1: wardrobe (custom) ---
+    let wardrobeJobId = "";
+    let interimUrl = "";
+    let wardrobeFrames = 0;
+    let wardrobeRes = "1080p";
+    try {
+      const submit1 = await submitSwitchXJob(beebleKey, {
+        sourceVideoUrl: body.sourceVideoUrl,
+        prompt: body.prompt,
+        mode: "wardrobe",
+        referenceImageUrl: null,
+        wardrobeReferenceImageUrl: body.wardrobeReferenceImageUrl ?? null,
+        alphaUrl: resolvedAlphaUrl,
+      });
+      wardrobeJobId = submit1?.id ?? "";
+      if (!wardrobeJobId) {
+        return json(502, { error: "both_pass1_no_job_id", detail: JSON.stringify(submit1).slice(0, 300) });
+      }
+      const final1 = await pollBeebleUntilDone(beebleKey, wardrobeJobId, BOTH_PASS_TIMEOUT_MS);
+      if (final1.status === "failed") {
+        return json(502, {
+          error: "both_pass1_failed",
+          detail: final1.error?.message ?? "unknown",
+          wardrobe_job_id: wardrobeJobId,
+        });
+      }
+      interimUrl = final1.result?.render ?? "";
+      wardrobeFrames = final1.result?.frames_processed ?? 0;
+      wardrobeRes = (final1.result?.resolution ?? "1080p").toLowerCase();
+      if (!interimUrl) {
+        return json(502, { error: "both_pass1_no_render_url", wardrobe_job_id: wardrobeJobId });
+      }
+    } catch (err: any) {
+      return json(502, {
+        error: "both_pass1_error",
+        detail: String(err?.message ?? err).slice(0, 500),
+        wardrobe_job_id: wardrobeJobId || undefined,
+      });
+    }
+
+    // --- pass 2: background (auto) on the interim render ---
+    let backgroundJobId = "";
+    let finalUrl = "";
+    let bgFrames = 0;
+    let bgRes = "720p";
+    try {
+      const submit2 = await submitSwitchXJob(beebleKey, {
+        sourceVideoUrl: interimUrl,
+        prompt: body.prompt,
+        mode: "background",
+        referenceImageUrl: body.backgroundReferenceImageUrl ?? body.referenceImageUrl ?? null,
+        wardrobeReferenceImageUrl: null,
+        alphaUrl: null,
+      });
+      backgroundJobId = submit2?.id ?? "";
+      if (!backgroundJobId) {
+        return json(502, {
+          error: "both_pass2_no_job_id",
+          detail: JSON.stringify(submit2).slice(0, 300),
+          wardrobe_job_id: wardrobeJobId,
+          interim_video_url: interimUrl,
+        });
+      }
+      const final2 = await pollBeebleUntilDone(beebleKey, backgroundJobId, BOTH_PASS_TIMEOUT_MS);
+      if (final2.status === "failed") {
+        return json(502, {
+          error: "both_pass2_failed",
+          detail: final2.error?.message ?? "unknown",
+          background_job_id: backgroundJobId,
+          interim_video_url: interimUrl,
+        });
+      }
+      finalUrl = final2.result?.render ?? "";
+      bgFrames = final2.result?.frames_processed ?? 0;
+      bgRes = (final2.result?.resolution ?? "720p").toLowerCase();
+      if (!finalUrl) {
+        return json(502, {
+          error: "both_pass2_no_render_url",
+          background_job_id: backgroundJobId,
+          interim_video_url: interimUrl,
+        });
+      }
+    } catch (err: any) {
+      return json(502, {
+        error: "both_pass2_error",
+        detail: String(err?.message ?? err).slice(0, 500),
+        wardrobe_job_id: wardrobeJobId,
+        background_job_id: backgroundJobId || undefined,
+        interim_video_url: interimUrl,
+      });
+    }
+
+    const costCents =
+      estimateCostCents(wardrobeFrames, wardrobeRes) + estimateCostCents(bgFrames, bgRes);
+
+    return json(200, {
+      output_video_url: finalUrl,
+      interim_video_url: interimUrl,
+      wardrobe_job_id: wardrobeJobId,
+      background_job_id: backgroundJobId,
+      frames_processed: bgFrames,
+      cost_cents: costCents,
+      generation_metadata: {
+        mode: "both",
+        source_video_url: body.sourceVideoUrl,
+        wardrobe_reference_image_url: body.wardrobeReferenceImageUrl ?? null,
+        background_reference_image_url:
+          body.backgroundReferenceImageUrl ?? body.referenceImageUrl ?? null,
+        alpha_url: resolvedAlphaUrl,
+        alpha_generated: alphaGenerated,
+        polarity_override: polarityOverride,
+        prompt: body.prompt,
+        wardrobe_resolution: wardrobeRes,
+        background_resolution: bgRes,
+      },
+    });
+  };
+
+  const execute = (pollForResult: boolean): Promise<Response> =>
+    mode === "both" ? executeBoth() : executeSingle(pollForResult);
+
+  // QUEUE-ONLY MODE — single mode only; submit + return job id.
   if (body.queue_only && !body.callback_url) {
-    return await executeJob(false);
+    return await executeSingle(false);
   }
 
   // ASYNC MODE — return 200 queued immediately, finish in background.
@@ -380,7 +598,7 @@ serve(async (req) => {
     const background = (async () => {
       let resp: Response;
       try {
-        resp = await executeJob(true);
+        resp = await execute(true);
       } catch (err: any) {
         await postCallback(callbackUrl, proxySecret, {
           status: "failed",
@@ -395,9 +613,12 @@ serve(async (req) => {
         await postCallback(callbackUrl, proxySecret, {
           status: "complete",
           output_video_url: parsed.output_video_url,
+          interim_video_url: parsed.interim_video_url,
           frames_processed: parsed.frames_processed,
           cost_cents: parsed.cost_cents,
           beeble_job_id: parsed.beeble_job_id,
+          wardrobe_job_id: parsed.wardrobe_job_id,
+          background_job_id: parsed.background_job_id,
           generation_metadata: parsed.generation_metadata,
         });
       } else {
@@ -420,8 +641,9 @@ serve(async (req) => {
     return json(200, { status: "queued" });
   }
 
-  // SYNC MODE — for curl smoke tests only. 140s ceiling.
-  return await executeJob(true);
+  // SYNC MODE — for curl smoke tests only. 140s ceiling ("both" only fits for a
+  // short probe clip).
+  return await execute(true);
 });
 
 // ---------------------------------------------------------------------------
@@ -432,43 +654,43 @@ async function submitSwitchXJob(
   input: {
     sourceVideoUrl: string;
     prompt: string;
-    mode: SwitchXMode;
+    mode: Exclude<SwitchXMode, "both">;
     referenceImageUrl?: string | null;
     wardrobeReferenceImageUrl?: string | null;
-    keepMaskUrl?: string | null;
+    alphaUrl?: string | null;
   },
 ): Promise<BeebleSubmitResp> {
-  // Beeble API request body. Field names per developer.beeble.ai/docs.
-  // Flat top-level *_uri fields (NOT nested objects); Beeble accepts plain
-  // signed HTTPS URLs as well as beeble:// upload URIs, so we pass the signed
-  // URLs straight through (same as the proven auto/custom path — no presign
-  // round-trip needed). Required: generation_type, source_uri, prompt.
+  // Beeble API request body. Field names per the live OpenAPI spec
+  // (api.beeble.ai/v1/openapi.json, schema CreateSwitchXRequest). Flat top-level
+  // *_uri fields; Beeble accepts plain signed HTTPS URLs. Required:
+  // generation_type, source_uri, alpha_mode (+ at least one of prompt /
+  // reference_image_uri). max_resolution is an integer: 720 or 1080 (default
+  // 1080). alpha_keyframe_index is SELECT-only and ignored for custom — we don't
+  // send it.
+  const isWardrobe = input.mode === "wardrobe";
   const requestBody: Record<string, unknown> = {
     generation_type: "video",
     source_uri: input.sourceVideoUrl,
-    prompt: input.prompt,
+    prompt: isWardrobe ? buildWardrobePrompt(input.prompt) : input.prompt,
     alpha_mode: BEEBLE_ALPHA_MODE[input.mode],
-    // Beeble wants max_resolution as an integer (vertical pixels), not "720p".
-    // 720 = 720p, 1080 = 1080p. auto/custom default to 720 for cost (10c/30
-    // frames); wardrobe runs at 1080 so the garment swap holds fine detail.
-    max_resolution: input.mode === "wardrobe" ? 1080 : 720,
+    // 720 = cheaper (10c/30f); wardrobe runs at 1080 so the garment swap holds
+    // fine detail.
+    max_resolution: isWardrobe ? 1080 : 720,
   };
 
-  if (input.mode === "wardrobe") {
-    // Identity-preserving wardrobe swap. EXACT shape per task spec:
-    //   reference_image_uri = target outfit; alpha_uri = first-frame keep-mask;
-    //   alpha_mode = "select"; alpha_keyframe_index = 0 (Beeble SAM3 propagates).
-    if (!input.wardrobeReferenceImageUrl) {
-      throw new Error("wardrobe_missing_reference_image_uri");
+  if (isWardrobe || input.mode === "custom") {
+    // Custom alpha path: caller-facing wardrobe, or raw custom passthrough.
+    if (!input.alphaUrl) {
+      throw new Error(`${input.mode}_missing_alpha_uri`);
     }
-    if (!input.keepMaskUrl) {
-      throw new Error("wardrobe_missing_alpha_uri");
-    }
-    requestBody.reference_image_uri = input.wardrobeReferenceImageUrl;
-    requestBody.alpha_uri = input.keepMaskUrl;
-    requestBody.alpha_keyframe_index = 0;
-    requestBody.prompt = `${WARDROBE_PROMPT_PREFIX}${input.prompt}`;
+    requestBody.alpha_uri = input.alphaUrl;
+    // reference_image_uri carries the new costume (Beeble applies wardrobe from
+    // the reference into the BLACK/regenerate region). For wardrobe that's the
+    // outfit ref; for raw custom it's the optional style ref.
+    const ref = isWardrobe ? input.wardrobeReferenceImageUrl : input.referenceImageUrl;
+    if (ref) requestBody.reference_image_uri = ref;
   } else if (input.referenceImageUrl) {
+    // background / auto: scene/lighting reference only.
     requestBody.reference_image_uri = input.referenceImageUrl;
   }
 
@@ -521,106 +743,70 @@ async function pollBeebleUntilDone(
 }
 
 // ---------------------------------------------------------------------------
-// Keep-mask generation (wardrobe mode, when no keepMaskUrl supplied)
+// Body-parts alpha VIDEO generation (wardrobe/both, when no alphaUrl supplied)
 //
 // Pipeline:
-//   1. Extract the FIRST frame of the source video (Fal ffmpeg-api).
-//   2. Segment "face, hands, hair, exposed skin" with Fal SAM-3.
-//   3. Invert polarity (SAM gives WHITE on the prompted region; Beeble wants
-//      BLACK = preserve). Skippable via invert:false.
-//   4. Host the resulting PNG on Fal CDN (public HTTPS URL) so Beeble can fetch
-//      it as alpha_uri.
+//   1. Submit the source video to Fal SAM-3 video-rle with the keep-region
+//      prompts (comma-separated). apply_mask:false -> a segmented MASK video
+//      where the prompted regions are WHITE and everything else is BLACK.
+//   2. That polarity (WHITE=prompted=preserve) IS Beeble custom's required
+//      polarity, so we pass it straight through as alpha_uri.
 //
-// We host on Fal CDN rather than Supabase Storage so the whole wardrobe path
-// needs exactly ONE extra secret (FAL_API_KEY) — the mask is a non-sensitive
-// black/white silhouette and Beeble accepts any fetchable HTTPS URL. See
-// SWITCHX_HANDOFF.md for the rationale / how to switch to Supabase Storage.
+// POLARITY OVERRIDE: if the first probe shows the polarity reversed,
+// polarityOverride:"invert" is requested. We CANNOT invert a video in this
+// runtime — there is no fal video-negate/filter endpoint and no in-Deno H.264
+// encoder. So we throw with guidance: supply a pre-inverted alphaUrl instead
+// (the Nuke/AE workflow Beeble's own docs reference). See SWITCHX_HANDOFF.md.
+//
+// FORMAT NOTE: Beeble custom wants the alpha to match the source frame
+// count / fps / resolution (<=240 frames, <=2.77 MP/frame). SAM-3 processes the
+// source so frame count/fps track; if SAM-3 downscales the matte, verify on the
+// first probe and re-host a matched-resolution alpha if Beeble rejects it.
 // ---------------------------------------------------------------------------
-async function generateKeepMask(
+async function generateBodyPartsAlphaVideo(
   falKey: string,
   sourceVideoUrl: string,
-  opts: { invert: boolean },
+  opts: { keepPrompts: string[]; polarityOverride: "auto" | "invert" },
 ): Promise<string> {
   if (!falKey) throw new Error("fal_api_key_missing");
-
-  // 1. first frame
-  const frameUrl = await falExtractFirstFrame(falKey, sourceVideoUrl);
-  if (!frameUrl) throw new Error("extract_frame_no_image");
-
-  // 2. SAM-3 segmentation of the keep regions
-  const samMaskUrl = await falSam3Mask(falKey, frameUrl, SAM_KEEP_PROMPT);
-  if (!samMaskUrl) throw new Error("sam3_no_mask");
-
-  // 3. download + (optionally) invert to Beeble polarity (BLACK = preserve)
-  const rawPng = await fetchBytes(samMaskUrl);
-  const maskPng = opts.invert ? await invertPng(rawPng) : rawPng;
-
-  // 4. host on Fal CDN
-  return await uploadPngToFalCdn(falKey, maskPng, "switchx-keepmask.png");
-}
-
-async function falExtractFirstFrame(falKey: string, videoUrl: string): Promise<string | null> {
-  const submitResp = await fetch(FAL_EXTRACT_FRAME_URL, {
-    method: "POST",
-    headers: { Authorization: `Key ${falKey}`, "Content-Type": "application/json" },
-    body: JSON.stringify({ video_url: videoUrl, frame_type: "first" }),
-  });
-  if (!submitResp.ok) {
-    throw new Error(`extract_frame_submit_${submitResp.status}: ${await submitResp.text().catch(() => "")}`);
+  if (opts.polarityOverride === "invert") {
+    throw new Error(
+      "polarity_invert_unsupported: cannot invert an alpha VIDEO in this runtime " +
+        "(no fal video-negate endpoint, no in-Deno H.264 encoder). Supply a " +
+        "pre-inverted alphaUrl (Beeble polarity: WHITE=preserve, BLACK=regenerate).",
+    );
   }
-  const { request_id, status_url, response_url } = await submitResp.json();
-  const result = await pollFalUntilDone(falKey, request_id, status_url, response_url, 90_000);
-  return result?.images?.[0]?.url ?? result?.image?.url ?? null;
+
+  const samVideoUrl = await falSam3VideoMask(falKey, sourceVideoUrl, opts.keepPrompts.join(", "));
+  if (!samVideoUrl) throw new Error("sam3_video_no_mask");
+  return samVideoUrl;
 }
 
-// SAM-3 text-prompted segmentation — returns a mask PNG URL (mirrors the
-// compose-look callFalSam3Segment helper).
-async function falSam3Mask(falKey: string, imageUrl: string, prompt: string): Promise<string | null> {
-  const submitResp = await fetch(FAL_SAM3_URL, {
+// Fal SAM-3 video-rle text-prompted segmentation. Returns the segmented MASK
+// video URL (prompted regions WHITE). `prompt` is a single comma-separated
+// string per the fal sam-3/video-rle schema; apply_mask:false yields the matte
+// rather than an overlay.
+async function falSam3VideoMask(
+  falKey: string,
+  videoUrl: string,
+  prompt: string,
+): Promise<string | null> {
+  const submitResp = await fetch(FAL_SAM3_VIDEO_URL, {
     method: "POST",
     headers: { Authorization: `Key ${falKey}`, "Content-Type": "application/json" },
     body: JSON.stringify({
-      image_url: imageUrl,
+      video_url: videoUrl,
       prompt,
       apply_mask: false,
-      output_format: "png",
-      max_masks: 1,
     }),
   });
   if (!submitResp.ok) {
-    throw new Error(`sam3_submit_${submitResp.status}: ${await submitResp.text().catch(() => "")}`);
+    throw new Error(`sam3_video_submit_${submitResp.status}: ${await submitResp.text().catch(() => "")}`);
   }
   const { request_id, status_url, response_url } = await submitResp.json();
-  const result = await pollFalUntilDone(falKey, request_id, status_url, response_url, 90_000);
-  return result?.masks?.[0]?.url ?? result?.image?.url ?? null;
-}
-
-async function fetchBytes(url: string): Promise<Uint8Array> {
-  const resp = await fetch(url);
-  if (!resp.ok) throw new Error(`fetch_bytes_${resp.status}`);
-  return new Uint8Array(await resp.arrayBuffer());
-}
-
-// Invert a mask PNG's luminance (RGB), leaving alpha untouched. Decodes/encodes
-// with ImageScript (pure-TS, Deno-friendly — no native ffmpeg/canvas).
-async function invertPng(bytes: Uint8Array): Promise<Uint8Array> {
-  const img = await Image.decode(bytes);
-  const data = img.bitmap; // RGBA, 4 bytes/pixel
-  for (let i = 0; i < data.length; i += 4) {
-    data[i] = 255 - data[i];
-    data[i + 1] = 255 - data[i + 1];
-    data[i + 2] = 255 - data[i + 2];
-    // data[i + 3] (alpha) left as-is
-  }
-  return await img.encode();
-}
-
-async function uploadPngToFalCdn(
-  falKey: string,
-  bytes: Uint8Array,
-  fileName: string,
-): Promise<string> {
-  return await uploadFileToFalCdn(falKey, bytes, fileName, "image/png");
+  // SAM-3 video segmentation of a 5s clip runs longer than image; give it 300s.
+  const result = await pollFalUntilDone(falKey, request_id, status_url, response_url, 300_000);
+  return result?.video?.url ?? result?.video_url ?? result?.image?.url ?? null;
 }
 
 async function uploadFileToFalCdn(
