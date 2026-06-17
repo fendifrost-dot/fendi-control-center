@@ -309,6 +309,45 @@ serve(async (req) => {
     }
   }
 
+  // ---- cancel-fal-job action -------------------------------------------
+  // Sends DELETE to a Fal queue cancel_url for an in-flight or queued job.
+  // POST { action: "cancel-fal-job", cancel_url: "..." } → { ok }.
+  if ((body as any).action === "cancel-fal-job") {
+    const cancelUrl = (body as any).cancel_url ?? (body as any).status_url;
+    if (!cancelUrl || typeof cancelUrl !== "string") {
+      return json(400, { error: "cancel_missing_url" });
+    }
+    if (!falKey) {
+      return json(500, { error: "server_misconfigured", detail: "FAL_API_KEY missing" });
+    }
+    try {
+      // Fal's cancel endpoint is the status_url with /cancel appended, OR the
+      // explicit cancel_url returned in the submission response. Try cancel_url
+      // first; fall back to status_url/cancel.
+      let target = cancelUrl;
+      if (!target.endsWith("/cancel") && !target.includes("/cancel?")) {
+        target = target.replace(/\/status\b/, "/cancel");
+        if (target === cancelUrl) target = `${cancelUrl.replace(/\/$/, "")}/cancel`;
+      }
+      const resp = await fetch(target, {
+        method: "PUT",
+        headers: { Authorization: `Key ${falKey}` },
+      });
+      const text = await resp.text().catch(() => "");
+      return json(200, {
+        ok: resp.ok,
+        status: resp.status,
+        target,
+        body: text.slice(0, 400),
+      });
+    } catch (err: any) {
+      return json(502, {
+        error: "cancel_failed",
+        detail: String(err?.message ?? err).slice(0, 500),
+      });
+    }
+  }
+
   // ---- vton-frame action -----------------------------------------------
   // Calls Fal IDM-VTON to transfer a specific garment image onto a person
   // image (per-frame virtual try-on). This is the new wardrobe truth engine
