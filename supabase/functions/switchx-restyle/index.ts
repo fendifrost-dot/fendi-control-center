@@ -309,6 +309,78 @@ serve(async (req) => {
     }
   }
 
+  // ---- vton-frame action -----------------------------------------------
+  // Calls Fal IDM-VTON to transfer a specific garment image onto a person
+  // image (per-frame virtual try-on). This is the new wardrobe truth engine
+  // (replaces Beeble custom-mode for garment transfer; Beeble keeps the
+  // temporal/background role). POST { action: "vton-frame", human_image_url,
+  // garment_image_url, category: "upper_body" | "lower_body" | "dresses",
+  // garment_description: "...", prompt: "..." (optional) } → { image_url }.
+  if ((body as any).action === "vton-frame") {
+    const humanUrl = (body as any).human_image_url;
+    const garmentUrl = (body as any).garment_image_url;
+    const category = (body as any).category ?? "upper_body";
+    const garmentDescription = (body as any).garment_description ?? "garment";
+    const vtonPrompt = (body as any).prompt;
+    if (!humanUrl || typeof humanUrl !== "string") {
+      return json(400, { error: "vton_missing_human_image_url" });
+    }
+    if (!garmentUrl || typeof garmentUrl !== "string") {
+      return json(400, { error: "vton_missing_garment_image_url" });
+    }
+    if (!falKey) {
+      return json(500, { error: "server_misconfigured", detail: "FAL_API_KEY missing" });
+    }
+    try {
+      const idmInput: Record<string, unknown> = {
+        human_image_url: humanUrl,
+        garment_image_url: garmentUrl,
+        category,
+        garment_description: garmentDescription,
+      };
+      if (vtonPrompt && typeof vtonPrompt === "string") idmInput.prompt = vtonPrompt;
+
+      const submitResp = await fetch(
+        "https://queue.fal.run/fal-ai/idm-vton",
+        {
+          method: "POST",
+          headers: {
+            Authorization: `Key ${falKey}`,
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify(idmInput),
+        },
+      );
+      if (!submitResp.ok) {
+        return json(502, {
+          error: "vton_submit_failed",
+          detail: `${submitResp.status}: ${(await submitResp.text().catch(() => "")).slice(0, 500)}`,
+        });
+      }
+      const { request_id, status_url, response_url } = await submitResp.json();
+      const result = await pollFalUntilDone(falKey, request_id, status_url, response_url, 120_000);
+      const candidates = [
+        result?.image?.url,
+        result?.image_url,
+        result?.images?.[0]?.url,
+        result?.output?.url,
+      ];
+      const found = candidates.find((u): u is string => typeof u === "string" && u.length > 0);
+      if (!found) {
+        return json(502, {
+          error: "vton_no_image",
+          detail: `keys=${JSON.stringify(Object.keys(result || {}))}`,
+        });
+      }
+      return json(200, { image_url: found });
+    } catch (err: any) {
+      return json(502, {
+        error: "vton_failed",
+        detail: String(err?.message ?? err).slice(0, 500),
+      });
+    }
+  }
+
   // ---- remove-bg action ------------------------------------------------
   // Calls Fal birefnet/v2 to background-remove a single image. Used to turn
   // product-shot screenshots into transparent-bg canonical garment assets so
