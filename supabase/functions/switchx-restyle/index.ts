@@ -806,7 +806,36 @@ async function falSam3VideoMask(
   const { request_id, status_url, response_url } = await submitResp.json();
   // SAM-3 video segmentation of a 5s clip runs longer than image; give it 300s.
   const result = await pollFalUntilDone(falKey, request_id, status_url, response_url, 300_000);
-  return result?.video?.url ?? result?.video_url ?? result?.image?.url ?? null;
+
+  // SAM-3 video-rle response shape isn't well documented; try every reasonable
+  // field name. If still null, raise an error with the actual top-level keys
+  // so we can patch the extraction without guessing.
+  const candidates = [
+    result?.video?.url,
+    result?.video_url,
+    result?.image?.url,
+    result?.output_video?.url,
+    result?.output?.url,
+    result?.output?.video?.url,
+    result?.mask_video?.url,
+    result?.mask?.url,
+    result?.masks?.[0]?.url,
+    result?.masks?.[0]?.video?.url,
+    result?.file?.url,
+    result?.url,
+  ];
+  const found = candidates.find((u): u is string => typeof u === "string" && u.length > 0);
+  if (found) return found;
+
+  // Surface the response shape so we can debug.
+  const keysTop = result && typeof result === "object" ? Object.keys(result) : [];
+  const keysOutput = result?.output && typeof result.output === "object"
+    ? Object.keys(result.output) : null;
+  throw new Error(
+    `sam3_video_no_mask_shape_unknown: keys_top=${JSON.stringify(keysTop)} ` +
+      `keys_output=${JSON.stringify(keysOutput)} ` +
+      `sample=${JSON.stringify(result).slice(0, 600)}`,
+  );
 }
 
 async function uploadFileToFalCdn(
