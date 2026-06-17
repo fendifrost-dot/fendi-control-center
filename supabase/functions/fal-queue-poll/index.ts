@@ -76,9 +76,11 @@ serve(async (req) => {
       headers: { Authorization: `Key ${falKey}` },
     });
     if (!respResp.ok) {
+      const errBody = await respResp.text().catch(() => "");
       return json(502, {
         error: "fal_response_failed",
         detail: `response_${respResp.status}`,
+        fal_error_body: errBody.slice(0, 1500),
       });
     }
     const result = await respResp.json();
