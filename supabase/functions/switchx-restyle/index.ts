@@ -322,6 +322,7 @@ serve(async (req) => {
     const category = (body as any).category ?? "upper_body";
     const garmentDescription = (body as any).garment_description ?? "garment";
     const vtonPrompt = (body as any).prompt;
+    const queueOnly = (body as any).queue_only === true;
     if (!humanUrl || typeof humanUrl !== "string") {
       return json(400, { error: "vton_missing_human_image_url" });
     }
@@ -358,21 +359,16 @@ serve(async (req) => {
         });
       }
       const { request_id, status_url, response_url } = await submitResp.json();
-      const result = await pollFalUntilDone(falKey, request_id, status_url, response_url, 120_000);
-      const candidates = [
-        result?.image?.url,
-        result?.image_url,
-        result?.images?.[0]?.url,
-        result?.output?.url,
-      ];
-      const found = candidates.find((u): u is string => typeof u === "string" && u.length > 0);
-      if (!found) {
-        return json(502, {
-          error: "vton_no_image",
-          detail: `keys=${JSON.stringify(Object.keys(result || {}))}`,
-        });
-      }
-      return json(200, { image_url: found });
+
+      // Always return queue handles immediately. IDM-VTON consistently runs
+      // longer than Supabase Edge's 150s timeout, so client-side polling via
+      // fal-queue-poll is the only reliable path.
+      return json(200, {
+        status: "queued",
+        request_id,
+        status_url,
+        response_url,
+      });
     } catch (err: any) {
       return json(502, {
         error: "vton_failed",
