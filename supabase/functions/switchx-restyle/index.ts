@@ -322,7 +322,7 @@ serve(async (req) => {
     const category = (body as any).category ?? "upper_body";
     const garmentDescription = (body as any).garment_description ?? "garment";
     const vtonPrompt = (body as any).prompt;
-    const queueOnly = (body as any).queue_only === true;
+    const vtonModel = (body as any).model ?? "idm-vton";
     if (!humanUrl || typeof humanUrl !== "string") {
       return json(400, { error: "vton_missing_human_image_url" });
     }
@@ -333,25 +333,48 @@ serve(async (req) => {
       return json(500, { error: "server_misconfigured", detail: "FAL_API_KEY missing" });
     }
     try {
-      const idmInput: Record<string, unknown> = {
-        human_image_url: humanUrl,
-        garment_image_url: garmentUrl,
-        category,
-        garment_description: garmentDescription,
-      };
-      if (vtonPrompt && typeof vtonPrompt === "string") idmInput.prompt = vtonPrompt;
+      let endpointUrl: string;
+      let input: Record<string, unknown>;
+      if (vtonModel === "cat-vton") {
+        // CatVTON: cloth_type enum is upper/lower/overall/inner/outer.
+        const clothTypeMap: Record<string, string> = {
+          upper_body: "upper",
+          lower_body: "lower",
+          dresses: "overall",
+          upper: "upper",
+          lower: "lower",
+          overall: "overall",
+          inner: "inner",
+          outer: "outer",
+        };
+        endpointUrl = "https://queue.fal.run/fal-ai/cat-vton";
+        input = {
+          human_image_url: humanUrl,
+          garment_image_url: garmentUrl,
+          cloth_type: clothTypeMap[category] ?? "upper",
+          num_inference_steps: 50,
+          guidance_scale: 2.5,
+        };
+      } else {
+        // Default: IDM-VTON
+        endpointUrl = "https://queue.fal.run/fal-ai/idm-vton";
+        input = {
+          human_image_url: humanUrl,
+          garment_image_url: garmentUrl,
+          category,
+          garment_description: garmentDescription,
+        };
+        if (vtonPrompt && typeof vtonPrompt === "string") input.prompt = vtonPrompt;
+      }
 
-      const submitResp = await fetch(
-        "https://queue.fal.run/fal-ai/idm-vton",
-        {
-          method: "POST",
-          headers: {
-            Authorization: `Key ${falKey}`,
-            "Content-Type": "application/json",
-          },
-          body: JSON.stringify(idmInput),
+      const submitResp = await fetch(endpointUrl, {
+        method: "POST",
+        headers: {
+          Authorization: `Key ${falKey}`,
+          "Content-Type": "application/json",
         },
-      );
+        body: JSON.stringify(input),
+      });
       if (!submitResp.ok) {
         return json(502, {
           error: "vton_submit_failed",
@@ -360,11 +383,12 @@ serve(async (req) => {
       }
       const { request_id, status_url, response_url } = await submitResp.json();
 
-      // Always return queue handles immediately. IDM-VTON consistently runs
-      // longer than Supabase Edge's 150s timeout, so client-side polling via
-      // fal-queue-poll is the only reliable path.
+      // Always return queue handles immediately. VTON runs frequently exceed
+      // Supabase Edge's 150s timeout, so client-side polling via fal-queue-poll
+      // is the only reliable path.
       return json(200, {
         status: "queued",
+        model: vtonModel,
         request_id,
         status_url,
         response_url,
