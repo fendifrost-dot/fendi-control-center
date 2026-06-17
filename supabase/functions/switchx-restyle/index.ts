@@ -309,6 +309,68 @@ serve(async (req) => {
     }
   }
 
+  // ---- remove-bg action ------------------------------------------------
+  // Calls Fal birefnet/v2 to background-remove a single image. Used to turn
+  // product-shot screenshots into transparent-bg canonical garment assets so
+  // the downstream compose-reference call sees the garment isolated, not the
+  // product photo's scene context (which biases the editor toward sportswear).
+  // POST { action: "remove-bg", image_url: "..." } → { image_url }.
+  if ((body as any).action === "remove-bg") {
+    const inputUrl = (body as any).image_url;
+    if (!inputUrl || typeof inputUrl !== "string") {
+      return json(400, { error: "remove_bg_missing_image_url" });
+    }
+    if (!falKey) {
+      return json(500, { error: "server_misconfigured", detail: "FAL_API_KEY missing" });
+    }
+    try {
+      const submitResp = await fetch(
+        "https://queue.fal.run/fal-ai/birefnet/v2",
+        {
+          method: "POST",
+          headers: {
+            Authorization: `Key ${falKey}`,
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({
+            image_url: inputUrl,
+            model: "General Use (Light)",
+            operating_resolution: "1024x1024",
+            refine_foreground: true,
+            output_format: "png",
+          }),
+        },
+      );
+      if (!submitResp.ok) {
+        return json(502, {
+          error: "remove_bg_submit_failed",
+          detail: `${submitResp.status}: ${(await submitResp.text().catch(() => "")).slice(0, 400)}`,
+        });
+      }
+      const { request_id, status_url, response_url } = await submitResp.json();
+      const result = await pollFalUntilDone(falKey, request_id, status_url, response_url, 60_000);
+      const candidates = [
+        result?.image?.url,
+        result?.image_url,
+        result?.images?.[0]?.url,
+        result?.output?.url,
+      ];
+      const found = candidates.find((u): u is string => typeof u === "string" && u.length > 0);
+      if (!found) {
+        return json(502, {
+          error: "remove_bg_no_image",
+          detail: `keys=${JSON.stringify(Object.keys(result || {}))}`,
+        });
+      }
+      return json(200, { image_url: found });
+    } catch (err: any) {
+      return json(502, {
+        error: "remove_bg_failed",
+        detail: String(err?.message ?? err).slice(0, 500),
+      });
+    }
+  }
+
   // ---- compose-reference action --------------------------------------
   // Calls Fal seedream/v4/edit to composite an outfit onto a subject. Used to
   // generate a "subject-wearing-target-jacket" reference for Beeble so it
