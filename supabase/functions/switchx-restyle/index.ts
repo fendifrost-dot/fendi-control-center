@@ -505,6 +505,71 @@ serve(async (req) => {
     }
   }
 
+  // ---- segment-image action ------------------------------------------
+  // Calls Fal SAM-3 image to text-prompt-segment a region (e.g. "jacket")
+  // from a product photo. apply_mask:true returns the source image with
+  // non-prompted regions blacked out — the actual product pixels preserved
+  // for VTON, no generative redraw. POST { action: "segment-image",
+  // image_url: "...", prompt: "jacket" } → { image_url }.
+  if ((body as any).action === "segment-image") {
+    const segUrl = (body as any).image_url;
+    const segPrompt = (body as any).prompt;
+    if (!segUrl || typeof segUrl !== "string") {
+      return json(400, { error: "segment_image_missing_image_url" });
+    }
+    if (!segPrompt || typeof segPrompt !== "string") {
+      return json(400, { error: "segment_image_missing_prompt" });
+    }
+    if (!falKey) {
+      return json(500, { error: "server_misconfigured", detail: "FAL_API_KEY missing" });
+    }
+    try {
+      const submitResp = await fetch(
+        "https://queue.fal.run/fal-ai/sam-3/image",
+        {
+          method: "POST",
+          headers: {
+            Authorization: `Key ${falKey}`,
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({
+            image_url: segUrl,
+            prompt: segPrompt,
+            apply_mask: true,
+          }),
+        },
+      );
+      if (!submitResp.ok) {
+        return json(502, {
+          error: "segment_submit_failed",
+          detail: `${submitResp.status}: ${(await submitResp.text().catch(() => "")).slice(0, 500)}`,
+        });
+      }
+      const { request_id, status_url, response_url } = await submitResp.json();
+      const result = await pollFalUntilDone(falKey, request_id, status_url, response_url, 90_000);
+      const candidates = [
+        result?.image?.url,
+        result?.image_url,
+        result?.images?.[0]?.url,
+        result?.output?.url,
+        result?.masked_image?.url,
+      ];
+      const found = candidates.find((u): u is string => typeof u === "string" && u.length > 0);
+      if (!found) {
+        return json(502, {
+          error: "segment_no_image",
+          detail: `keys=${JSON.stringify(Object.keys(result || {}))} sample=${JSON.stringify(result).slice(0, 400)}`,
+        });
+      }
+      return json(200, { image_url: found });
+    } catch (err: any) {
+      return json(502, {
+        error: "segment_failed",
+        detail: String(err?.message ?? err).slice(0, 500),
+      });
+    }
+  }
+
   // ---- compose-reference action --------------------------------------
   // Calls Fal seedream/v4/edit to composite an outfit onto a subject. Used to
   // generate a "subject-wearing-target-jacket" reference for Beeble so it
