@@ -195,6 +195,50 @@ serve(async (req) => {
     return json(400, { error: "invalid_json" });
   }
 
+  // ---- stage-file helper action ----------------------------------------
+  // Lets a caller POST { action: "stage-file", url: "...", fileName: "..." }
+  // and get back a Fal-CDN-hosted URL. Used to re-host source videos and
+  // wardrobe reference images on a CDN Beeble can fetch from when the
+  // original host (catbox.moe etc.) refuses Beeble's IPs.
+  if ((body as any).action === "stage-file") {
+    const stageUrl = (body as any).url;
+    const stageFileName = (body as any).fileName ?? "staged.bin";
+    if (!stageUrl || typeof stageUrl !== "string") {
+      return json(400, { error: "stage_file_missing_url" });
+    }
+    if (!falKey) {
+      return json(500, { error: "server_misconfigured", detail: "FAL_API_KEY missing" });
+    }
+    try {
+      const fetchResp = await fetch(stageUrl);
+      if (!fetchResp.ok) {
+        return json(502, {
+          error: "stage_file_fetch_failed",
+          detail: `${fetchResp.status} fetching ${stageUrl}`,
+        });
+      }
+      const stageBytes = new Uint8Array(await fetchResp.arrayBuffer());
+      const stageContentType =
+        fetchResp.headers.get("content-type") ?? "application/octet-stream";
+      const cdnUrl = await uploadFileToFalCdn(
+        falKey,
+        stageBytes,
+        stageFileName,
+        stageContentType,
+      );
+      return json(200, {
+        fal_cdn_url: cdnUrl,
+        bytes: stageBytes.length,
+        content_type: stageContentType,
+      });
+    } catch (err: any) {
+      return json(502, {
+        error: "stage_file_failed",
+        detail: String(err?.message ?? err).slice(0, 500),
+      });
+    }
+  }
+
   if (!body.sourceVideoUrl || typeof body.sourceVideoUrl !== "string") {
     return json(400, { error: "missing_source_video_url" });
   }
@@ -576,10 +620,19 @@ async function uploadPngToFalCdn(
   bytes: Uint8Array,
   fileName: string,
 ): Promise<string> {
+  return await uploadFileToFalCdn(falKey, bytes, fileName, "image/png");
+}
+
+async function uploadFileToFalCdn(
+  falKey: string,
+  bytes: Uint8Array,
+  fileName: string,
+  contentType: string,
+): Promise<string> {
   const initResp = await fetch(FAL_CDN_INITIATE_URL, {
     method: "POST",
     headers: { Authorization: `Key ${falKey}`, "Content-Type": "application/json" },
-    body: JSON.stringify({ file_name: fileName, content_type: "image/png" }),
+    body: JSON.stringify({ file_name: fileName, content_type: contentType }),
   });
   if (!initResp.ok) {
     throw new Error(`fal_cdn_initiate_${initResp.status}: ${await initResp.text().catch(() => "")}`);
@@ -589,7 +642,7 @@ async function uploadPngToFalCdn(
 
   const putResp = await fetch(upload_url, {
     method: "PUT",
-    headers: { "Content-Type": "image/png" },
+    headers: { "Content-Type": contentType },
     body: bytes,
   });
   if (!putResp.ok) {
