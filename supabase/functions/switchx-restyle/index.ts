@@ -182,7 +182,11 @@ const BOTH_PASS_TIMEOUT_MS = 480_000;
 const FAL_QUEUE_BASE = "https://queue.fal.run";
 // SAM-3 video segmentation (per-frame body-parts matte). apply_mask:false ->
 // the segmented MASK video (prompted regions WHITE), not an overlay.
-const FAL_SAM3_VIDEO_URL = `${FAL_QUEUE_BASE}/fal-ai/sam-3/video-rle`;
+// Fal SAM-3 has two video endpoints:
+//   /sam-3/video-rle  — returns per-frame RLE (no video file). Useless for us.
+//   /sam-3/video      — returns an MP4 file with the mask applied. This is what
+//                       we need for Beeble's custom-mode alpha_uri.
+const FAL_SAM3_VIDEO_URL = `${FAL_QUEUE_BASE}/fal-ai/sam-3/video`;
 const FAL_CDN_INITIATE_URL =
   "https://rest.alpha.fal.ai/storage/upload/initiate?storage_type=fal-cdn-v3";
 
@@ -797,7 +801,9 @@ async function falSam3VideoMask(
     body: JSON.stringify({
       video_url: videoUrl,
       prompt,
-      apply_mask: false,
+      apply_mask: true, // mask applied → segmented regions visible, rest black
+      video_output_type: "X264 (.mp4)",
+      detection_threshold: 0.5,
     }),
   });
   if (!submitResp.ok) {
