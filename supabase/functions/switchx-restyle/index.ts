@@ -309,6 +309,74 @@ serve(async (req) => {
     }
   }
 
+  // ---- compose-reference action --------------------------------------
+  // Calls Fal seedream/v4/edit to composite an outfit onto a subject. Used to
+  // generate a "subject-wearing-target-jacket" reference for Beeble so it
+  // anchors identity AND outfit instead of hallucinating a body from the
+  // garment reference. POST { action: "compose-reference", image_urls: [...],
+  // prompt: "..." } — returns { image_url }.
+  if ((body as any).action === "compose-reference") {
+    const imageUrls = (body as any).image_urls;
+    const composePrompt = (body as any).prompt;
+    if (!Array.isArray(imageUrls) || imageUrls.length < 1) {
+      return json(400, { error: "compose_reference_missing_image_urls" });
+    }
+    if (!composePrompt || typeof composePrompt !== "string") {
+      return json(400, { error: "compose_reference_missing_prompt" });
+    }
+    if (!falKey) {
+      return json(500, { error: "server_misconfigured", detail: "FAL_API_KEY missing" });
+    }
+    try {
+      const submitResp = await fetch(
+        "https://queue.fal.run/fal-ai/bytedance/seedream/v4/edit",
+        {
+          method: "POST",
+          headers: {
+            Authorization: `Key ${falKey}`,
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({
+            prompt: composePrompt,
+            image_urls: imageUrls,
+            image_size: "auto_2K",
+            num_images: 1,
+            max_images: 1,
+            enable_safety_checker: false,
+          }),
+        },
+      );
+      if (!submitResp.ok) {
+        return json(502, {
+          error: "compose_submit_failed",
+          detail: `${submitResp.status}: ${(await submitResp.text().catch(() => "")).slice(0, 500)}`,
+        });
+      }
+      const { request_id, status_url, response_url } = await submitResp.json();
+      const result = await pollFalUntilDone(falKey, request_id, status_url, response_url, 120_000);
+      const candidates = [
+        result?.images?.[0]?.url,
+        result?.image?.url,
+        result?.image_url,
+        result?.output?.url,
+        result?.url,
+      ];
+      const found = candidates.find((u): u is string => typeof u === "string" && u.length > 0);
+      if (!found) {
+        return json(502, {
+          error: "compose_no_image",
+          detail: `keys=${JSON.stringify(Object.keys(result || {}))} sample=${JSON.stringify(result).slice(0, 400)}`,
+        });
+      }
+      return json(200, { image_url: found });
+    } catch (err: any) {
+      return json(502, {
+        error: "compose_failed",
+        detail: String(err?.message ?? err).slice(0, 500),
+      });
+    }
+  }
+
   if (!body.sourceVideoUrl || typeof body.sourceVideoUrl !== "string") {
     return json(400, { error: "missing_source_video_url" });
   }
