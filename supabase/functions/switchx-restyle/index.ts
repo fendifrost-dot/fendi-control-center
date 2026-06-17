@@ -395,12 +395,15 @@ serve(async (req) => {
           guidance_scale: 2.5,
         };
       } else {
-        // Default: IDM-VTON
+        // Default: IDM-VTON. Fal's current schema expects `description`
+        // (the old `garment_description` was renamed). We also include both
+        // category and garment_description for forward/backward compat.
         endpointUrl = "https://queue.fal.run/fal-ai/idm-vton";
         input = {
           human_image_url: humanUrl,
           garment_image_url: garmentUrl,
           category,
+          description: garmentDescription,
           garment_description: garmentDescription,
         };
         if (vtonPrompt && typeof vtonPrompt === "string") input.prompt = vtonPrompt;
