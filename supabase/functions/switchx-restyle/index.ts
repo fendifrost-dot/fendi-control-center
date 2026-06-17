@@ -114,9 +114,17 @@ const BEEBLE_ALPHA_MODE: Record<Exclude<SwitchXMode, "both">, string> = {
   custom: "custom",
 };
 
-// SAM-3 body-parts segmenter prompts (comma-separated single string per the Fal
-// sam-3/video-rle schema). These regions become WHITE = preserve.
-const SAM_KEEP_PROMPTS = ["face", "hands", "hair", "exposed skin", "neck"];
+// SAM-3 segmenter prompt for wardrobe mode. We segment the GARMENT TARGET
+// (jacket only for v1) with apply_mask:true, producing a video where the jacket
+// region shows source pixels and everything else is BLACK. Beeble then either
+// regenerates the BLACK region (if BLACK=regenerate polarity) or the visible
+// region (if WHITE=preserve polarity). The first probe tells us which.
+//
+// Background diagnosis (ChatGPT + Grok, 2026-06-16): segmenting face/hands/etc
+// as "preserve" leaves clothes AND background editable; the model takes the
+// easier path of changing the background instead of the jacket. Targeting the
+// jacket directly forces it into the editable zone.
+const SAM_KEEP_PROMPTS = ["jacket"];
 
 // Wardrobe prompt wrapper — locks identity, pose, and background; only the
 // garment (the BLACK region driven by the reference costume) changes.
