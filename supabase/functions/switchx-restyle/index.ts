@@ -638,6 +638,61 @@ serve(async (req) => {
     }
   }
 
+  // ---- fal-run action --------------------------------------------------
+  // Generic submit-only Fal dispatcher for the AVT jacket-only inpaint lane
+  // (jacket-inpaint-proxy). POST { action: "fal-run", model, input } submits
+  // `input` to https://queue.fal.run/<model> with CC's server-side Fal key and
+  // returns { status_url, response_url, model } — the same queue-handle shape
+  // the vton-frame action returns, so the existing model-agnostic
+  // fal-queue-poll drives it to completion. See AVT docs §7
+  // (AVT_jacket_inpaint_fal_payload.md). Model ids are whitelisted: the three
+  // this lane submits (evf-sam, imageutils/depth, flux-general/inpainting) plus
+  // the two §6 controlnet_unions upgrade preprocessors (canny, openpose).
+  if ((body as any).action === "fal-run") {
+    const ALLOWED = new Set([
+      "fal-ai/evf-sam",
+      "fal-ai/imageutils/depth",
+      "fal-ai/imageutils/canny",
+      "fal-ai/image-preprocessors/openpose",
+      "fal-ai/flux-general/inpainting",
+    ]);
+    const model = (body as any).model;
+    const input = (body as any).input;
+    if (!model || typeof model !== "string" || !ALLOWED.has(model)) {
+      return json(400, { error: "model_not_allowed", model: model ?? null });
+    }
+    if (!input || typeof input !== "object") {
+      return json(400, { error: "fal_run_missing_input" });
+    }
+    if (!falKey) {
+      return json(500, { error: "server_misconfigured", detail: "FAL_API_KEY missing" });
+    }
+    try {
+      const submit = await fetch(`${FAL_QUEUE_BASE}/${model}`, {
+        method: "POST",
+        headers: {
+          Authorization: `Key ${falKey}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify(input),
+      });
+      const q = await submit.json().catch(() => ({}));
+      if (!submit.ok || !q?.status_url || !q?.response_url) {
+        return json(502, { error: "fal_submit_failed", detail: q });
+      }
+      return json(200, {
+        status_url: q.status_url,
+        response_url: q.response_url,
+        model,
+      });
+    } catch (err: any) {
+      return json(502, {
+        error: "fal_run_failed",
+        detail: String(err?.message ?? err).slice(0, 500),
+      });
+    }
+  }
+
   if (!body.sourceVideoUrl || typeof body.sourceVideoUrl !== "string") {
     return json(400, { error: "missing_source_video_url" });
   }
