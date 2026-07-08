@@ -655,6 +655,7 @@ serve(async (req) => {
       "fal-ai/imageutils/canny",
       "fal-ai/image-preprocessors/openpose",
       "fal-ai/flux-general/inpainting",
+      "fal-ai/flux-lora/inpainting",
     ]);
     const model = (body as any).model;
     const input = (body as any).input;
