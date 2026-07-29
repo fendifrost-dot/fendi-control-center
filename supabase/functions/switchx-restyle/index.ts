@@ -659,6 +659,8 @@ serve(async (req) => {
       "fal-ai/workflow-utilities/scale-video",
       "fal-ai/ffmpeg-api/compose",
       "fal-ai/kling/v1-5/kolors-virtual-try-on",
+      "fal-ai/workflow-utilities/trim-video",
+      "fal-ai/ffmpeg-api/metadata",
     ]);
     const model = (body as any).model;
     const input = (body as any).input;
