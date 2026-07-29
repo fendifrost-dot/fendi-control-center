@@ -658,6 +658,7 @@ serve(async (req) => {
       "fal-ai/flux-lora/inpainting",
       "fal-ai/workflow-utilities/scale-video",
       "fal-ai/ffmpeg-api/compose",
+      "fal-ai/kling/v1-5/kolors-virtual-try-on",
     ]);
     const model = (body as any).model;
     const input = (body as any).input;
