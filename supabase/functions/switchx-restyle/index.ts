@@ -661,6 +661,15 @@ serve(async (req) => {
       "fal-ai/kling/v1-5/kolors-virtual-try-on",
       "fal-ai/workflow-utilities/trim-video",
       "fal-ai/ffmpeg-api/metadata",
+      // AVT Lane C — Decart Lucy batch video-to-video (wardrobe-video-lucy-proxy,
+      // env LUCY_V2V_FAL_MODEL). Batch submit/poll v2v: { prompt, video_url,
+      // resolution?, seed? } -> { video:{ url } }. Matches LUCY_BATCH_MODELS in
+      // AVT _shared/lucyV2v.ts. The /realtime Lucy slugs are WebRTC and are
+      // intentionally NOT allowlisted (they cannot be driven via fal-run).
+      "decart/lucy-edit/fast",
+      "decart/lucy-edit/dev",
+      "decart/lucy-edit/pro",
+      "decart/lucy-restyle",
     ]);
     const model = (body as any).model;
     const input = (body as any).input;
