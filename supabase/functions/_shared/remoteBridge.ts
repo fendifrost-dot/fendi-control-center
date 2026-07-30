@@ -1,9 +1,11 @@
 /** Remote Control Hub — enqueue + safety helpers (cloud side). */
 
+import { normalizeTelegramText } from "./telegramNaturalLanguage.ts";
+import { isMacBridgeStatusCheck } from "./telegramNaturalLanguage.ts";
+
 export type RemoteCommandType = "shell" | "cursor_agent" | "claude" | "open_url" | "notify" | "ping";
 
 export interface RemoteCommandPayload {
-  /** Shell command string or agent prompt */
   text?: string;
   cwd?: string;
   url?: string;
@@ -26,10 +28,10 @@ export function parseMacTelegramCommand(text: string): {
   command_type: RemoteCommandType;
   payload: RemoteCommandPayload;
 } | null {
-  const trimmed = text.trim();
+  const trimmed = normalizeTelegramText(text);
   const lower = trimmed.toLowerCase();
 
-  if (lower === "/mac" || lower === "/mac status" || lower === "/computer" || lower === "/computer status") {
+  if (isMacBridgeStatusCheck(trimmed)) {
     return { command_type: "ping", payload: { text: "status" } };
   }
 
@@ -38,9 +40,19 @@ export function parseMacTelegramCommand(text: string): {
     return parseMacBody(macPrefix[1].trim());
   }
 
-  const runOnMac = trimmed.match(/^(?:run\s+on\s+(?:my\s+)?(?:mac|computer)|mac:)\s*[:\-]?\s*(.+)$/is);
-  if (runOnMac) {
-    return parseMacBody(runOnMac[1].trim());
+  const patterns = [
+    /^(?:please\s+)?(?:run\s+)?on\s+(?:my\s+)?(?:mac|computer)\s*[:\-]?\s*(.+)$/is,
+    /^(?:please\s+)?(?:use|from)\s+(?:my\s+)?(?:mac|computer)\s+(?:to\s+)?(.+)$/is,
+    /^my\s+(?:mac|computer)\s*[:\-]\s*(.+)$/is,
+    /^(?:mac|computer)\s*[:\-]\s*(.+)$/is,
+    /^(?:run\s+on\s+(?:my\s+)?(?:mac|computer)|mac:)\s*[:\-]?\s*(.+)$/is,
+  ];
+
+  for (const re of patterns) {
+    const m = trimmed.match(re);
+    if (m?.[1]?.trim()) {
+      return parseMacBody(m[1].trim());
+    }
   }
 
   return null;
@@ -89,20 +101,17 @@ export function formatRemoteResultForTelegram(
   error?: string | null,
 ): string {
   if (error) {
-    return `🖥️ *Mac bridge* — failed\n\`${commandId.slice(0, 8)}\` (${commandType})\n\n${error}`;
+    return `Mac bridge failed (${commandType})\n${commandId.slice(0, 8)}\n\n${error}`;
   }
-  const parts: string[] = [
-    `🖥️ *Mac bridge* — ${commandType}`,
-    `\`${commandId.slice(0, 8)}\``,
-  ];
+  const parts: string[] = [`Mac bridge: ${commandType}`, commandId.slice(0, 8)];
   if (result.message) parts.push("", result.message);
   if (result.stdout) {
     const out = result.stdout.length > 3500 ? result.stdout.slice(0, 3500) + "\n…(truncated)" : result.stdout;
-    parts.push("", "```", out, "```");
+    parts.push("", out);
   }
   if (result.stderr) {
     const err = result.stderr.length > 800 ? result.stderr.slice(0, 800) + "…" : result.stderr;
-    parts.push("", `_stderr:_`, "```", err, "```");
+    parts.push("", `stderr: ${err}`);
   }
   if (typeof result.exit_code === "number") parts.push("", `exit: ${result.exit_code}`);
   return parts.join("\n");

@@ -207,3 +207,7 @@ WHERE channel = 'telegram';
 4. Optional: split `telegram-webhook` modules after smoke tests pass.
 
 See also: `docs/HANDOFF_CREDIT_TELEGRAM_ROUTING.md`, `supabase/functions/telegram-webhook/FORENSIC_REPORT.md`, `docs/REMOTE_CONTROL_HUB.md`.
+
+## Natural-language bundle (2026-06-03)
+
+After deploy, `ping` or `/ping` should report `webhook bundle: 2026-06-03-telegram-v3-natural`. Try without slashes: `help`, `system status`, `is my mac online`, `analyze credit for <client>`.
