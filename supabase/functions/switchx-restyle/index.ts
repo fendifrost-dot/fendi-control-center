@@ -691,18 +691,45 @@ serve(async (req) => {
         },
         body: JSON.stringify(input),
       });
-      const q = await submit.json().catch(() => ({}));
-      if (!submit.ok || !q?.status_url || !q?.response_url) {
-        return json(502, { error: "fal_submit_failed", detail: q });
+      // Read as text first so a non-JSON error body (Fal 4xx/5xx, HTML gateway
+      // pages) is preserved instead of collapsing to {} — the video submit path
+      // is exactly where such bodies show up.
+      const rawText = await submit.text();
+      let q: any = {};
+      try {
+        q = JSON.parse(rawText);
+      } catch {
+        /* non-JSON body kept in rawText for the preview below */
       }
+      if (!submit.ok || !q?.status_url || !q?.response_url) {
+        // Log the raw Fal submit failure to edge logs (Authorization header is
+        // never logged; input may carry signed URLs/paths, which we keep).
+        console.error(
+          `[switchx-restyle fal-run] submit_failed http=${submit.status} model=${model} body=${rawText.slice(0, 1500)} input=${JSON.stringify(input).slice(0, 800)}`,
+        );
+        return json(502, {
+          error: "fal_submit_failed",
+          model,
+          fal_status: submit.status,
+          fal_body_preview: rawText.slice(0, 1500),
+          detail: q && Object.keys(q).length ? q : rawText.slice(0, 500),
+        });
+      }
+      console.log(
+        `[switchx-restyle fal-run] submitted model=${model} status_url=${q.status_url}`,
+      );
       return json(200, {
         status_url: q.status_url,
         response_url: q.response_url,
         model,
       });
     } catch (err: any) {
+      console.error(
+        `[switchx-restyle fal-run] exception model=${model} ${String(err?.message ?? err).slice(0, 500)}`,
+      );
       return json(502, {
         error: "fal_run_failed",
+        model,
         detail: String(err?.message ?? err).slice(0, 500),
       });
     }
