@@ -134,3 +134,6 @@ verify_jwt = false
 [functions.faceswap-generate-callback]
 verify_jwt = false
 
+
+[functions.tmp-astra-computer-probe]
+verify_jwt = false
