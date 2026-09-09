@@ -134,5 +134,3 @@ verify_jwt = false
 [functions.faceswap-generate-callback]
 verify_jwt = false
 
-[functions.tmp-openai-probe]
-verify_jwt = false
