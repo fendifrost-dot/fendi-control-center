@@ -76,9 +76,8 @@ export const RUNWAY_VIDEO_EDIT_MODELS: Record<string, RunwayVideoEditModel> = {
     creditsPerOutputSecond: 10,
     creditsPerInputSecond: 0,
     minCredits: 0,
-    ratio: "720:1280",
     source:
-      "video_to_video mode=edit with ≤ 5 image references; input ≤ 10 s; 10 credits/s (pricing page lists t2v/i2v; edit assumed the same until a real invoice proves otherwise)",
+      "video_to_video mode=edit with ≤ 5 image references; input ≤ 10 s; 10 credits/s (pricing page lists t2v/i2v; edit assumed the same until a real invoice proves otherwise). Runway 2026-09-23 (unbilled 400): in edit mode `ratio` is rejected — output orientation follows the input video and resolution is 720p; and `contentModeration` is rejected as an unrecognized key",
   },
   seedance2_5: {
     contract: "mode_edit",
@@ -335,8 +334,9 @@ export function buildRunwayRequest(body: VideoEditBody): Record<string, unknown>
     promptText: body.promptText,
     duration: "auto",
     ...(body.references.length ? { references: body.references } : {}),
-    // seedance2_5 derives its own ratio; the others need one.
+    // Edit mode takes neither `ratio` (orientation follows the input; 720p) nor
+    // `contentModeration` — Runway answers 400 to both (observed 2026-09-23, unbilled).
+    // A model that documents a ratio for edit mode can opt back in via `model.ratio`.
     ...(model.ratio ? { ratio: body.ratio ?? model.ratio } : {}),
-    ...(body.contentModeration ? { contentModeration: body.contentModeration } : {}),
   };
 }

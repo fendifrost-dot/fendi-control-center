@@ -199,13 +199,16 @@ Deno.test("builds the aleph2 contract with keyframes and no mode field", () => {
   assertEquals(body.contentModeration, { publicFigureThreshold: "low" });
 });
 
-Deno.test("builds the mode_edit contract with references, ratio and duration auto", () => {
+Deno.test("builds the mode_edit contract with references and duration auto, and never sends ratio or contentModeration in edit mode", () => {
   const omni = buildRunwayRequest(
-    ok({ model: "gemini_omni_flash_1.1", videoUri: VIDEO, promptText: "edit", inputSeconds: 4, avtAuthorizedMaxCents: 500, references: [{ uri: IMG }] }),
+    ok({ model: "gemini_omni_flash_1.1", videoUri: VIDEO, promptText: "edit", inputSeconds: 4, avtAuthorizedMaxCents: 500, references: [{ uri: IMG }], contentModeration: { publicFigureThreshold: "low" } }),
   );
   assertEquals(omni.mode, "edit");
   assertEquals(omni.duration, "auto");
-  assertEquals(omni.ratio, "720:1280");
+  // Runway 2026-09-23: edit mode rejects `ratio` (orientation follows the input, 720p) and
+  // `contentModeration` (unrecognized key) with 400 — both observed, both unbilled.
+  assertEquals(omni.ratio, undefined);
+  assertEquals(omni.contentModeration, undefined);
   assertEquals((omni.references as unknown[]).length, 1);
 
   // seedance2_5 derives its own ratio — sending one would be wrong.
