@@ -101,6 +101,14 @@ verify_jwt = false
 [functions.video-providers-job-result]
 verify_jwt = false
 
+# Runway video EDIT (/v1/video_to_video) — additive sibling of
+# video-providers-runway-generate, which is unchanged. Same auth model as the other
+# provider proxies: no user JWT, authenticated inside the function by the shared
+# AVT_PROXY_KEY in the x-api-key header. Polling and result retrieval reuse
+# video-providers-job-status / -job-result with provider=runway.
+[functions.video-providers-runway-video-edit]
+verify_jwt = false
+
 [functions.ai-draft-treatment]
 verify_jwt = false
 
