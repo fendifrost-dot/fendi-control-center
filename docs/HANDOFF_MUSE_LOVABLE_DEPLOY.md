@@ -8,39 +8,47 @@ Design reference: [`docs/MUSE_EXECUTIVE_LAYER.md`](./MUSE_EXECUTIVE_LAYER.md).
 
 ---
 
-## Status going in
+## Status — COMPLETE (2026-09-26, 22:30 UTC)
 
-**Updated 2026-09-26 after a live re-check. Step 2 is already DONE — do not redo it.**
+**Steps 1, 1a, 2, 3, 5 and 6 are all DONE and verified. Do not re-run this handoff.**
+Re-running the migration is harmless (it is idempotent) but it is unnecessary load on a
+Tiny Lovable Cloud instance.
 
-| Thing | State |
-|---|---|
-| Code on `main` | ✅ merged (#19 `b576721`, #20 `655702a`, #21 `8c20290`, #22 `53b41ad`) |
-| **Schema in the live database** | ❌ **NOT APPLIED — this is the one remaining blocker** |
-| `muse-executive` edge function live | ✅ **deployed and live-verified** (see below) |
-| `/muse` UI published | ✅ Lovable pushed "Rebuilt frontend preview" (`2d80a17`) |
-| Schema validated | ✅ against real PostgreSQL 16, incl. read-only security tests |
-| CI on `main` | ✅ green (`2d80a17`, `53b41ad`, `8c20290`) |
+| Thing | State | Evidence |
+|---|---|---|
+| Code on `main` | ✅ | #19 `b576721` … #23 `0d899b8` |
+| Schema in the live database | ✅ applied | Full migration re-run in one pass in the Lovable SQL editor, `Query succeeded` |
+| Step 1a counts | ✅ exact | `tables=11, views=11, domains=8, systems=21, open_loops=13, decisions=4, kpis=19, sources=13` |
+| `muse-executive` edge function | ✅ `LIVE_VERIFIED` | verifier sections 2–3 |
+| `/muse` UI published | ✅ `LIVE_VERIFIED` (deployed) | `fendi-control-center.lovable.app` serves bundle `index-C2yrT4DR.js` containing `/muse`, `/muse/portfolio`, `/muse/loops`, `/muse/improvements`, `/muse/sources`, `/muse/systems` |
+| Live verification (step 5) | ✅ | `MUSE LIVE VERIFICATION PASSED` — 17 pass, 0 fail, 1 skip (data-shape checks skipped: no `MUSE_API_TOKEN`) |
+| Muse ledger (step 6) | ✅ | `muse-executive` + `/muse` → `LIVE_VERIFIED`; migration → `SYSTEM_VERIFIED`; deploy open loop → `RESOLVED`; source authority `last_verified_at` stamped. `verified_by = claude-cowork` |
 
-### Already live-verified against the deployed function
+### `muse_system_health` at 2026-09-26 22:28 UTC (first live read)
 
-`scripts/muse/verify-muse-live.mjs` now passes 8 checks against the real endpoint. These are
-proven in production and need no re-testing:
+No system reports `FAILING`. One reports `STALE`:
 
-| Check | Result |
-|---|---|
-| Unauthenticated read | ✅ HTTP 401 |
-| Invalid token | ✅ HTTP 401 |
-| Supabase key presented as a Muse token | ✅ HTTP 401 — refused |
-| `POST` / `PUT` / `PATCH` / `DELETE` | ✅ HTTP 405 on all four — read-only enforced |
-| `anon` direct write to `muse_open_loops` | ✅ rejected |
+| System | Status | Evidence |
+|---|---|---|
+| `remote-bridge` | **STALE** | 30-min heartbeat; last success `2026-06-09T17:30:11Z`, no failures recorded |
+| `cc-tool-executor` | HEALTHY, `failing_count=1` | last failure `2026-09-23T20:11Z` (Runway: "`ratio` may only be provided in reference mode"), last success after it `2026-09-24T00:07Z` |
+| `ingestion-jobs` | NEVER_RAN / NOT_MEASURED | 208 pending, latest activity `2026-04-01` |
+| `statement-chunk-jobs` | NEVER_RAN / NOT_MEASURED | 2 pending |
+| `drive-sync`, `telegram-webhook`, `telegram-outbox`, `agent-task-loop` | HEALTHY | — |
+| `guardian-queue`, `workflow-runner`, `remote-command-queue`, `approval-queue` | NEVER_RAN / NOT_MEASURED | 0 pending |
+| Boltz ×4, AGH, GitHub, Lovable deploys, Claude Code, Cursor | NOT_OBSERVED / SOURCE_EXISTS_ACCESS_NEEDED | correct by design — Phase 2 |
 
-So the **read-only guarantee is now LIVE_VERIFIED**, not merely claimed. What is *not* yet
-verifiable is anything that needs the tables to exist: the 9 `muse_*` views all report
-"not found — migration not applied", so `/muse` will render the "Muse schema is not in this
-database yet" panel and API reads will fail rather than return data.
+### Still open (not blockers)
 
-**Therefore: do only Step 1 below, then Step 1a, then Step 5 and Step 6.** Steps 2 and 3 are
-done.
+1. **Step 4 (optional):** no `MUSE_API_TOKEN` exists, so verifier section 4 (data shape) has
+   not run. Needs Fendi's decision to mint one.
+2. **Signed-in render of `/muse`** has not been observed by an agent (the published domain
+   needs a logged-in session). Deployment is verified; data rendering is not.
+3. **Lovable Cloud instance** is Tiny (0.5 GB RAM). Earlier on 2026-09-26 it hit its resource
+   ceiling (SQL editor connection timeouts, `select 1` ≈ 20 s). By 22:23 UTC it had recovered
+   (`select 1` ≈ 1.8 s, 15 connections, 1 active). Treat as a transient event unless it recurs.
+
+The steps below are kept as the record of how this was done.
 
 ## Hard rules (from `CLAUDE.md`)
 
