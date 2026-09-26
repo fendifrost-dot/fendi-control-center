@@ -235,6 +235,8 @@ export type CommonGenerateBody = AvtAuditFields & {
   duration?: number;
   aspectRatio?: string;
   seed?: number;
+  /** Optional negative prompt; forwarded as `negative_prompt` by providers that support it. */
+  negativePrompt?: string;
   settings?: Record<string, unknown>;
 };
 
