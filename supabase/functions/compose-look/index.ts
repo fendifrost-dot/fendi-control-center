@@ -113,6 +113,11 @@ type Body = {
   callback_url?: string;
 };
 
+type FalImageResult = {
+  request_id: string;
+  image_url: string;
+};
+
 // Seedream v4 edit accepts up to 10 image_urls; lora_seedream uses 8 refs.
 const SEEDREAM_COMPOSE_MAX_DEFAULT = 4;
 const SEEDREAM_COMPOSE_MAX_LORA_SEEDREAM = 8;
@@ -184,7 +189,12 @@ serve(async (req) => {
   const hasLocation = !!signedUrls.location || !!recipe.hasLocation;
   const composeText = resolveComposePrompt(recipe);
 
-  const stages: Array<{ stage: string; request_id?: string; image_url?: string }> = [];
+  const stages: Array<{
+    stage: string;
+    request_id?: string;
+    image_url?: string;
+    reason?: string;
+  }> = [];
   let costCents = 0;
   let falImageUrl: string | null = null;
 
