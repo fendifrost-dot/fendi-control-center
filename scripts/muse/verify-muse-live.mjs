@@ -100,14 +100,27 @@ async function main() {
       schemaApplied = true;
       continue;
     }
-    // 404/PGRST205 = view absent. 401/403/42501 = present but protected.
-    const missing = res.status === 404 || /PGRST205|does not exist|schema cache/i.test(body);
-    if (missing) {
+    // 404/PGRST205 = not in PostgREST's schema cache. 401/403/42501 = present but protected.
+    //
+    // PGRST205 is NOT proof the object is absent from the database: PostgREST
+    // answers from a cached view of the catalog, so a migration applied before
+    // that cache reloaded reads exactly the same from out here. This check
+    // therefore reports REST visibility and says so — only the catalog query in
+    // docs/HANDOFF_MUSE_LOVABLE_DEPLOY.md (step 1a), run in the Lovable SQL
+    // editor, can distinguish "never applied" from "applied, cache stale".
+    const notVisible = res.status === 404 || /PGRST205|does not exist|schema cache/i.test(body);
+    if (notVisible) {
       if (schemaApplied === null) schemaApplied = false;
-      record(`${view} exists`, "FAIL", "not found — migration not applied to this database");
+      record(
+        `${view} visible to the REST API`,
+        "FAIL",
+        `HTTP ${res.status} — absent, or present but missing from PostgREST's schema cache`,
+      );
     } else {
+      // A 42501 permission error naming the object is positive proof it exists:
+      // PostgREST can only name a relation's kind if it resolved it.
       schemaApplied = true;
-      record(`anon blocked from ${view}`, "PASS", `HTTP ${res.status}`);
+      record(`anon blocked from ${view}`, "PASS", `HTTP ${res.status} — exists and denies anon`);
     }
   }
 
@@ -271,8 +284,12 @@ async function main() {
   console.log(`passed ${results.length - failed.length - skipped.length} · failed ${failed.length} · skipped ${skipped.length}`);
 
   if (schemaApplied === false) {
-    console.log("\nNEXT STEP: apply supabase/migrations/20260925120000_muse_executive_layer.sql");
-    console.log("in the Lovable SQL editor for project wkzwcfmvnwolgrdpnygc, then re-run this script.");
+    console.log("\nNEXT STEP: the Muse objects are not visible to the REST API. Either the");
+    console.log("migration was never applied, or it was applied and PostgREST's schema cache is");
+    console.log("stale — this script cannot tell those apart from outside. Confirm with the");
+    console.log("catalog query in docs/HANDOFF_MUSE_LOVABLE_DEPLOY.md (step 1a) in the Lovable");
+    console.log("SQL editor; if the rows are missing, apply");
+    console.log("supabase/migrations/20260925120000_muse_executive_layer.sql there and re-run this.");
   }
   if (!endpointLive) {
     console.log("\nNEXT STEP: redeploy the `muse-executive` edge function from Lovable (Edge Functions -> redeploy).");
