@@ -10,13 +10,37 @@ Design reference: [`docs/MUSE_EXECUTIVE_LAYER.md`](./MUSE_EXECUTIVE_LAYER.md).
 
 ## Status going in
 
+**Updated 2026-09-26 after a live re-check. Step 2 is already DONE — do not redo it.**
+
 | Thing | State |
 |---|---|
-| Code on `main` | ✅ merged in PR #19 (`b576721`) |
-| Schema in the live database | ❌ **not applied** — this handoff applies it |
-| `muse-executive` edge function live | ❌ **not redeployed** — this handoff redeploys it |
-| `/muse` UI published | ❌ **not published** — this handoff publishes it |
+| Code on `main` | ✅ merged (#19 `b576721`, #20 `655702a`, #21 `8c20290`, #22 `53b41ad`) |
+| **Schema in the live database** | ❌ **NOT APPLIED — this is the one remaining blocker** |
+| `muse-executive` edge function live | ✅ **deployed and live-verified** (see below) |
+| `/muse` UI published | ✅ Lovable pushed "Rebuilt frontend preview" (`2d80a17`) |
 | Schema validated | ✅ against real PostgreSQL 16, incl. read-only security tests |
+| CI on `main` | ✅ green (`2d80a17`, `53b41ad`, `8c20290`) |
+
+### Already live-verified against the deployed function
+
+`scripts/muse/verify-muse-live.mjs` now passes 8 checks against the real endpoint. These are
+proven in production and need no re-testing:
+
+| Check | Result |
+|---|---|
+| Unauthenticated read | ✅ HTTP 401 |
+| Invalid token | ✅ HTTP 401 |
+| Supabase key presented as a Muse token | ✅ HTTP 401 — refused |
+| `POST` / `PUT` / `PATCH` / `DELETE` | ✅ HTTP 405 on all four — read-only enforced |
+| `anon` direct write to `muse_open_loops` | ✅ rejected |
+
+So the **read-only guarantee is now LIVE_VERIFIED**, not merely claimed. What is *not* yet
+verifiable is anything that needs the tables to exist: the 9 `muse_*` views all report
+"not found — migration not applied", so `/muse` will render the "Muse schema is not in this
+database yet" panel and API reads will fail rather than return data.
+
+**Therefore: do only Step 1 below, then Step 1a, then Step 5 and Step 6.** Steps 2 and 3 are
+done.
 
 ## Hard rules (from `CLAUDE.md`)
 
@@ -94,7 +118,11 @@ deploys, Claude Code, Cursor). `NOT_OBSERVED` on those is **correct** — do not
 Whatever statuses come back are the real state of Fendi's systems. If something reads
 `FAILING`, that is a genuine finding to report, not a deployment problem.
 
-## Step 2 — Redeploy the edge function
+## Step 2 — Redeploy the edge function — ✅ ALREADY DONE
+
+_Verified live on 2026-09-26: the function responds, rejects unauthenticated reads with 401,
+refuses a Supabase key as a Muse token, and returns 405 on all four write verbs. Skip this
+step. Kept here for reference only._
 
 **Lovable → Edge Functions → `muse-executive` → redeploy.**
 
@@ -112,7 +140,11 @@ curl -s -o /dev/null -w '%{http_code}\n' \
 * `401` → ✅ deployed and correctly refusing unauthenticated reads.
 * `404` → ❌ not deployed yet.
 
-## Step 3 — Publish the frontend
+## Step 3 — Publish the frontend — ✅ APPEARS DONE
+
+_Lovable committed "Rebuilt frontend preview" (`2d80a17`) on 2026-09-26. Confirm `/muse`
+loads on the Control Hub domain; until Step 1 is done it will correctly show the "Muse schema
+is not in this database yet" panel, which is the honest state, not a bug._
 
 **Lovable → Publish.** This exposes `/muse` (Brief, Portfolio, Open loops, 1% ledger,
 Sources, Systems) and adds the "Muse" tile to the Hub cover menu.
