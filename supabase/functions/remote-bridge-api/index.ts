@@ -1,5 +1,8 @@
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
-import { createClient } from "https://esm.sh/@supabase/supabase-js@2.49.1";
+import {
+  createClient,
+  type SupabaseClient,
+} from "https://esm.sh/@supabase/supabase-js@2.49.1";
 import {
   assertShellAllowed,
   formatRemoteResultForTelegram,
@@ -51,7 +54,9 @@ async function authEnqueue(req: Request, body: Record<string, unknown>): Promise
   return false;
 }
 
-async function ensureDefaultDevice(supabase: ReturnType<typeof createClient>): Promise<string> {
+async function ensureDefaultDevice(
+  supabase: SupabaseClient<any, "public", any>,
+): Promise<string> {
   const name = Deno.env.get("REMOTE_BRIDGE_DEVICE_NAME") ?? "primary-mac";
   const { data: existing } = await supabase
     .from("remote_bridge_devices")
