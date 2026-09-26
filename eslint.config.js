@@ -25,6 +25,11 @@ export default tseslint.config(
       "@typescript-eslint/no-empty-object-type": "warn",
       "@typescript-eslint/no-require-imports": "warn",
       "no-useless-escape": "warn",
+      // `let x; ... x = value;` assigned exactly once is not convertible to
+      // const (a const declaration needs its initializer), so flagging it is a
+      // false positive. See src/integrations/supabase/previewAuthStorage.ts,
+      // where `timer` is captured by closures defined before it is assigned.
+      "prefer-const": ["error", { ignoreReadBeforeAssign: true }],
     },
   },
 );
