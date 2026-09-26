@@ -664,6 +664,705 @@ export type Database = {
           },
         ]
       }
+      muse_access_audit: {
+        Row: {
+          at: string
+          http_status: number
+          id: number
+          ip_hash: string | null
+          method: string
+          note: string | null
+          resource: string
+          token_label: string | null
+          user_agent: string | null
+        }
+        Insert: {
+          at?: string
+          http_status: number
+          id?: number
+          ip_hash?: string | null
+          method: string
+          note?: string | null
+          resource: string
+          token_label?: string | null
+          user_agent?: string | null
+        }
+        Update: {
+          at?: string
+          http_status?: number
+          id?: number
+          ip_hash?: string | null
+          method?: string
+          note?: string | null
+          resource?: string
+          token_label?: string | null
+          user_agent?: string | null
+        }
+        Relationships: []
+      }
+      muse_api_tokens: {
+        Row: {
+          created_at: string
+          expires_at: string | null
+          id: string
+          label: string
+          last_used_at: string | null
+          notes: string | null
+          revoked_at: string | null
+          scopes: string[]
+          token_sha256: string
+        }
+        Insert: {
+          created_at?: string
+          expires_at?: string | null
+          id?: string
+          label: string
+          last_used_at?: string | null
+          notes?: string | null
+          revoked_at?: string | null
+          scopes?: string[]
+          token_sha256: string
+        }
+        Update: {
+          created_at?: string
+          expires_at?: string | null
+          id?: string
+          label?: string
+          last_used_at?: string | null
+          notes?: string | null
+          revoked_at?: string | null
+          scopes?: string[]
+          token_sha256?: string
+        }
+        Relationships: []
+      }
+      muse_decisions: {
+        Row: {
+          classification: string
+          context: string | null
+          created_at: string
+          decided_at: string | null
+          decision: string | null
+          decision_required_by: string | null
+          domain_key: string
+          evidence: Json
+          id: string
+          options: Json
+          owner: string
+          question: string
+          review_at: string | null
+          source: string
+          source_ref: string | null
+          status: string
+          updated_at: string
+        }
+        Insert: {
+          classification?: string
+          context?: string | null
+          created_at?: string
+          decided_at?: string | null
+          decision?: string | null
+          decision_required_by?: string | null
+          domain_key: string
+          evidence?: Json
+          id?: string
+          options?: Json
+          owner?: string
+          question: string
+          review_at?: string | null
+          source?: string
+          source_ref?: string | null
+          status?: string
+          updated_at?: string
+        }
+        Update: {
+          classification?: string
+          context?: string | null
+          created_at?: string
+          decided_at?: string | null
+          decision?: string | null
+          decision_required_by?: string | null
+          domain_key?: string
+          evidence?: Json
+          id?: string
+          options?: Json
+          owner?: string
+          question?: string
+          review_at?: string | null
+          source?: string
+          source_ref?: string | null
+          status?: string
+          updated_at?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "muse_decisions_domain_key_fkey"
+            columns: ["domain_key"]
+            isOneToOne: false
+            referencedRelation: "muse_domains"
+            referencedColumns: ["key"]
+          },
+          {
+            foreignKeyName: "muse_decisions_domain_key_fkey"
+            columns: ["domain_key"]
+            isOneToOne: false
+            referencedRelation: "muse_portfolio_map"
+            referencedColumns: ["domain_key"]
+          },
+        ]
+      }
+      muse_domains: {
+        Row: {
+          created_at: string
+          current_bottleneck: string | null
+          current_initiative: string | null
+          data_status: string
+          is_active: boolean
+          key: string
+          name: string
+          next_review_at: string | null
+          notes: string | null
+          owner: string
+          sort_order: number
+          source_of_truth: string | null
+          status: string
+          systems: Json
+          updated_at: string
+        }
+        Insert: {
+          created_at?: string
+          current_bottleneck?: string | null
+          current_initiative?: string | null
+          data_status?: string
+          is_active?: boolean
+          key: string
+          name: string
+          next_review_at?: string | null
+          notes?: string | null
+          owner?: string
+          sort_order?: number
+          source_of_truth?: string | null
+          status?: string
+          systems?: Json
+          updated_at?: string
+        }
+        Update: {
+          created_at?: string
+          current_bottleneck?: string | null
+          current_initiative?: string | null
+          data_status?: string
+          is_active?: boolean
+          key?: string
+          name?: string
+          next_review_at?: string | null
+          notes?: string | null
+          owner?: string
+          sort_order?: number
+          source_of_truth?: string | null
+          status?: string
+          systems?: Json
+          updated_at?: string
+        }
+        Relationships: []
+      }
+      muse_improvements: {
+        Row: {
+          actual_result: string | null
+          baseline: string | null
+          created_at: string
+          domain_key: string
+          expected_result: string | null
+          id: string
+          intervention: string
+          metric: string
+          notes: string | null
+          owner: string
+          problem: string
+          review_at: string | null
+          source_ref: string | null
+          started_at: string | null
+          status: string
+          updated_at: string
+          verdict: string
+          verification_state: string
+        }
+        Insert: {
+          actual_result?: string | null
+          baseline?: string | null
+          created_at?: string
+          domain_key: string
+          expected_result?: string | null
+          id?: string
+          intervention: string
+          metric: string
+          notes?: string | null
+          owner?: string
+          problem: string
+          review_at?: string | null
+          source_ref?: string | null
+          started_at?: string | null
+          status?: string
+          updated_at?: string
+          verdict?: string
+          verification_state?: string
+        }
+        Update: {
+          actual_result?: string | null
+          baseline?: string | null
+          created_at?: string
+          domain_key?: string
+          expected_result?: string | null
+          id?: string
+          intervention?: string
+          metric?: string
+          notes?: string | null
+          owner?: string
+          problem?: string
+          review_at?: string | null
+          source_ref?: string | null
+          started_at?: string | null
+          status?: string
+          updated_at?: string
+          verdict?: string
+          verification_state?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "muse_improvements_domain_key_fkey"
+            columns: ["domain_key"]
+            isOneToOne: false
+            referencedRelation: "muse_domains"
+            referencedColumns: ["key"]
+          },
+          {
+            foreignKeyName: "muse_improvements_domain_key_fkey"
+            columns: ["domain_key"]
+            isOneToOne: false
+            referencedRelation: "muse_portfolio_map"
+            referencedColumns: ["domain_key"]
+          },
+        ]
+      }
+      muse_kpi_registry: {
+        Row: {
+          created_at: string
+          data_status: string
+          direction: string
+          domain_key: string
+          is_derived: boolean
+          is_primary: boolean
+          metric_key: string
+          name: string
+          notes: string | null
+          sort_order: number
+          source_system: string
+          target: string | null
+          unit: string
+          updated_at: string
+        }
+        Insert: {
+          created_at?: string
+          data_status?: string
+          direction?: string
+          domain_key: string
+          is_derived?: boolean
+          is_primary?: boolean
+          metric_key: string
+          name: string
+          notes?: string | null
+          sort_order?: number
+          source_system: string
+          target?: string | null
+          unit?: string
+          updated_at?: string
+        }
+        Update: {
+          created_at?: string
+          data_status?: string
+          direction?: string
+          domain_key?: string
+          is_derived?: boolean
+          is_primary?: boolean
+          metric_key?: string
+          name?: string
+          notes?: string | null
+          sort_order?: number
+          source_system?: string
+          target?: string | null
+          unit?: string
+          updated_at?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "muse_kpi_registry_domain_key_fkey"
+            columns: ["domain_key"]
+            isOneToOne: false
+            referencedRelation: "muse_domains"
+            referencedColumns: ["key"]
+          },
+          {
+            foreignKeyName: "muse_kpi_registry_domain_key_fkey"
+            columns: ["domain_key"]
+            isOneToOne: false
+            referencedRelation: "muse_portfolio_map"
+            referencedColumns: ["domain_key"]
+          },
+        ]
+      }
+      muse_open_loops: {
+        Row: {
+          category: string
+          classification: string
+          created_at: string
+          dependency: string | null
+          derive_resolution_from: string | null
+          domain_key: string
+          id: string
+          last_evidence_at: string | null
+          next_action: string | null
+          notes: string | null
+          owner: string | null
+          priority: string
+          resolved_at: string | null
+          review_at: string | null
+          source: string
+          source_ref: string | null
+          state: string
+          title: string
+          updated_at: string
+          verification_state: string
+        }
+        Insert: {
+          category?: string
+          classification?: string
+          created_at?: string
+          dependency?: string | null
+          derive_resolution_from?: string | null
+          domain_key: string
+          id?: string
+          last_evidence_at?: string | null
+          next_action?: string | null
+          notes?: string | null
+          owner?: string | null
+          priority?: string
+          resolved_at?: string | null
+          review_at?: string | null
+          source?: string
+          source_ref?: string | null
+          state?: string
+          title: string
+          updated_at?: string
+          verification_state?: string
+        }
+        Update: {
+          category?: string
+          classification?: string
+          created_at?: string
+          dependency?: string | null
+          derive_resolution_from?: string | null
+          domain_key?: string
+          id?: string
+          last_evidence_at?: string | null
+          next_action?: string | null
+          notes?: string | null
+          owner?: string | null
+          priority?: string
+          resolved_at?: string | null
+          review_at?: string | null
+          source?: string
+          source_ref?: string | null
+          state?: string
+          title?: string
+          updated_at?: string
+          verification_state?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "muse_open_loops_domain_key_fkey"
+            columns: ["domain_key"]
+            isOneToOne: false
+            referencedRelation: "muse_domains"
+            referencedColumns: ["key"]
+          },
+          {
+            foreignKeyName: "muse_open_loops_domain_key_fkey"
+            columns: ["domain_key"]
+            isOneToOne: false
+            referencedRelation: "muse_portfolio_map"
+            referencedColumns: ["domain_key"]
+          },
+        ]
+      }
+      muse_source_authority: {
+        Row: {
+          access_status: string
+          authoritative_system: string
+          confidence: string
+          created_at: string
+          domain_key: string
+          freshness_target_minutes: number | null
+          id: string
+          known_conflict: boolean
+          last_verified_at: string | null
+          notes: string | null
+          reference: string | null
+          secondary_system: string | null
+          subject: string
+          updated_at: string
+        }
+        Insert: {
+          access_status?: string
+          authoritative_system: string
+          confidence?: string
+          created_at?: string
+          domain_key: string
+          freshness_target_minutes?: number | null
+          id?: string
+          known_conflict?: boolean
+          last_verified_at?: string | null
+          notes?: string | null
+          reference?: string | null
+          secondary_system?: string | null
+          subject: string
+          updated_at?: string
+        }
+        Update: {
+          access_status?: string
+          authoritative_system?: string
+          confidence?: string
+          created_at?: string
+          domain_key?: string
+          freshness_target_minutes?: number | null
+          id?: string
+          known_conflict?: boolean
+          last_verified_at?: string | null
+          notes?: string | null
+          reference?: string | null
+          secondary_system?: string | null
+          subject?: string
+          updated_at?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "muse_source_authority_domain_key_fkey"
+            columns: ["domain_key"]
+            isOneToOne: false
+            referencedRelation: "muse_domains"
+            referencedColumns: ["key"]
+          },
+          {
+            foreignKeyName: "muse_source_authority_domain_key_fkey"
+            columns: ["domain_key"]
+            isOneToOne: false
+            referencedRelation: "muse_portfolio_map"
+            referencedColumns: ["domain_key"]
+          },
+        ]
+      }
+      muse_source_conflicts: {
+        Row: {
+          candidate_authority: string | null
+          created_at: string
+          detected_at: string
+          domain_key: string
+          id: string
+          reference_a: string | null
+          reference_b: string | null
+          resolution_notes: string | null
+          resolved_at: string | null
+          status: string
+          subject: string
+          system_a: string
+          system_b: string
+          updated_at: string
+          value_a: string
+          value_b: string
+        }
+        Insert: {
+          candidate_authority?: string | null
+          created_at?: string
+          detected_at?: string
+          domain_key: string
+          id?: string
+          reference_a?: string | null
+          reference_b?: string | null
+          resolution_notes?: string | null
+          resolved_at?: string | null
+          status?: string
+          subject: string
+          system_a: string
+          system_b: string
+          updated_at?: string
+          value_a: string
+          value_b: string
+        }
+        Update: {
+          candidate_authority?: string | null
+          created_at?: string
+          detected_at?: string
+          domain_key?: string
+          id?: string
+          reference_a?: string | null
+          reference_b?: string | null
+          resolution_notes?: string | null
+          resolved_at?: string | null
+          status?: string
+          subject?: string
+          system_a?: string
+          system_b?: string
+          updated_at?: string
+          value_a?: string
+          value_b?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "muse_source_conflicts_domain_key_fkey"
+            columns: ["domain_key"]
+            isOneToOne: false
+            referencedRelation: "muse_domains"
+            referencedColumns: ["key"]
+          },
+          {
+            foreignKeyName: "muse_source_conflicts_domain_key_fkey"
+            columns: ["domain_key"]
+            isOneToOne: false
+            referencedRelation: "muse_portfolio_map"
+            referencedColumns: ["domain_key"]
+          },
+        ]
+      }
+      muse_systems: {
+        Row: {
+          blocker: string | null
+          cadence_minutes: number | null
+          created_at: string
+          data_status: string
+          domain_key: string | null
+          downstream_impact: string | null
+          expected_cadence: string
+          is_active: boolean
+          key: string
+          name: string
+          notes: string | null
+          owner_type: string
+          probe_key: string | null
+          role: string
+          sort_order: number
+          updated_at: string
+          waits_on_human: boolean
+        }
+        Insert: {
+          blocker?: string | null
+          cadence_minutes?: number | null
+          created_at?: string
+          data_status?: string
+          domain_key?: string | null
+          downstream_impact?: string | null
+          expected_cadence?: string
+          is_active?: boolean
+          key: string
+          name: string
+          notes?: string | null
+          owner_type?: string
+          probe_key?: string | null
+          role: string
+          sort_order?: number
+          updated_at?: string
+          waits_on_human?: boolean
+        }
+        Update: {
+          blocker?: string | null
+          cadence_minutes?: number | null
+          created_at?: string
+          data_status?: string
+          domain_key?: string | null
+          downstream_impact?: string | null
+          expected_cadence?: string
+          is_active?: boolean
+          key?: string
+          name?: string
+          notes?: string | null
+          owner_type?: string
+          probe_key?: string | null
+          role?: string
+          sort_order?: number
+          updated_at?: string
+          waits_on_human?: boolean
+        }
+        Relationships: [
+          {
+            foreignKeyName: "muse_systems_domain_key_fkey"
+            columns: ["domain_key"]
+            isOneToOne: false
+            referencedRelation: "muse_domains"
+            referencedColumns: ["key"]
+          },
+          {
+            foreignKeyName: "muse_systems_domain_key_fkey"
+            columns: ["domain_key"]
+            isOneToOne: false
+            referencedRelation: "muse_portfolio_map"
+            referencedColumns: ["domain_key"]
+          },
+        ]
+      }
+      muse_verifications: {
+        Row: {
+          branch: string | null
+          claim: string
+          claimed_at: string
+          claimed_by: string | null
+          commit_sha: string | null
+          created_at: string
+          evidence_url: string | null
+          id: string
+          notes: string | null
+          repo: string | null
+          subject_ref: string
+          subject_type: string
+          updated_at: string
+          verification_state: string
+          verified_at: string | null
+          verified_by: string | null
+        }
+        Insert: {
+          branch?: string | null
+          claim: string
+          claimed_at?: string
+          claimed_by?: string | null
+          commit_sha?: string | null
+          created_at?: string
+          evidence_url?: string | null
+          id?: string
+          notes?: string | null
+          repo?: string | null
+          subject_ref: string
+          subject_type: string
+          updated_at?: string
+          verification_state?: string
+          verified_at?: string | null
+          verified_by?: string | null
+        }
+        Update: {
+          branch?: string | null
+          claim?: string
+          claimed_at?: string
+          claimed_by?: string | null
+          commit_sha?: string | null
+          created_at?: string
+          evidence_url?: string | null
+          id?: string
+          notes?: string | null
+          repo?: string | null
+          subject_ref?: string
+          subject_type?: string
+          updated_at?: string
+          verification_state?: string
+          verified_at?: string | null
+          verified_by?: string | null
+        }
+        Relationships: []
+      }
       observations: {
         Row: {
           bbox_json: Json | null
@@ -1801,6 +2500,413 @@ export type Database = {
             referencedColumns: ["id"]
           },
         ]
+      }
+      muse_decisions_required: {
+        Row: {
+          as_of: string | null
+          classification: string | null
+          context: string | null
+          created_at: string | null
+          days_remaining: number | null
+          decision_required_by: string | null
+          domain_key: string | null
+          domain_name: string | null
+          evidence: Json | null
+          id: string | null
+          options: Json | null
+          overdue: boolean | null
+          owner: string | null
+          question: string | null
+          review_at: string | null
+          source: string | null
+          source_ref: string | null
+          status: string | null
+        }
+        Relationships: [
+          {
+            foreignKeyName: "muse_decisions_domain_key_fkey"
+            columns: ["domain_key"]
+            isOneToOne: false
+            referencedRelation: "muse_domains"
+            referencedColumns: ["key"]
+          },
+          {
+            foreignKeyName: "muse_decisions_domain_key_fkey"
+            columns: ["domain_key"]
+            isOneToOne: false
+            referencedRelation: "muse_portfolio_map"
+            referencedColumns: ["domain_key"]
+          },
+        ]
+      }
+      muse_executive_brief: {
+        Row: {
+          as_of: string | null
+          classification: string | null
+          data_status: string | null
+          detail: string | null
+          domain_key: string | null
+          domain_name: string | null
+          due_at: string | null
+          item_id: string | null
+          item_type: string | null
+          owner: string | null
+          rank: number | null
+          section: string | null
+          source: string | null
+          source_ref: string | null
+          title: string | null
+          verification_state: string | null
+        }
+        Relationships: []
+      }
+      muse_improvement_ledger: {
+        Row: {
+          actual_result: string | null
+          as_of: string | null
+          awaiting_measurement: boolean | null
+          baseline: string | null
+          created_at: string | null
+          data_status: string | null
+          domain_key: string | null
+          domain_name: string | null
+          expected_result: string | null
+          id: string | null
+          intervention: string | null
+          metric: string | null
+          notes: string | null
+          owner: string | null
+          problem: string | null
+          review_at: string | null
+          review_due: boolean | null
+          source_ref: string | null
+          started_at: string | null
+          status: string | null
+          verdict: string | null
+          verification_state: string | null
+        }
+        Relationships: [
+          {
+            foreignKeyName: "muse_improvements_domain_key_fkey"
+            columns: ["domain_key"]
+            isOneToOne: false
+            referencedRelation: "muse_domains"
+            referencedColumns: ["key"]
+          },
+          {
+            foreignKeyName: "muse_improvements_domain_key_fkey"
+            columns: ["domain_key"]
+            isOneToOne: false
+            referencedRelation: "muse_portfolio_map"
+            referencedColumns: ["domain_key"]
+          },
+        ]
+      }
+      muse_kpi_derived: {
+        Row: {
+          data_timestamp: string | null
+          metric_key: string | null
+          source_table: string | null
+          value: number | null
+        }
+        Relationships: []
+      }
+      muse_kpi_summary: {
+        Row: {
+          as_of: string | null
+          confidence: string | null
+          data_status: string | null
+          data_timestamp: string | null
+          direction: string | null
+          domain_key: string | null
+          domain_name: string | null
+          evidence_ref: string | null
+          human_verification_required: boolean | null
+          is_primary: boolean | null
+          metric_key: string | null
+          name: string | null
+          notes: string | null
+          sort_order: number | null
+          source_system: string | null
+          target: string | null
+          unit: string | null
+          value: number | null
+        }
+        Relationships: [
+          {
+            foreignKeyName: "muse_kpi_registry_domain_key_fkey"
+            columns: ["domain_key"]
+            isOneToOne: false
+            referencedRelation: "muse_domains"
+            referencedColumns: ["key"]
+          },
+          {
+            foreignKeyName: "muse_kpi_registry_domain_key_fkey"
+            columns: ["domain_key"]
+            isOneToOne: false
+            referencedRelation: "muse_portfolio_map"
+            referencedColumns: ["domain_key"]
+          },
+        ]
+      }
+      muse_open_loops_live: {
+        Row: {
+          as_of: string | null
+          category: string | null
+          classification: string | null
+          data_status: string | null
+          dependency: string | null
+          derive_resolution_from: string | null
+          derived_system_status: string | null
+          domain_key: string | null
+          domain_name: string | null
+          evidence_stale: boolean | null
+          id: string | null
+          last_evidence_at: string | null
+          next_action: string | null
+          notes: string | null
+          owner: string | null
+          priority: string | null
+          resolved_at: string | null
+          review_at: string | null
+          review_overdue: boolean | null
+          source: string | null
+          source_ref: string | null
+          state: string | null
+          stored_state: string | null
+          title: string | null
+          verification_state: string | null
+        }
+        Relationships: [
+          {
+            foreignKeyName: "muse_open_loops_domain_key_fkey"
+            columns: ["domain_key"]
+            isOneToOne: false
+            referencedRelation: "muse_domains"
+            referencedColumns: ["key"]
+          },
+          {
+            foreignKeyName: "muse_open_loops_domain_key_fkey"
+            columns: ["domain_key"]
+            isOneToOne: false
+            referencedRelation: "muse_portfolio_map"
+            referencedColumns: ["domain_key"]
+          },
+        ]
+      }
+      muse_portfolio_map: {
+        Row: {
+          active_improvements: number | null
+          as_of: string | null
+          blocked_loops: number | null
+          current_bottleneck: string | null
+          current_initiative: string | null
+          data_status: string | null
+          decisions_pending: number | null
+          domain_key: string | null
+          name: string | null
+          next_review_at: string | null
+          notes: string | null
+          open_conflicts: number | null
+          open_loops: number | null
+          owner: string | null
+          primary_kpi_at: string | null
+          primary_kpi_name: string | null
+          primary_kpi_status: string | null
+          primary_kpi_unit: string | null
+          primary_kpi_value: number | null
+          sort_order: number | null
+          source_of_truth: string | null
+          sources_last_verified_at: string | null
+          status: string | null
+          systems: Json | null
+          unhealthy_systems: number | null
+        }
+        Insert: {
+          active_improvements?: never
+          as_of?: never
+          blocked_loops?: never
+          current_bottleneck?: string | null
+          current_initiative?: string | null
+          data_status?: string | null
+          decisions_pending?: never
+          domain_key?: string | null
+          name?: string | null
+          next_review_at?: string | null
+          notes?: string | null
+          open_conflicts?: never
+          open_loops?: never
+          owner?: string | null
+          primary_kpi_at?: never
+          primary_kpi_name?: never
+          primary_kpi_status?: never
+          primary_kpi_unit?: never
+          primary_kpi_value?: never
+          sort_order?: number | null
+          source_of_truth?: string | null
+          sources_last_verified_at?: never
+          status?: string | null
+          systems?: Json | null
+          unhealthy_systems?: never
+        }
+        Update: {
+          active_improvements?: never
+          as_of?: never
+          blocked_loops?: never
+          current_bottleneck?: string | null
+          current_initiative?: string | null
+          data_status?: string | null
+          decisions_pending?: never
+          domain_key?: string | null
+          name?: string | null
+          next_review_at?: string | null
+          notes?: string | null
+          open_conflicts?: never
+          open_loops?: never
+          owner?: string | null
+          primary_kpi_at?: never
+          primary_kpi_name?: never
+          primary_kpi_status?: never
+          primary_kpi_unit?: never
+          primary_kpi_value?: never
+          sort_order?: number | null
+          source_of_truth?: string | null
+          sources_last_verified_at?: never
+          status?: string | null
+          systems?: Json | null
+          unhealthy_systems?: never
+        }
+        Relationships: []
+      }
+      muse_source_authority_state: {
+        Row: {
+          access_status: string | null
+          as_of: string | null
+          authoritative_system: string | null
+          confidence: string | null
+          domain_key: string | null
+          domain_name: string | null
+          freshness: string | null
+          freshness_target_minutes: number | null
+          human_verification_required: boolean | null
+          id: string | null
+          known_conflict: boolean | null
+          last_verified_at: string | null
+          minutes_since_verified: number | null
+          notes: string | null
+          open_conflicts: number | null
+          reference: string | null
+          secondary_system: string | null
+          subject: string | null
+        }
+        Relationships: [
+          {
+            foreignKeyName: "muse_source_authority_domain_key_fkey"
+            columns: ["domain_key"]
+            isOneToOne: false
+            referencedRelation: "muse_domains"
+            referencedColumns: ["key"]
+          },
+          {
+            foreignKeyName: "muse_source_authority_domain_key_fkey"
+            columns: ["domain_key"]
+            isOneToOne: false
+            referencedRelation: "muse_portfolio_map"
+            referencedColumns: ["domain_key"]
+          },
+        ]
+      }
+      muse_source_conflicts_open: {
+        Row: {
+          as_of: string | null
+          candidate_authority: string | null
+          data_status: string | null
+          detected_at: string | null
+          domain_key: string | null
+          domain_name: string | null
+          human_verification_required: boolean | null
+          id: string | null
+          reference_a: string | null
+          reference_b: string | null
+          resolution_notes: string | null
+          resolved_at: string | null
+          status: string | null
+          subject: string | null
+          system_a: string | null
+          system_b: string | null
+          value_a: string | null
+          value_b: string | null
+        }
+        Relationships: [
+          {
+            foreignKeyName: "muse_source_conflicts_domain_key_fkey"
+            columns: ["domain_key"]
+            isOneToOne: false
+            referencedRelation: "muse_domains"
+            referencedColumns: ["key"]
+          },
+          {
+            foreignKeyName: "muse_source_conflicts_domain_key_fkey"
+            columns: ["domain_key"]
+            isOneToOne: false
+            referencedRelation: "muse_portfolio_map"
+            referencedColumns: ["domain_key"]
+          },
+        ]
+      }
+      muse_system_health: {
+        Row: {
+          as_of: string | null
+          blocker: string | null
+          cadence_minutes: number | null
+          classification: string | null
+          data_status: string | null
+          domain_key: string | null
+          downstream_impact: string | null
+          expected_cadence: string | null
+          failing_count: number | null
+          last_failure_at: string | null
+          last_failure_detail: string | null
+          last_success_at: string | null
+          latest_activity_at: string | null
+          name: string | null
+          notes: string | null
+          pending_count: number | null
+          probe_key: string | null
+          role: string | null
+          sort_order: number | null
+          status: string | null
+          system_key: string | null
+          waits_on_human: boolean | null
+        }
+        Relationships: [
+          {
+            foreignKeyName: "muse_systems_domain_key_fkey"
+            columns: ["domain_key"]
+            isOneToOne: false
+            referencedRelation: "muse_domains"
+            referencedColumns: ["key"]
+          },
+          {
+            foreignKeyName: "muse_systems_domain_key_fkey"
+            columns: ["domain_key"]
+            isOneToOne: false
+            referencedRelation: "muse_portfolio_map"
+            referencedColumns: ["domain_key"]
+          },
+        ]
+      }
+      muse_system_probe: {
+        Row: {
+          failing_count: number | null
+          last_failure_at: string | null
+          last_failure_detail: string | null
+          last_success_at: string | null
+          latest_activity_at: string | null
+          pending_count: number | null
+          probe_key: string | null
+        }
+        Relationships: []
       }
     }
     Functions: {
