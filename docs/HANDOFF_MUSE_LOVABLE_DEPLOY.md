@@ -40,8 +40,13 @@ No system reports `FAILING`. One reports `STALE`:
 
 ### Still open (not blockers)
 
-1. **Step 4 (optional):** no `MUSE_API_TOKEN` exists, so verifier section 4 (data shape) has
-   not run. Needs Fendi's decision to mint one.
+1. ~~**Step 4 (optional):** no `MUSE_API_TOKEN` exists.~~ **Done 2026-09-26 23:28 UTC.**
+   Token row `label='thoth'`, `scopes={read}`, `expires_at=NULL` (no expiry, by Fendi's
+   choice; rotate by revoking the row and inserting a new hash). Generated on Fendi's Mac and
+   kept in a private file there; only the SHA-256 is in the database, and the value was never
+   in chat. With it, `verify-muse-live.mjs` → **28 pass · 0 fail · 0 skip, MUSE LIVE
+   VERIFICATION PASSED**, including section 4 (all 7 resources return data; unknown data
+   reported honestly).
 2. **Signed-in render of `/muse`** has not been observed by an agent (the published domain
    needs a logged-in session). Deployment is verified; data rendering is not.
 3. **Lovable Cloud instance** is Tiny (0.5 GB RAM). Earlier on 2026-09-26 it hit its resource
