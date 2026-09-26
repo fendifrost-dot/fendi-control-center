@@ -5,6 +5,7 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { ThemeProvider } from "next-themes";
 import { BrowserRouter, Routes, Route, Navigate } from "react-router-dom";
 import { TaxShell } from "@/components/tax/TaxShell";
+import { MuseShell } from "@/components/muse/MuseShell";
 import { RequireSession } from "@/components/auth/RequireSession";
 import Index from "./pages/Index";
 import HubHomePage from "./pages/HubHomePage";
@@ -18,6 +19,12 @@ import NotFound from "./pages/NotFound";
 import ClientsPage from "./pages/tax/ClientsPage";
 import ClientReturnsPage from "./pages/tax/ClientReturnsPage";
 import YearWorkspacePage from "./pages/tax/YearWorkspacePage";
+import MuseBriefPage from "./pages/muse/MuseBriefPage";
+import MusePortfolioPage from "./pages/muse/MusePortfolioPage";
+import MuseOpenLoopsPage from "./pages/muse/MuseOpenLoopsPage";
+import MuseImprovementsPage from "./pages/muse/MuseImprovementsPage";
+import MuseSourcesPage from "./pages/muse/MuseSourcesPage";
+import MuseSystemsPage from "./pages/muse/MuseSystemsPage";
 
 const queryClient = new QueryClient();
 
@@ -48,6 +55,16 @@ const App = () => (
               <Route path="/clients" element={<ClientsPage />} />
               <Route path="/clients/:clientId" element={<ClientReturnsPage />} />
               <Route path="/clients/:clientId/:year" element={<YearWorkspacePage />} />
+            </Route>
+            {/* Muse executive layer. MuseShell already wraps children in
+                RequireSession, matching how TaxShell is guarded. */}
+            <Route path="/muse" element={<MuseShell />}>
+              <Route index element={<MuseBriefPage />} />
+              <Route path="portfolio" element={<MusePortfolioPage />} />
+              <Route path="loops" element={<MuseOpenLoopsPage />} />
+              <Route path="improvements" element={<MuseImprovementsPage />} />
+              <Route path="sources" element={<MuseSourcesPage />} />
+              <Route path="systems" element={<MuseSystemsPage />} />
             </Route>
             <Route path="*" element={<NotFound />} />
           </Routes>

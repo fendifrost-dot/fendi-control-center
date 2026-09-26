@@ -25,6 +25,15 @@ export type HubToolDef =
 /** Single source of truth for cover menu + tool grid tiles. */
 export const HUB_TOOL_DEFS: HubToolDef[] = [
   {
+    id: "muse",
+    name: "Muse",
+    tagline: "Executive brief, portfolio map, open loops, and system health",
+    kind: "internal",
+    path: "/muse",
+    status: "beta",
+    accentClass: "bg-cyan-500",
+  },
+  {
     id: "tax-generator",
     name: "Tax Generator",
     tagline: "Client returns, worksheets, and filing prep (in this hub)",

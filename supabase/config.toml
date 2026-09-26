@@ -143,3 +143,9 @@ verify_jwt = false
 verify_jwt = false
 
 
+
+# Muse executive read API. Carries its own bearer-token auth (hashed tokens in
+# public.muse_api_tokens) because the caller is an agent, not a Supabase user
+# session. GET-only; rejects the service-role key as a Muse credential.
+[functions.muse-executive]
+verify_jwt = false
