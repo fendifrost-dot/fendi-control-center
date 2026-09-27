@@ -30,8 +30,12 @@ const corsHeaders = {
 
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
 const SUPABASE_SERVICE_ROLE_KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
-/** Bootstrap credential so the API is usable before a hashed token is minted. */
-const ENV_TOKEN = Deno.env.get("MUSE_API_TOKEN") ?? "";
+/**
+ * Bootstrap credential so the API is usable before a hashed token is minted.
+ * Trimmed to match presentedToken(): secrets pasted into a dashboard often carry a
+ * trailing newline or space, which would otherwise make the comparison impossible.
+ */
+const ENV_TOKEN = (Deno.env.get("MUSE_API_TOKEN") ?? "").trim();
 
 const RATE_LIMIT_REQUESTS = Number(Deno.env.get("MUSE_RATE_LIMIT") ?? "60");
 const RATE_LIMIT_WINDOW_SECONDS = 60;
