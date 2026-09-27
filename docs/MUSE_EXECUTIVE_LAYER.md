@@ -302,7 +302,8 @@ Per `CLAUDE.md`, there is no standalone Supabase. Two steps are Fendi's:
 
 1. **Schema** — paste `supabase/migrations/20260925120000_muse_executive_layer.sql`
    into the **Lovable SQL editor** for this project. It is idempotent and safe to
-   re-run.
+   re-run **until v2 is applied**; after that, re-run only
+   `20260927120000_muse_mission_board.sql` (see [MUSE_MISSION_BOARD.md](./MUSE_MISSION_BOARD.md)).
 2. **Edge function** — **Lovable → Edge Functions → redeploy `muse-executive`**.
    (Publish alone does not redeploy functions.)
 3. **Frontend** — **Lovable → Publish** to expose `/muse`.
@@ -346,7 +347,14 @@ reported honestly.
 
 ---
 
-## 7. Recommended Phase 2
+## 7. Mission board (v2)
+
+Muse v2 turns this layer into a cross-agent operating board — missions, daily improvement,
+agent queue, verification queue, impact ledger — with a database-enforced state machine.
+Design, schema/API delta and safeguards: [`MUSE_MISSION_BOARD.md`](./MUSE_MISSION_BOARD.md).
+Deploy: [`HANDOFF_MUSE_MISSION_BOARD_DEPLOY.md`](./HANDOFF_MUSE_MISSION_BOARD_DEPLOY.md).
+
+## 8. Recommended Phase 2
 
 Only after Phase 1 is live-verified:
 

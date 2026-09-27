@@ -70,6 +70,19 @@ const VIEWS = [
   "muse_source_authority_state",
   "muse_source_conflicts_open",
   "muse_improvement_ledger",
+  // v2 — mission board (20260927120000_muse_mission_board.sql)
+  "muse_mission_board",
+  "muse_agent_queue",
+  "muse_verification_queue",
+  "muse_impact_ledger",
+];
+
+/** The v2 write protocol. anon must not be able to call any of it. */
+const WRITE_RPCS = [
+  ["muse_transition_improvement", { p_id: "00000000-0000-0000-0000-000000000000", p_to: "SELECTED", p_actor: "muse" }],
+  ["muse_transition_task", { p_id: "00000000-0000-0000-0000-000000000000", p_to: "COMPLETE", p_actor: "grok-bot" }],
+  ["muse_transition_mission", { p_id: "00000000-0000-0000-0000-000000000000", p_to: "ACTIVE", p_actor: "Fendi" }],
+  ["muse_verify", { p_verification_id: "00000000-0000-0000-0000-000000000000", p_verifier: "Fendi" }],
 ];
 
 /** Credential-shaped values must never appear in a Muse payload. */
@@ -198,6 +211,29 @@ async function main() {
       direct.status >= 400 ? "PASS" : "FAIL",
       `HTTP ${direct.status}`,
     );
+
+    // The v2 state machine is reachable only by the operator and service role.
+    // 401/403 = refused; 404 = function not in the schema cache (v2 not applied).
+    for (const [fn, args] of WRITE_RPCS) {
+      const rpc = await fetch(`${REST}/rpc/${fn}`, {
+        method: "POST",
+        headers: {
+          apikey: ANON_KEY,
+          Authorization: `Bearer ${ANON_KEY}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify(args),
+      });
+      const text = await rpc.text();
+      const refused = rpc.status === 401 || rpc.status === 403 || /42501|permission denied/i.test(text);
+      record(
+        `anon cannot call ${fn}`,
+        refused ? "PASS" : "FAIL",
+        rpc.status === 404
+          ? `HTTP 404 — ${fn} not visible (v2 migration not applied, or schema cache stale)`
+          : `HTTP ${rpc.status}`,
+      );
+    }
   }
 
   // ---- 5/6. Sample executive queries + honesty of unknown data
@@ -225,7 +261,10 @@ async function main() {
     );
 
     let sawHonestStatus = false;
-    for (const resource of ["brief", "portfolio", "open-loops", "systems", "sources", "kpis", "improvements"]) {
+    for (const resource of [
+      "brief", "portfolio", "open-loops", "systems", "sources", "kpis", "improvements",
+      "missions", "agent-queue", "verification-queue", "improvement-results",
+    ]) {
       const res = await fetch(`${FN}/executive/${resource}`, { headers: auth });
       const text = await res.text();
 
@@ -290,6 +329,8 @@ async function main() {
     console.log("catalog query in docs/HANDOFF_MUSE_LOVABLE_DEPLOY.md (step 1a) in the Lovable");
     console.log("SQL editor; if the rows are missing, apply");
     console.log("supabase/migrations/20260925120000_muse_executive_layer.sql there and re-run this.");
+    console.log("For the v2 views (mission board, agent queue, verification queue, impact ledger)");
+    console.log("see docs/HANDOFF_MUSE_MISSION_BOARD_DEPLOY.md.");
   }
   if (!endpointLive) {
     console.log("\nNEXT STEP: redeploy the `muse-executive` edge function from Lovable (Edge Functions -> redeploy).");

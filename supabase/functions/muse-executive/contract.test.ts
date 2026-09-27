@@ -96,3 +96,25 @@ Deno.test("a row demanding human verification propagates even when KNOWN", () =>
   assertEquals(r.status, "KNOWN");
   assertEquals(r.human_verification_required, true);
 });
+
+Deno.test("mission board resources are part of the closed allowlist", () => {
+  for (const key of ["missions", "agent-queue", "verification-queue", "improvement-results"]) {
+    assert(RESOURCES[key], `${key} must be readable`);
+  }
+  // Daily improvements extend /improvements rather than duplicating it.
+  assertEquals(RESOURCES["daily-improvements"], undefined);
+  assertEquals(RESOURCES.improvements.filters?.date, "improvement_date");
+});
+
+Deno.test("an agent can read its own queue without scanning unrelated work", () => {
+  const q = RESOURCES["agent-queue"];
+  assertEquals(q.filters?.executor, "executor");
+  assertEquals(q.filters?.open, "is_open");
+});
+
+Deno.test("collision check is expressible as equality filters", () => {
+  const f = RESOURCES.improvements.filters ?? {};
+  assertEquals(f.domain, "domain_key");
+  assertEquals(f.metric, "metric_norm");
+  assertEquals(f.active, "is_active_experiment");
+});

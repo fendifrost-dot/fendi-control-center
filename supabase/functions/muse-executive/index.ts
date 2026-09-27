@@ -185,6 +185,14 @@ function indexPayload() {
       "NEEDS_VERIFICATION",
     ],
     verification_states: ["CLAIMED", "ARTIFACT_VERIFIED", "SYSTEM_VERIFIED", "LIVE_VERIFIED"],
+    improvement_lifecycle: [
+      "PROPOSED", "SELECTED", "IN_EXECUTION", "VERIFICATION", "MEASURING", "DECIDED", "CLOSED", "REJECTED",
+    ],
+    task_states: [
+      "ASSIGNED", "IN_PROGRESS", "WAITING", "BLOCKED", "IMPLEMENTED", "VERIFICATION", "COMPLETE", "CANCELLED",
+    ],
+    verdicts: ["PENDING", "KEEP", "REVISE", "REVERSE", "INCONCLUSIVE"],
+    owner_attention: ["NONE", "INFORM", "APPROVAL", "DECISION", "DIRECT_INVOLVEMENT"],
     classifications: [
       "FENDI_DECISION",
       "MUSE_ANALYSIS",
@@ -197,6 +205,7 @@ function indexPayload() {
       "Muse stores executive interpretation only; domain systems retain ownership of truth.",
       "A commit in GitHub never implies a deployment: read /executive/verifications.",
       "An empty section means nothing real was recorded, not that everything is fine.",
+      "State changes are not made here. They go through the muse_transition_* / muse_verify database functions via Control Hub execution paths.",
     ],
   };
 }
