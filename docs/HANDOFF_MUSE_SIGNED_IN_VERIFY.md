@@ -149,6 +149,51 @@ backlog is real and worth Fendi's attention.
 
 ---
 
+## Findings so far — 2026-09-27 ~04:00–04:40 UTC (agent without a signed-in session)
+
+Chrome was **not** signed in (`/muse` → `/login`), so **Step 1 is still open**. What could be
+established from the database:
+
+**Step 3 — ledger read back: matches.** Exactly as recorded:
+
+| subject | state | verified_by | at |
+|---|---|---|---|
+| `/muse` (ui_module) | `LIVE_VERIFIED` | claude-cowork | 2026-09-26 22:29:40 UTC |
+| `20260925120000_muse_executive_layer.sql` | `SYSTEM_VERIFIED` | claude-cowork | same |
+| `muse-executive` (edge_function) | `LIVE_VERIFIED` | claude-cowork | same |
+
+Loops: "Muse v1: apply migration…" → `RESOLVED` / stored `RESOLVED`. **"Confirm Drive Sync has
+completed a successful run…" → derived `RESOLVED`, stored `OPEN`** — the derivation works at
+the data level (its derived `resolved_at` is empty; worth noting when checking the UI). The
+`/muse` → `LIVE_VERIFIED` row still rests on the served bundle; Step 1 decides whether it stays.
+
+**Step 2 — blocked: `/executive/brief` times out.** With a valid token, `brief` returned
+**HTTP 503 `read_failed` after ~30 s**, while `systems` returned 200 in 6.6 s. The same view also
+failed in the SQL editor ("Server error"). At 2026-09-26 23:30 UTC the brief returned 200 in
+seconds, so this is intermittent, not structural. The telemetry tables are tiny (largest:
+`telegram_outbox` 1,201 rows / 1.1 MB), so data volume is not the cause. Lovable's instance
+graphs show **disk pressure** in three hours of the last 24 (local 11–12, 15–16, 19–20; the first
+and last coincide with the migration run and a 46-function redeploy), with CPU and memory never
+flagged. **Expect the `/muse` brief page to fail the same way whenever the instance is under
+disk pressure** — record whether it renders, and the time, rather than treating a failure as a
+schema problem. Note the 503 body's hint ("the Muse migration may not be applied") is
+misleading in this case; the schema is present.
+
+**Step 4 — `remote-bridge`: daemon not running, no harm queued.**
+`remote_bridge_devices` has **two** registrations, both `fendi-macbook`, created 25 min apart on
+2026-06-03 (a duplicate registration). Last heartbeats: `2026-06-03T00:45Z` and
+`2026-06-09T17:30Z`. **`remote_command_queue` has 0 rows** — nothing is waiting, so nothing is
+silently failing today. This fits the bridge having been retired with the Telegram-era tooling.
+Not a bridge bug and not a cadence problem. **Decision for Fendi:** restart the daemon if remote
+commands are still wanted, or retire the system in `muse_systems`. Do **not** clear the cadence.
+
+**`ingestion-jobs` backlog: real, stale, never touched.** All **208** rows are `queued`,
+created within 15 minutes on **2026-04-01 07:04–07:19 UTC**, **0 ever started, 0 errors**.
+`drive-sync` inserts these rows; `process-document` claims them, and there is no scheduled
+sweeper in the migrations, so this batch was enqueued and never picked up. **Decision for
+Fendi:** whether those April 1 client documents still matter (process them, off-peak, given the
+Tiny instance) or the batch should be closed out.
+
 ## Report back
 
 1. Whether each of the six surfaces rendered, with screenshots.
