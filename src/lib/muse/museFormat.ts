@@ -5,7 +5,10 @@
 import type {
   MuseBriefSection,
   MuseDataStatus,
+  MuseImprovementStatus,
   MuseSystemStatus,
+  MuseTaskState,
+  MuseVerdict,
   MuseVerificationState,
 } from "./types";
 
@@ -168,4 +171,101 @@ export function isMissingSchemaError(error: unknown): boolean {
     haystack.includes("could not find the table") ||
     haystack.includes("schema cache")
   );
+}
+
+/**
+ * The improvement lifecycle in reading order. Each state is owned by one tier
+ * of the hierarchy — the board shows who holds the pen at every step.
+ */
+export const IMPROVEMENT_FLOW: Array<{ status: MuseImprovementStatus; owner: string; meaning: string }> = [
+  { status: "PROPOSED", owner: "Muse", meaning: "Candidate recorded with metric, baseline and risk" },
+  { status: "SELECTED", owner: "Muse", meaning: "Chosen as worth doing; collision-checked" },
+  { status: "IN_EXECUTION", owner: "Grok Bot", meaning: "Assigned to an executor" },
+  { status: "VERIFICATION", owner: "Verifier", meaning: "Every task closed; proving it is live" },
+  { status: "MEASURING", owner: "Muse", meaning: "Live and verified; measurement window running" },
+  { status: "DECIDED", owner: "Muse / Fendi", meaning: "KEEP, REVISE, REVERSE or INCONCLUSIVE from evidence" },
+  { status: "CLOSED", owner: "Grok Bot", meaning: "Recorded in institutional memory" },
+];
+
+export const TASK_STATES: MuseTaskState[] = [
+  "ASSIGNED",
+  "IN_PROGRESS",
+  "WAITING",
+  "BLOCKED",
+  "IMPLEMENTED",
+  "VERIFICATION",
+  "COMPLETE",
+  "CANCELLED",
+];
+
+/** Mirrors public.muse_verification_rank(). */
+export function verificationRank(state: MuseVerificationState | null | undefined): number {
+  switch (state) {
+    case "CLAIMED":
+      return 0;
+    case "ARTIFACT_VERIFIED":
+      return 1;
+    case "SYSTEM_VERIFIED":
+      return 2;
+    case "LIVE_VERIFIED":
+      return 3;
+    default:
+      return -1;
+  }
+}
+
+/** A missing state never meets a requirement; a missing requirement means live. */
+export function meetsVerification(
+  state: MuseVerificationState | null | undefined,
+  required: MuseVerificationState | null | undefined,
+): boolean {
+  const have = verificationRank(state);
+  return have >= 0 && have >= verificationRank(required ?? "LIVE_VERIFIED");
+}
+
+export function verdictTone(verdict: MuseVerdict | string | null | undefined): BadgeTone {
+  switch (verdict) {
+    case "KEEP":
+      return "default";
+    case "REVERSE":
+      return "destructive";
+    case "REVISE":
+    case "INCONCLUSIVE":
+      return "secondary";
+    default:
+      return "outline";
+  }
+}
+
+export function taskStateTone(state: MuseTaskState | string | null | undefined): BadgeTone {
+  switch (state) {
+    case "BLOCKED":
+      return "destructive";
+    case "WAITING":
+    case "IMPLEMENTED":
+    case "VERIFICATION":
+      return "secondary";
+    case "COMPLETE":
+      return "default";
+    default:
+      return "outline";
+  }
+}
+
+/** Local calendar date (YYYY-MM-DD) — the daily board is dated in Fendi's day, not UTC. */
+export function localIsoDate(now: Date = new Date()): string {
+  const y = now.getFullYear();
+  const m = String(now.getMonth() + 1).padStart(2, "0");
+  const d = String(now.getDate()).padStart(2, "0");
+  return `${y}-${m}-${d}`;
+}
+
+/**
+ * Signed metric delta. A missing side means unmeasured, rendered as a dash,
+ * never as a zero that would read as "no effect".
+ */
+export function formatDelta(delta: number | null | undefined): string {
+  if (delta === null || delta === undefined) return "—";
+  const rounded = Number.isInteger(delta) ? delta.toString() : delta.toFixed(2);
+  return delta > 0 ? `+${rounded}` : rounded;
 }

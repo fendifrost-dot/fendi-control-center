@@ -5,10 +5,16 @@ import {
   dataStatusTone,
   formatAge,
   formatDue,
+  formatDelta,
   formatKpiValue,
+  IMPROVEMENT_FLOW,
   isMissingSchemaError,
+  localIsoDate,
+  meetsVerification,
   priorityRank,
   systemStatusTone,
+  taskStateTone,
+  verdictTone,
   verificationTone,
 } from "./museFormat";
 
@@ -116,5 +122,47 @@ describe("missing schema detection", () => {
     expect(isMissingSchemaError({ code: "42501", message: "permission denied for view muse_executive_brief" })).toBe(false);
     expect(isMissingSchemaError(null)).toBe(false);
     expect(isMissingSchemaError("boom")).toBe(false);
+  });
+});
+
+describe("mission board helpers", () => {
+  it("an agent claim never meets a live requirement", () => {
+    expect(meetsVerification("CLAIMED", "LIVE_VERIFIED")).toBe(false);
+    expect(meetsVerification("ARTIFACT_VERIFIED", "LIVE_VERIFIED")).toBe(false);
+    expect(meetsVerification("LIVE_VERIFIED", "LIVE_VERIFIED")).toBe(true);
+    expect(meetsVerification("SYSTEM_VERIFIED", "ARTIFACT_VERIFIED")).toBe(true);
+  });
+
+  it("a missing requirement defaults to live, and a missing state meets nothing", () => {
+    expect(meetsVerification("SYSTEM_VERIFIED", null)).toBe(false);
+    expect(meetsVerification(null, "CLAIMED")).toBe(false);
+  });
+
+  it("the lifecycle reads PROPOSED to CLOSED with a named owner at each step", () => {
+    expect(IMPROVEMENT_FLOW[0].status).toBe("PROPOSED");
+    expect(IMPROVEMENT_FLOW[IMPROVEMENT_FLOW.length - 1].status).toBe("CLOSED");
+    for (const step of IMPROVEMENT_FLOW) expect(step.owner.length).toBeGreaterThan(0);
+  });
+
+  it("only KEEP reads as settled; REVERSE reads as destructive", () => {
+    expect(verdictTone("KEEP")).toBe("default");
+    expect(verdictTone("REVERSE")).toBe("destructive");
+    expect(verdictTone("PENDING")).toBe("outline");
+  });
+
+  it("a claimed task is not styled as complete", () => {
+    expect(taskStateTone("IMPLEMENTED")).not.toBe("default");
+    expect(taskStateTone("COMPLETE")).toBe("default");
+    expect(taskStateTone("BLOCKED")).toBe("destructive");
+  });
+
+  it("an unmeasured delta is a dash, not zero", () => {
+    expect(formatDelta(null)).toBe("—");
+    expect(formatDelta(0.05)).toBe("+0.05");
+    expect(formatDelta(-3)).toBe("-3");
+  });
+
+  it("dates the daily board in local time", () => {
+    expect(localIsoDate(new Date(2026, 8, 7, 23, 30))).toBe("2026-09-07");
   });
 });
