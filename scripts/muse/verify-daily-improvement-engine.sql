@@ -40,8 +40,15 @@ END $$;
 DO $$
 BEGIN
   IF has_table_privilege('authenticated', 'public.muse_work_updates', 'UPDATE')
-     OR has_table_privilege('authenticated', 'public.muse_work_updates', 'DELETE') THEN
+     OR has_table_privilege('authenticated', 'public.muse_work_updates', 'DELETE')
+     OR has_table_privilege('authenticated', 'public.muse_work_updates', 'TRUNCATE') THEN
     RAISE EXCEPTION 'authenticated may rewrite muse_work_updates; append-only invariant broken';
+  END IF;
+  -- TRUNCATE bypasses RLS, so it must be checked explicitly on every append-only table.
+  IF has_table_privilege('authenticated', 'public.muse_access_audit', 'UPDATE')
+     OR has_table_privilege('authenticated', 'public.muse_access_audit', 'DELETE')
+     OR has_table_privilege('authenticated', 'public.muse_access_audit', 'TRUNCATE') THEN
+    RAISE EXCEPTION 'authenticated may rewrite muse_access_audit; audit trail invariant broken';
   END IF;
 END $$;
 
