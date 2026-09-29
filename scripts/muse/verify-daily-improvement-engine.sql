@@ -1,0 +1,62 @@
+\echo '== Muse Daily Improvement Engine verification =='
+
+DO $$
+DECLARE
+  missing integer;
+BEGIN
+  SELECT count(*) INTO missing
+  FROM (VALUES
+    ('muse_missions'),
+    ('muse_improvement_tasks'),
+    ('muse_improvement_measurements'),
+    ('muse_work_updates')
+  ) AS expected(name)
+  WHERE to_regclass('public.' || expected.name) IS NULL;
+  IF missing <> 0 THEN
+    RAISE EXCEPTION '% required workboard tables missing', missing;
+  END IF;
+END $$;
+
+DO $$
+DECLARE
+  missing integer;
+BEGIN
+  SELECT count(*) INTO missing
+  FROM (VALUES
+    ('muse_mission_board'),
+    ('muse_daily_improvement_board'),
+    ('muse_agent_queue'),
+    ('muse_verification_queue'),
+    ('muse_improvement_results'),
+    ('muse_work_feed')
+  ) AS expected(name)
+  WHERE to_regclass('public.' || expected.name) IS NULL;
+  IF missing <> 0 THEN
+    RAISE EXCEPTION '% required workboard views missing', missing;
+  END IF;
+END $$;
+
+-- The work feed must be append-only to authenticated users.
+DO $$
+BEGIN
+  IF has_table_privilege('authenticated', 'public.muse_work_updates', 'UPDATE')
+     OR has_table_privilege('authenticated', 'public.muse_work_updates', 'DELETE') THEN
+    RAISE EXCEPTION 'authenticated may rewrite muse_work_updates; append-only invariant broken';
+  END IF;
+END $$;
+
+-- Closed executive API views must remain selectable by muse_reader.
+DO $$
+DECLARE v text;
+BEGIN
+  FOREACH v IN ARRAY ARRAY[
+    'muse_mission_board','muse_daily_improvement_board','muse_agent_queue',
+    'muse_verification_queue','muse_improvement_results','muse_work_feed'
+  ] LOOP
+    IF NOT has_table_privilege('muse_reader', 'public.' || v, 'SELECT') THEN
+      RAISE EXCEPTION 'muse_reader lacks SELECT on %', v;
+    END IF;
+  END LOOP;
+END $$;
+
+\echo 'Daily Improvement Engine schema checks passed.'
