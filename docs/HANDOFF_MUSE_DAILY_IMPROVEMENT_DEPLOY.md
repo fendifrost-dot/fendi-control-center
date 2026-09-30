@@ -89,3 +89,33 @@ config change that needs the owner's approval.
 
 **Next:** after REST recovers, run `scripts/muse/verify-muse-live.mjs` with a valid
 `MUSE_API_TOKEN`, then check the new pages while signed in.
+
+### Incident resolution — 2026-09-29 23:30–23:55 UTC
+
+**Recovery action (owner-approved):** `ALTER ROLE authenticator SET statement_timeout = '60s';`
+applied at 23:30:10 UTC. No reload notifications sent; PostgREST picked the setting up on its
+next reconnect. No sessions terminated, no database restart, no schema changes.
+
+**Timeline:** first non-503 at 23:35:04 (a 500 `57014` on the first real query), first 200 at
+23:35:31 UTC — **≈5 min after the ALTER, ≈37 min total outage**. So the schema-cache load
+completed somewhere in the 8–60 s window; the exact figure isn't exposed, but it exceeded the
+old 8 s ceiling on every attempt for 30+ minutes and fit inside 60 s within minutes.
+
+**Post-recovery checks:**
+
+| Check | Result |
+|---|---|
+| Existing REST (unrelated tables) | ✅ `telegram_outbox`, `remote_command_queue`, `tasks`, `drive_sync_events`, `pending_guardian_events`, `telegram_webhook_processed_updates` all 200 |
+| Muse old resources (with token) | ✅ `systems` 21 rows · `open-loops` 13 · `brief` 10 (brief took 47.6 s) |
+| Muse new resources (with token) | ✅ all six 200 — `missions` 0 · `daily-improvements` 2 · `agent-queue` 0 · `verification-queue` 0 · `improvement-results` 2 · `work-feed` 0; empty sets report `NOT_MEASURED`, never zero |
+| Security | ✅ unauth 401 · POST/PUT/PATCH/DELETE 405 · anon REST on `muse_work_feed` 401 |
+| Auth | ✅ `/auth/v1/health` 200 |
+| Data integrity | ✅ counts unchanged from pre-outage: outbox 1201 · drive_events 736 · tasks 416 · ingestion 208 · muse 8/13/2/1 |
+| Signed-in UI render | ❌ still unverified — browser not signed in (`/muse/missions` → `/login`) |
+
+**Residual:** the database is still slow (single REST reads 1–29 s, occasional `57014` under
+`anon`'s 3 s limit, SQL editor connect timeouts). REST is *up*, not *fast*.
+
+**Timeout rollback decision:** do **not** reset to 8 s yet. The schema-cache load needed >8 s on
+every attempt for 30+ min; resetting would re-arm the identical failure on the next migration.
+Hold 60 s until disk pressure is addressed or a reload is observed completing well under 8 s.
