@@ -865,65 +865,311 @@ export type Database = {
         }
         Relationships: []
       }
+      muse_improvement_measurements: {
+        Row: {
+          created_at: string
+          delta_text: string | null
+          evidence_ref: string | null
+          financial_impact: number | null
+          id: string
+          improvement_id: string
+          measured_at: string
+          measurement_type: string
+          metric: string
+          notes: string | null
+          time_saved_minutes: number | null
+          unintended_consequences: string | null
+          unit: string | null
+          value_numeric: number | null
+          value_text: string | null
+          verification_state: string
+        }
+        Insert: {
+          created_at?: string
+          delta_text?: string | null
+          evidence_ref?: string | null
+          financial_impact?: number | null
+          id?: string
+          improvement_id: string
+          measured_at?: string
+          measurement_type: string
+          metric: string
+          notes?: string | null
+          time_saved_minutes?: number | null
+          unintended_consequences?: string | null
+          unit?: string | null
+          value_numeric?: number | null
+          value_text?: string | null
+          verification_state?: string
+        }
+        Update: {
+          created_at?: string
+          delta_text?: string | null
+          evidence_ref?: string | null
+          financial_impact?: number | null
+          id?: string
+          improvement_id?: string
+          measured_at?: string
+          measurement_type?: string
+          metric?: string
+          notes?: string | null
+          time_saved_minutes?: number | null
+          unintended_consequences?: string | null
+          unit?: string | null
+          value_numeric?: number | null
+          value_text?: string | null
+          verification_state?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "muse_improvement_measurements_improvement_id_fkey"
+            columns: ["improvement_id"]
+            isOneToOne: false
+            referencedRelation: "muse_daily_improvement_board"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "muse_improvement_measurements_improvement_id_fkey"
+            columns: ["improvement_id"]
+            isOneToOne: false
+            referencedRelation: "muse_improvement_ledger"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "muse_improvement_measurements_improvement_id_fkey"
+            columns: ["improvement_id"]
+            isOneToOne: false
+            referencedRelation: "muse_improvement_results"
+            referencedColumns: ["improvement_id"]
+          },
+          {
+            foreignKeyName: "muse_improvement_measurements_improvement_id_fkey"
+            columns: ["improvement_id"]
+            isOneToOne: false
+            referencedRelation: "muse_improvements"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
+      muse_improvement_tasks: {
+        Row: {
+          assigning_agent: string
+          blocker: string | null
+          claimed_completed_at: string | null
+          created_at: string
+          definition_of_done: string | null
+          domain_key: string
+          due_at: string | null
+          evidence: Json
+          executor: string
+          expected_artifact: string | null
+          id: string
+          improvement_id: string
+          instructions: string | null
+          objective: string | null
+          priority: string
+          source_ref: string | null
+          state: string
+          title: string
+          updated_at: string
+          verification_state: string
+        }
+        Insert: {
+          assigning_agent?: string
+          blocker?: string | null
+          claimed_completed_at?: string | null
+          created_at?: string
+          definition_of_done?: string | null
+          domain_key: string
+          due_at?: string | null
+          evidence?: Json
+          executor: string
+          expected_artifact?: string | null
+          id?: string
+          improvement_id: string
+          instructions?: string | null
+          objective?: string | null
+          priority?: string
+          source_ref?: string | null
+          state?: string
+          title: string
+          updated_at?: string
+          verification_state?: string
+        }
+        Update: {
+          assigning_agent?: string
+          blocker?: string | null
+          claimed_completed_at?: string | null
+          created_at?: string
+          definition_of_done?: string | null
+          domain_key?: string
+          due_at?: string | null
+          evidence?: Json
+          executor?: string
+          expected_artifact?: string | null
+          id?: string
+          improvement_id?: string
+          instructions?: string | null
+          objective?: string | null
+          priority?: string
+          source_ref?: string | null
+          state?: string
+          title?: string
+          updated_at?: string
+          verification_state?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "muse_improvement_tasks_domain_key_fkey"
+            columns: ["domain_key"]
+            isOneToOne: false
+            referencedRelation: "muse_domains"
+            referencedColumns: ["key"]
+          },
+          {
+            foreignKeyName: "muse_improvement_tasks_domain_key_fkey"
+            columns: ["domain_key"]
+            isOneToOne: false
+            referencedRelation: "muse_portfolio_map"
+            referencedColumns: ["domain_key"]
+          },
+          {
+            foreignKeyName: "muse_improvement_tasks_improvement_id_fkey"
+            columns: ["improvement_id"]
+            isOneToOne: false
+            referencedRelation: "muse_daily_improvement_board"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "muse_improvement_tasks_improvement_id_fkey"
+            columns: ["improvement_id"]
+            isOneToOne: false
+            referencedRelation: "muse_improvement_ledger"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "muse_improvement_tasks_improvement_id_fkey"
+            columns: ["improvement_id"]
+            isOneToOne: false
+            referencedRelation: "muse_improvement_results"
+            referencedColumns: ["improvement_id"]
+          },
+          {
+            foreignKeyName: "muse_improvement_tasks_improvement_id_fkey"
+            columns: ["improvement_id"]
+            isOneToOne: false
+            referencedRelation: "muse_improvements"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
       muse_improvements: {
         Row: {
           actual_result: string | null
           baseline: string | null
+          confidence: string | null
           created_at: string
+          definition_of_done: string | null
           domain_key: string
+          expected_impact: string | null
           expected_result: string | null
+          function_name: string | null
+          hypothesis: string | null
           id: string
+          improvement_date: string | null
           intervention: string
           metric: string
+          mission_id: string | null
           notes: string | null
+          observation: string | null
+          observe_only_reason: string | null
           owner: string
+          owner_attention: string | null
+          priority: string | null
           problem: string
+          recommended_executor: string | null
+          reversible: boolean | null
           review_at: string | null
+          risk: string | null
+          selected_by: string | null
           source_ref: string | null
           started_at: string | null
           status: string
           updated_at: string
           verdict: string
+          verification_requirement: string | null
           verification_state: string
         }
         Insert: {
           actual_result?: string | null
           baseline?: string | null
+          confidence?: string | null
           created_at?: string
+          definition_of_done?: string | null
           domain_key: string
+          expected_impact?: string | null
           expected_result?: string | null
+          function_name?: string | null
+          hypothesis?: string | null
           id?: string
+          improvement_date?: string | null
           intervention: string
           metric: string
+          mission_id?: string | null
           notes?: string | null
+          observation?: string | null
+          observe_only_reason?: string | null
           owner?: string
+          owner_attention?: string | null
+          priority?: string | null
           problem: string
+          recommended_executor?: string | null
+          reversible?: boolean | null
           review_at?: string | null
+          risk?: string | null
+          selected_by?: string | null
           source_ref?: string | null
           started_at?: string | null
           status?: string
           updated_at?: string
           verdict?: string
+          verification_requirement?: string | null
           verification_state?: string
         }
         Update: {
           actual_result?: string | null
           baseline?: string | null
+          confidence?: string | null
           created_at?: string
+          definition_of_done?: string | null
           domain_key?: string
+          expected_impact?: string | null
           expected_result?: string | null
+          function_name?: string | null
+          hypothesis?: string | null
           id?: string
+          improvement_date?: string | null
           intervention?: string
           metric?: string
+          mission_id?: string | null
           notes?: string | null
+          observation?: string | null
+          observe_only_reason?: string | null
           owner?: string
+          owner_attention?: string | null
+          priority?: string | null
           problem?: string
+          recommended_executor?: string | null
+          reversible?: boolean | null
           review_at?: string | null
+          risk?: string | null
+          selected_by?: string | null
           source_ref?: string | null
           started_at?: string | null
           status?: string
           updated_at?: string
           verdict?: string
+          verification_requirement?: string | null
           verification_state?: string
         }
         Relationships: [
@@ -940,6 +1186,20 @@ export type Database = {
             isOneToOne: false
             referencedRelation: "muse_portfolio_map"
             referencedColumns: ["domain_key"]
+          },
+          {
+            foreignKeyName: "muse_improvements_mission_id_fkey"
+            columns: ["mission_id"]
+            isOneToOne: false
+            referencedRelation: "muse_mission_board"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "muse_improvements_mission_id_fkey"
+            columns: ["mission_id"]
+            isOneToOne: false
+            referencedRelation: "muse_missions"
+            referencedColumns: ["id"]
           },
         ]
       }
@@ -1002,6 +1262,90 @@ export type Database = {
           },
           {
             foreignKeyName: "muse_kpi_registry_domain_key_fkey"
+            columns: ["domain_key"]
+            isOneToOne: false
+            referencedRelation: "muse_portfolio_map"
+            referencedColumns: ["domain_key"]
+          },
+        ]
+      }
+      muse_missions: {
+        Row: {
+          baseline: string | null
+          business_outcome: string | null
+          created_at: string
+          created_by: string
+          dependencies: Json
+          domain_key: string
+          executive_sponsor: string
+          id: string
+          metric: string | null
+          notes: string | null
+          objective: string
+          owner: string
+          priority: string
+          review_at: string | null
+          source_ref: string | null
+          started_at: string | null
+          status: string
+          target: string | null
+          title: string
+          updated_at: string
+        }
+        Insert: {
+          baseline?: string | null
+          business_outcome?: string | null
+          created_at?: string
+          created_by?: string
+          dependencies?: Json
+          domain_key: string
+          executive_sponsor?: string
+          id?: string
+          metric?: string | null
+          notes?: string | null
+          objective: string
+          owner?: string
+          priority?: string
+          review_at?: string | null
+          source_ref?: string | null
+          started_at?: string | null
+          status?: string
+          target?: string | null
+          title: string
+          updated_at?: string
+        }
+        Update: {
+          baseline?: string | null
+          business_outcome?: string | null
+          created_at?: string
+          created_by?: string
+          dependencies?: Json
+          domain_key?: string
+          executive_sponsor?: string
+          id?: string
+          metric?: string | null
+          notes?: string | null
+          objective?: string
+          owner?: string
+          priority?: string
+          review_at?: string | null
+          source_ref?: string | null
+          started_at?: string | null
+          status?: string
+          target?: string | null
+          title?: string
+          updated_at?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "muse_missions_domain_key_fkey"
+            columns: ["domain_key"]
+            isOneToOne: false
+            referencedRelation: "muse_domains"
+            referencedColumns: ["key"]
+          },
+          {
+            foreignKeyName: "muse_missions_domain_key_fkey"
             columns: ["domain_key"]
             isOneToOne: false
             referencedRelation: "muse_portfolio_map"
@@ -1360,6 +1704,153 @@ export type Database = {
           verification_state?: string
           verified_at?: string | null
           verified_by?: string | null
+        }
+        Relationships: []
+      }
+      muse_work_updates: {
+        Row: {
+          actor: string
+          created_at: string
+          domain_key: string | null
+          evidence_ref: string | null
+          id: string
+          improvement_id: string | null
+          message: string
+          mission_id: string | null
+          task_id: string | null
+          update_type: string
+        }
+        Insert: {
+          actor: string
+          created_at?: string
+          domain_key?: string | null
+          evidence_ref?: string | null
+          id?: string
+          improvement_id?: string | null
+          message: string
+          mission_id?: string | null
+          task_id?: string | null
+          update_type: string
+        }
+        Update: {
+          actor?: string
+          created_at?: string
+          domain_key?: string | null
+          evidence_ref?: string | null
+          id?: string
+          improvement_id?: string | null
+          message?: string
+          mission_id?: string | null
+          task_id?: string | null
+          update_type?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "muse_work_updates_domain_key_fkey"
+            columns: ["domain_key"]
+            isOneToOne: false
+            referencedRelation: "muse_domains"
+            referencedColumns: ["key"]
+          },
+          {
+            foreignKeyName: "muse_work_updates_domain_key_fkey"
+            columns: ["domain_key"]
+            isOneToOne: false
+            referencedRelation: "muse_portfolio_map"
+            referencedColumns: ["domain_key"]
+          },
+          {
+            foreignKeyName: "muse_work_updates_improvement_id_fkey"
+            columns: ["improvement_id"]
+            isOneToOne: false
+            referencedRelation: "muse_daily_improvement_board"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "muse_work_updates_improvement_id_fkey"
+            columns: ["improvement_id"]
+            isOneToOne: false
+            referencedRelation: "muse_improvement_ledger"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "muse_work_updates_improvement_id_fkey"
+            columns: ["improvement_id"]
+            isOneToOne: false
+            referencedRelation: "muse_improvement_results"
+            referencedColumns: ["improvement_id"]
+          },
+          {
+            foreignKeyName: "muse_work_updates_improvement_id_fkey"
+            columns: ["improvement_id"]
+            isOneToOne: false
+            referencedRelation: "muse_improvements"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "muse_work_updates_mission_id_fkey"
+            columns: ["mission_id"]
+            isOneToOne: false
+            referencedRelation: "muse_mission_board"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "muse_work_updates_mission_id_fkey"
+            columns: ["mission_id"]
+            isOneToOne: false
+            referencedRelation: "muse_missions"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "muse_work_updates_task_id_fkey"
+            columns: ["task_id"]
+            isOneToOne: false
+            referencedRelation: "muse_agent_queue"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "muse_work_updates_task_id_fkey"
+            columns: ["task_id"]
+            isOneToOne: false
+            referencedRelation: "muse_improvement_tasks"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "muse_work_updates_task_id_fkey"
+            columns: ["task_id"]
+            isOneToOne: false
+            referencedRelation: "muse_verification_queue"
+            referencedColumns: ["task_id"]
+          },
+        ]
+      }
+      muse_workboard_requests: {
+        Row: {
+          action: string
+          created_at: string
+          http_status: number
+          id: string
+          request_key: string
+          response: Json
+          token_label: string
+        }
+        Insert: {
+          action: string
+          created_at?: string
+          http_status: number
+          id?: string
+          request_key: string
+          response?: Json
+          token_label: string
+        }
+        Update: {
+          action?: string
+          created_at?: string
+          http_status?: number
+          id?: string
+          request_key?: string
+          response?: Json
+          token_label?: string
         }
         Relationships: []
       }
@@ -2501,6 +2992,153 @@ export type Database = {
           },
         ]
       }
+      muse_agent_queue: {
+        Row: {
+          as_of: string | null
+          assigning_agent: string | null
+          blocker: string | null
+          claimed_completed_at: string | null
+          created_at: string | null
+          definition_of_done: string | null
+          domain_key: string | null
+          domain_name: string | null
+          due_at: string | null
+          evidence: Json | null
+          executor: string | null
+          expected_artifact: string | null
+          id: string | null
+          improvement: string | null
+          improvement_id: string | null
+          instructions: string | null
+          objective: string | null
+          overdue: boolean | null
+          priority: string | null
+          source_ref: string | null
+          state: string | null
+          title: string | null
+          updated_at: string | null
+          verification_state: string | null
+        }
+        Relationships: [
+          {
+            foreignKeyName: "muse_improvement_tasks_domain_key_fkey"
+            columns: ["domain_key"]
+            isOneToOne: false
+            referencedRelation: "muse_domains"
+            referencedColumns: ["key"]
+          },
+          {
+            foreignKeyName: "muse_improvement_tasks_domain_key_fkey"
+            columns: ["domain_key"]
+            isOneToOne: false
+            referencedRelation: "muse_portfolio_map"
+            referencedColumns: ["domain_key"]
+          },
+          {
+            foreignKeyName: "muse_improvement_tasks_improvement_id_fkey"
+            columns: ["improvement_id"]
+            isOneToOne: false
+            referencedRelation: "muse_daily_improvement_board"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "muse_improvement_tasks_improvement_id_fkey"
+            columns: ["improvement_id"]
+            isOneToOne: false
+            referencedRelation: "muse_improvement_ledger"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "muse_improvement_tasks_improvement_id_fkey"
+            columns: ["improvement_id"]
+            isOneToOne: false
+            referencedRelation: "muse_improvement_results"
+            referencedColumns: ["improvement_id"]
+          },
+          {
+            foreignKeyName: "muse_improvement_tasks_improvement_id_fkey"
+            columns: ["improvement_id"]
+            isOneToOne: false
+            referencedRelation: "muse_improvements"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
+      muse_daily_improvement_board: {
+        Row: {
+          actual_result: string | null
+          as_of: string | null
+          baseline: string | null
+          confidence: string | null
+          created_at: string | null
+          definition_of_done: string | null
+          domain_key: string | null
+          domain_name: string | null
+          expected_impact: string | null
+          expected_result: string | null
+          function_name: string | null
+          hypothesis: string | null
+          id: string | null
+          improvement_date: string | null
+          intervention: string | null
+          measurement_count: number | null
+          metric: string | null
+          mission_id: string | null
+          mission_title: string | null
+          notes: string | null
+          observation: string | null
+          observe_only_reason: string | null
+          owner: string | null
+          owner_attention: string | null
+          priority: string | null
+          problem: string | null
+          recommended_executor: string | null
+          reversible: boolean | null
+          review_at: string | null
+          review_due: boolean | null
+          risk: string | null
+          selected_by: string | null
+          source_ref: string | null
+          started_at: string | null
+          status: string | null
+          task_count: number | null
+          tasks_blocked: number | null
+          tasks_complete: number | null
+          verdict: string | null
+          verification_requirement: string | null
+          verification_state: string | null
+        }
+        Relationships: [
+          {
+            foreignKeyName: "muse_improvements_domain_key_fkey"
+            columns: ["domain_key"]
+            isOneToOne: false
+            referencedRelation: "muse_domains"
+            referencedColumns: ["key"]
+          },
+          {
+            foreignKeyName: "muse_improvements_domain_key_fkey"
+            columns: ["domain_key"]
+            isOneToOne: false
+            referencedRelation: "muse_portfolio_map"
+            referencedColumns: ["domain_key"]
+          },
+          {
+            foreignKeyName: "muse_improvements_mission_id_fkey"
+            columns: ["mission_id"]
+            isOneToOne: false
+            referencedRelation: "muse_mission_board"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "muse_improvements_mission_id_fkey"
+            columns: ["mission_id"]
+            isOneToOne: false
+            referencedRelation: "muse_missions"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
       muse_decisions_required: {
         Row: {
           as_of: string | null
@@ -2602,6 +3240,46 @@ export type Database = {
           },
         ]
       }
+      muse_improvement_results: {
+        Row: {
+          actual_result: string | null
+          as_of: string | null
+          baseline: string | null
+          domain_key: string | null
+          domain_name: string | null
+          improvement_id: string | null
+          intervention: string | null
+          latest_delta: string | null
+          latest_measurement_at: string | null
+          latest_measurement_type: string | null
+          latest_value: string | null
+          measurement_count: number | null
+          metric: string | null
+          recorded_financial_impact: number | null
+          recorded_time_saved_minutes: number | null
+          review_at: string | null
+          started_at: string | null
+          status: string | null
+          verdict: string | null
+          verification_state: string | null
+        }
+        Relationships: [
+          {
+            foreignKeyName: "muse_improvements_domain_key_fkey"
+            columns: ["domain_key"]
+            isOneToOne: false
+            referencedRelation: "muse_domains"
+            referencedColumns: ["key"]
+          },
+          {
+            foreignKeyName: "muse_improvements_domain_key_fkey"
+            columns: ["domain_key"]
+            isOneToOne: false
+            referencedRelation: "muse_portfolio_map"
+            referencedColumns: ["domain_key"]
+          },
+        ]
+      }
       muse_kpi_derived: {
         Row: {
           data_timestamp: string | null
@@ -2642,6 +3320,51 @@ export type Database = {
           },
           {
             foreignKeyName: "muse_kpi_registry_domain_key_fkey"
+            columns: ["domain_key"]
+            isOneToOne: false
+            referencedRelation: "muse_portfolio_map"
+            referencedColumns: ["domain_key"]
+          },
+        ]
+      }
+      muse_mission_board: {
+        Row: {
+          active_improvements: number | null
+          active_tasks: number | null
+          as_of: string | null
+          baseline: string | null
+          blocked_tasks: number | null
+          business_outcome: string | null
+          created_at: string | null
+          created_by: string | null
+          dependencies: Json | null
+          domain_key: string | null
+          domain_name: string | null
+          executive_sponsor: string | null
+          id: string | null
+          metric: string | null
+          notes: string | null
+          objective: string | null
+          owner: string | null
+          priority: string | null
+          review_at: string | null
+          source_ref: string | null
+          started_at: string | null
+          status: string | null
+          target: string | null
+          title: string | null
+          updated_at: string | null
+        }
+        Relationships: [
+          {
+            foreignKeyName: "muse_missions_domain_key_fkey"
+            columns: ["domain_key"]
+            isOneToOne: false
+            referencedRelation: "muse_domains"
+            referencedColumns: ["key"]
+          },
+          {
+            foreignKeyName: "muse_missions_domain_key_fkey"
             columns: ["domain_key"]
             isOneToOne: false
             referencedRelation: "muse_portfolio_map"
@@ -2907,6 +3630,163 @@ export type Database = {
           probe_key: string | null
         }
         Relationships: []
+      }
+      muse_verification_queue: {
+        Row: {
+          as_of: string | null
+          claimant: string | null
+          claimed_completed_at: string | null
+          definition_of_done: string | null
+          domain_key: string | null
+          domain_name: string | null
+          evidence: Json | null
+          expected_artifact: string | null
+          improvement_id: string | null
+          source_ref: string | null
+          task_id: string | null
+          title: string | null
+          verification_requirement: string | null
+          verification_state: string | null
+        }
+        Relationships: [
+          {
+            foreignKeyName: "muse_improvement_tasks_domain_key_fkey"
+            columns: ["domain_key"]
+            isOneToOne: false
+            referencedRelation: "muse_domains"
+            referencedColumns: ["key"]
+          },
+          {
+            foreignKeyName: "muse_improvement_tasks_domain_key_fkey"
+            columns: ["domain_key"]
+            isOneToOne: false
+            referencedRelation: "muse_portfolio_map"
+            referencedColumns: ["domain_key"]
+          },
+          {
+            foreignKeyName: "muse_improvement_tasks_improvement_id_fkey"
+            columns: ["improvement_id"]
+            isOneToOne: false
+            referencedRelation: "muse_daily_improvement_board"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "muse_improvement_tasks_improvement_id_fkey"
+            columns: ["improvement_id"]
+            isOneToOne: false
+            referencedRelation: "muse_improvement_ledger"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "muse_improvement_tasks_improvement_id_fkey"
+            columns: ["improvement_id"]
+            isOneToOne: false
+            referencedRelation: "muse_improvement_results"
+            referencedColumns: ["improvement_id"]
+          },
+          {
+            foreignKeyName: "muse_improvement_tasks_improvement_id_fkey"
+            columns: ["improvement_id"]
+            isOneToOne: false
+            referencedRelation: "muse_improvements"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
+      muse_work_feed: {
+        Row: {
+          actor: string | null
+          as_of: string | null
+          created_at: string | null
+          domain_key: string | null
+          domain_name: string | null
+          evidence_ref: string | null
+          id: string | null
+          improvement_id: string | null
+          message: string | null
+          mission_id: string | null
+          task_id: string | null
+          update_type: string | null
+        }
+        Relationships: [
+          {
+            foreignKeyName: "muse_work_updates_domain_key_fkey"
+            columns: ["domain_key"]
+            isOneToOne: false
+            referencedRelation: "muse_domains"
+            referencedColumns: ["key"]
+          },
+          {
+            foreignKeyName: "muse_work_updates_domain_key_fkey"
+            columns: ["domain_key"]
+            isOneToOne: false
+            referencedRelation: "muse_portfolio_map"
+            referencedColumns: ["domain_key"]
+          },
+          {
+            foreignKeyName: "muse_work_updates_improvement_id_fkey"
+            columns: ["improvement_id"]
+            isOneToOne: false
+            referencedRelation: "muse_daily_improvement_board"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "muse_work_updates_improvement_id_fkey"
+            columns: ["improvement_id"]
+            isOneToOne: false
+            referencedRelation: "muse_improvement_ledger"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "muse_work_updates_improvement_id_fkey"
+            columns: ["improvement_id"]
+            isOneToOne: false
+            referencedRelation: "muse_improvement_results"
+            referencedColumns: ["improvement_id"]
+          },
+          {
+            foreignKeyName: "muse_work_updates_improvement_id_fkey"
+            columns: ["improvement_id"]
+            isOneToOne: false
+            referencedRelation: "muse_improvements"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "muse_work_updates_mission_id_fkey"
+            columns: ["mission_id"]
+            isOneToOne: false
+            referencedRelation: "muse_mission_board"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "muse_work_updates_mission_id_fkey"
+            columns: ["mission_id"]
+            isOneToOne: false
+            referencedRelation: "muse_missions"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "muse_work_updates_task_id_fkey"
+            columns: ["task_id"]
+            isOneToOne: false
+            referencedRelation: "muse_agent_queue"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "muse_work_updates_task_id_fkey"
+            columns: ["task_id"]
+            isOneToOne: false
+            referencedRelation: "muse_improvement_tasks"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "muse_work_updates_task_id_fkey"
+            columns: ["task_id"]
+            isOneToOne: false
+            referencedRelation: "muse_verification_queue"
+            referencedColumns: ["task_id"]
+          },
+        ]
       }
     }
     Functions: {
