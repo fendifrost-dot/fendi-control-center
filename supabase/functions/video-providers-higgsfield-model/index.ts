@@ -34,6 +34,7 @@ import {
 
 const HF_API_BASE = "https://api.higgsfield.ai";
 const HF_USER_AGENT = "higgsfield-server-js/2.0";
+const SUBMIT_TIMEOUT_MS = 55_000;   // the catalogue submit is synchronous at Higgsfield and has been seen to take > 30 s
 
 type ModelSpec = {
   path: string;
@@ -43,9 +44,12 @@ type ModelSpec = {
   centsPerSecond: number;       // list price for the cost estimate (2026-10, docs.higgsfield.ai); the balance is authoritative
 };
 
-// Catalogue allowlist. Keys are what callers pass as modelVariant.
+// Catalogue allowlist. Keys are what callers pass as modelVariant. `fields` is exactly the optional
+// input set each model declares in docs.higgsfield.ai/docs/openapi.json (checked 2026-10-01): none of
+// these models takes aspect_ratio or seed — the text-to-video models render at their own default
+// frame, so a 9:16 world is built still-first (a 9:16 still into an image-to-video model sets the frame).
 const MODELS: Record<string, ModelSpec> = {
-  "kling-2.5-turbo-pro-t2v":      { path: "/kling-video/v2.5-turbo/pro/text-to-video",      mode: "text_to_video",  durations: [5, 10], fields: ["cfg_scale", "negative_prompt", "aspect_ratio"], centsPerSecond: 7 },
+  "kling-2.5-turbo-pro-t2v":      { path: "/kling-video/v2.5-turbo/pro/text-to-video",      mode: "text_to_video",  durations: [5, 10], fields: ["cfg_scale", "negative_prompt"],                 centsPerSecond: 7 },
   "kling-2.5-turbo-pro-i2v":      { path: "/kling-video/v2.5-turbo/pro/image-to-video",     mode: "image_to_video", durations: [5, 10], fields: ["cfg_scale", "negative_prompt"],                 centsPerSecond: 7 },
   "kling-2.5-turbo-standard-i2v": { path: "/kling-video/v2.5-turbo/standard/image-to-video", mode: "image_to_video", durations: [5, 10], fields: ["cfg_scale", "negative_prompt"],                 centsPerSecond: 4 },
   "hailuo-2.3-standard-t2v":      { path: "/minimax/hailuo-2.3/standard/text-to-video",      mode: "text_to_video",  durations: [6, 10], fields: ["prompt_optimizer"],                            centsPerSecond: 5 },
@@ -88,10 +92,10 @@ serve(async (req) => {
   const input: Record<string, unknown> = { prompt: parsed.promptText, duration };
   if (spec.mode === "image_to_video") input.image_url = parsed.referenceImageUrl;
   for (const f of spec.fields) {
-    if (f === "aspect_ratio" && parsed.aspectRatio) input.aspect_ratio = parsed.aspectRatio;
+    if (f === "negative_prompt" && typeof parsed.negativePrompt === "string" && extra[f] === undefined) input.negative_prompt = parsed.negativePrompt;
     else if (extra[f] !== undefined) input[f] = extra[f];
   }
-  if (typeof parsed.seed === "number") input.seed = parsed.seed;
+  if (spec.fields.includes("seed") && typeof parsed.seed === "number") input.seed = parsed.seed;
 
   const log = await startLog({
     provider: "higgsfield",
@@ -102,9 +106,12 @@ serve(async (req) => {
     referenceImageUrl: parsed.referenceImageUrl ?? null,
   });
 
+  // A submit that hangs past the abort window, or a network failure, must come back as a retryable
+  // provider error rather than escaping withRetry as an exception (which left the log at "attempted"
+  // and the caller with a bare 500 on the first Hailuo submit, 2026-10-01).
   const result = await withRetry(async () => {
     const ctrl = new AbortController();
-    const timer = setTimeout(() => ctrl.abort(), 30_000);
+    const timer = setTimeout(() => ctrl.abort(), SUBMIT_TIMEOUT_MS);
     try {
       const resp = await fetch(`${HF_API_BASE}${spec.path}`, {
         method: "POST", signal: ctrl.signal,
@@ -119,6 +126,9 @@ serve(async (req) => {
         return { ok: false, status: resp.status, error: detail };
       }
       return { ok: true, status: resp.status, result: json };
+    } catch (e) {
+      const aborted = (e as { name?: string })?.name === "AbortError";
+      return { ok: false, status: aborted ? 504 : 502, error: aborted ? `submit exceeded ${SUBMIT_TIMEOUT_MS} ms` : `submit failed: ${(e as Error)?.message ?? String(e)}` };
     } finally { clearTimeout(timer); }
   }, 2);
 
