@@ -17,7 +17,9 @@
  * caller cannot aim this at an arbitrary endpoint; adding a model is one line of data.
  *
  * Modes: text_to_video (prompt), image_to_video (prompt + referenceImageUrl), video_to_video (prompt +
- * referenceVideoUrl + referenceImageUrls[1..n] + resolution — Genjutsu object-swap / motion-transfer).
+ * referenceVideoUrl + referenceImageUrls[1..n] + resolution — Genjutsu object-swap / motion-transfer),
+ * reference_to_video (prompt + referenceVideoUrls[0..10] + referenceImageUrls[0..30] + duration + resolution +
+ * aspectRatio — Seedance 2.5: the prompt may address references as @Video1 / @Image1).
  *
  * Secrets: HIGGSFIELD_API_KEY_ID + HIGGSFIELD_API_SECRET (same pair as the DoP function).
  */
@@ -41,12 +43,14 @@ const SUBMIT_TIMEOUT_MS = 55_000;   // the catalogue submit is synchronous at Hi
 
 type ModelSpec = {
   path: string;
-  mode: "text_to_video" | "image_to_video" | "video_to_video";
+  mode: "text_to_video" | "image_to_video" | "video_to_video" | "reference_to_video";
   durations: number[];          // the model's duration enum; empty for video-to-video (output length follows the source)
   fields: string[];             // optional input fields the model accepts besides prompt/duration(/image_url/video_url/image_urls)
   centsPerSecond: number;       // list price for the cost estimate (2026-10, docs.higgsfield.ai); the balance is authoritative
   resolutions?: Record<string, number>;   // video-to-video: allowed `resolution` values → cents per SOURCE second (overrides centsPerSecond)
-  maxImages?: number;           // video-to-video: how many image_urls the model accepts
+  maxImages?: number;           // video-to-video / reference-to-video: how many image_urls the model accepts
+  maxVideos?: number;           // reference-to-video: how many video_urls the model accepts
+  aspects?: string[];           // reference-to-video: allowed aspect_ratio values
 };
 
 // Catalogue allowlist. Keys are what callers pass as modelVariant. `fields` is exactly the optional
@@ -66,6 +70,11 @@ const MODELS: Record<string, ModelSpec> = {
   // Billed per SOURCE second, rounded up, by output resolution: 480p 31.8¢ · 720p 68.1¢ · 1080p 163.2¢.
   "genjutsu-object-swap":         { path: "/higgsfield/genjutsu/object-swap/v1.0",            mode: "video_to_video", durations: [],      fields: ["resolution"], centsPerSecond: 68.1, resolutions: { "480p": 31.8, "720p": 68.1, "1080p": 163.2 }, maxImages: 8 },
   "genjutsu-motion-transfer":     { path: "/higgsfield/genjutsu/motion-transfer/v1.0",        mode: "video_to_video", durations: [],      fields: ["resolution"], centsPerSecond: 68.1, resolutions: { "480p": 31.8, "720p": 68.1, "1080p": 163.2 }, maxImages: 8 },
+  // Seedance 2.5 reference-to-video (ByteDance via Higgsfield; docs.higgsfield.ai/docs/models/seedance-2-5/reference-to-video):
+  // up to 30 images, 10 videos, 10 audio files as references; prompt may address them (@Video1, @Image1); 4–30 s out; any aspect.
+  // Billed per OUTPUT second by resolution (480p 24.7¢ · 720p 46.2¢ · 1080p 113.7¢) AND per INPUT video second at the same rate
+  // (image/audio references are free). The estimate below counts output seconds only; callers add input seconds themselves.
+  "seedance-2.5-reference":       { path: "/bytedance/seedance-2.5/reference-to-video",          mode: "reference_to_video", durations: [], fields: ["resolution", "aspect_ratio", "generate_audio", "bitrate_mode"], centsPerSecond: 46.2, resolutions: { "480p": 24.7, "720p": 46.2, "1080p": 113.7 }, maxImages: 30, maxVideos: 10, aspects: ["16:9", "4:3", "1:1", "3:4", "9:16", "21:9"] },
 };
 const DEFAULT_T2V = "kling-2.5-turbo-pro-t2v";
 const DEFAULT_I2V = "kling-2.5-turbo-pro-i2v";
@@ -102,6 +111,7 @@ serve(async (req) => {
   const extra = body as Record<string, unknown>;
 
   const mode = parsed.mode ?? (parsed.referenceVideoUrl ? "video_to_video" : parsed.referenceImageUrl ? "image_to_video" : "text_to_video");
+  const refVideos: string[] = Array.isArray(extra.referenceVideoUrls) ? (extra.referenceVideoUrls as unknown[]).filter(isHttpUrl) : parsed.referenceVideoUrl && isHttpUrl(parsed.referenceVideoUrl) ? [parsed.referenceVideoUrl] : [];
   const requested = (parsed.modelVariant ?? (mode === "video_to_video" ? DEFAULT_V2V : mode === "image_to_video" ? DEFAULT_I2V : DEFAULT_T2V)).toLowerCase();
   const spec = MODELS[requested];
   if (!spec) return jsonError("INVALID_INPUT", `Unknown modelVariant "${requested}". Known: ${Object.keys(MODELS).join(", ")}`, 400, false);
@@ -117,15 +127,24 @@ serve(async (req) => {
     resolution = String(extra.resolution ?? DEFAULT_V2V_RESOLUTION);
     if (spec.resolutions && !(resolution in spec.resolutions)) return jsonError("INVALID_INPUT", `resolution must be one of ${Object.keys(spec.resolutions).join(", ")}.`, 400, false);
   }
-  const duration = pickDuration(spec, parsed.duration);
-  const centsPerSecond = (spec.mode === "video_to_video" && spec.resolutions && resolution) ? spec.resolutions[resolution] : spec.centsPerSecond;
+  if (spec.mode === "reference_to_video") {
+    if (refImages.length + refVideos.length < 1) return jsonError("INVALID_INPUT", `${requested} needs at least one reference (referenceImageUrls and/or referenceVideoUrls).`, 400, false);
+    if (refImages.length > (spec.maxImages ?? 30) || refVideos.length > (spec.maxVideos ?? 10)) return jsonError("INVALID_INPUT", `${requested} accepts at most ${spec.maxImages ?? 30} images and ${spec.maxVideos ?? 10} videos.`, 400, false);
+    resolution = String(extra.resolution ?? DEFAULT_V2V_RESOLUTION);
+    if (spec.resolutions && !(resolution in spec.resolutions)) return jsonError("INVALID_INPUT", `resolution must be one of ${Object.keys(spec.resolutions).join(", ")}.`, 400, false);
+    if (parsed.aspectRatio && spec.aspects && !spec.aspects.includes(parsed.aspectRatio)) return jsonError("INVALID_INPUT", `aspectRatio must be one of ${spec.aspects.join(", ")}.`, 400, false);
+  }
+  const duration = spec.mode === "reference_to_video" ? Math.min(30, Math.max(4, Math.round(Number(parsed.duration ?? 5)))) : pickDuration(spec, parsed.duration);
+  const centsPerSecond = ((spec.mode === "video_to_video" || spec.mode === "reference_to_video") && spec.resolutions && resolution) ? spec.resolutions[resolution] : spec.centsPerSecond;
 
   const input: Record<string, unknown> = spec.mode === "video_to_video"
     ? { prompt: parsed.promptText, video_url: parsed.referenceVideoUrl, image_urls: refImages, resolution }
+    : spec.mode === "reference_to_video"
+    ? { prompt: parsed.promptText, duration, resolution, aspect_ratio: parsed.aspectRatio ?? "16:9", generate_audio: extra.generate_audio === true, ...(refImages.length ? { image_urls: refImages } : {}), ...(refVideos.length ? { video_urls: refVideos } : {}) }
     : { prompt: parsed.promptText, duration };
   if (spec.mode === "image_to_video") input.image_url = parsed.referenceImageUrl;
   for (const f of spec.fields) {
-    if (f === "resolution") continue;   // set above, validated against the model's enum
+    if (f === "resolution" || (spec.mode === "reference_to_video" && (f === "aspect_ratio" || f === "generate_audio"))) continue;   // set above, validated against the model's enums
     if (f === "negative_prompt" && typeof parsed.negativePrompt === "string" && extra[f] === undefined) input.negative_prompt = parsed.negativePrompt;
     else if (extra[f] !== undefined) input[f] = extra[f];
   }
@@ -138,7 +157,7 @@ serve(async (req) => {
     modelVariant: requested,
     promptText: parsed.promptText,
     referenceImageUrl: refImages[0] ?? null,
-    extraArgs: spec.mode === "video_to_video" ? { referenceVideoUrl: parsed.referenceVideoUrl, referenceImageCount: refImages.length, resolution } : undefined,
+    extraArgs: (spec.mode === "video_to_video" || spec.mode === "reference_to_video") ? { referenceVideoUrl: refVideos[0] ?? parsed.referenceVideoUrl ?? null, referenceVideoCount: refVideos.length, referenceImageCount: refImages.length, resolution } : undefined,
   });
 
   // A submit that hangs past the abort window, or a network failure, must come back as a retryable
