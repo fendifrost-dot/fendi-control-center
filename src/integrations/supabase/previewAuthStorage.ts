@@ -35,11 +35,16 @@ export function brokeredPreviewStorage() {
     new Promise((resolve) => {
       const requestId = newId();
       let done = false;
-      let timer: ReturnType<typeof setTimeout>;
+      // Boxed so the handle is a `const`. `finish` closes over it but is defined before the
+      // timer is armed, so a bare `let` here is assigned exactly once and trips prefer-const
+      // — the one lint error in this repo. Reordering instead would make `finish` and the
+      // timer reference each other before definition; the box has no forward reference and
+      // no behaviour change (`clearTimeout(undefined)` is a no-op).
+      const timer: { id?: ReturnType<typeof setTimeout> } = {};
       const finish = (r: { ok: boolean; value?: string | null } | null) => {
         if (done) return;
         done = true;
-        clearTimeout(timer);
+        clearTimeout(timer.id);
         window.removeEventListener('message', onMessage);
         resolve(r);
       };
@@ -53,7 +58,7 @@ export function brokeredPreviewStorage() {
       if (value !== undefined) msg['value'] = value;
       // targetOrigin per trusted editor origin, so a session token never reaches an arbitrary embedder.
       for (const origin of editorOrigins) window.parent.postMessage(msg, origin);
-      timer = setTimeout(() => finish(null), TIMEOUT);
+      timer.id = setTimeout(() => finish(null), TIMEOUT);
     });
 
   // The editor may not be listening yet at the first getItem, so retry once.
