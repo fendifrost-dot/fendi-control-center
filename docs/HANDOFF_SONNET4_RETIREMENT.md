@@ -4,13 +4,55 @@ Anthropic retired `claude-sonnet-4-20250514` on 2026-06-15. Requests to it now f
 `404 not_found_error`. On 2026-10-03, the `fendi_control_hub` API key sent 3 failed requests
 to it. This repo had six edge functions that called it.
 
+## Paste-ready prompt for the executing agent
+
+Copy everything in the block below into a new Claude session that has browser tools signed in to Lovable (or the Lovable connector).
+
+```text
+You are executing a deploy handoff for the Fendi Control Center (CC) Lovable project.
+
+Read these two files from github.com/fendifrost-dot/fendi-control-center on main first:
+  1. CLAUDE.md (the chain-of-command rules)
+  2. docs/HANDOFF_SONNET4_RETIREMENT.md (this handoff)
+Then run Steps 1, 2, 2a and 3 of the handoff in order, and finish with the "Report back" section.
+
+Context: commit 96fb217 moved six edge functions off the retired model
+claude-sonnet-4-20250514 (which now returns 404) to claude-sonnet-5-5. The code is merged,
+but none of it is live until the functions are redeployed in Lovable.
+
+Lovable project id: 7fce9fc6-fd96-4a31-8a89-649f00298c51
+Supabase (Lovable Cloud): wkzwcfmvnwolgrdpnygc
+
+The steps:
+  1. In Lovable Cloud -> Secrets, check ANTHROPIC_MODEL. If it holds claude-sonnet-4-20250514
+     or any other dated claude-*-2025* ID, delete it or set it to claude-sonnet-5-5.
+     Never echo a secret's value into chat. Report only which case applied.
+  2. In Lovable -> Edge Functions, redeploy all six functions: ai-draft-treatment,
+     ingest-tax-documents, import-prior-return, analyze-credit-strategy,
+     generate-tax-documents, telegram-webhook. Record success or failure for each one.
+  2a. Run the curl loop in the handoff. You need 200 or 204 for every function; 404 means
+     redeploy that one again.
+  3. Trigger one credit analysis, then run in the Lovable SQL editor:
+       select model, created_at from credit_analyses order by created_at desc limit 1;
+     Expected: model = claude-sonnet-5-5, with created_at after your redeploy.
+
+Hard rules:
+  - No supabase CLI and no supabase.com dashboard. A 403 there is a false wall, not a blocker.
+  - Never ask Fendi for keys or ask Fendi to paste SQL.
+  - Don't press Publish: there is no frontend change. Publish is not the same as redeploy.
+  - Don't edit code or remove request parameters to make an error go away. Report any 4xx
+    verbatim and stop.
+  - Don't mark anything verified without pasting the real output. A claim of "done" is not
+    evidence.
+```
+
 ---
 
 ## Status going in
 
 | Thing | State |
 |---|---|
-| Code on `main` | ✅ committed in the same commit as this file |
+| Code on `main` | ✅ `96fb217` |
 | Schema change | — none needed |
 | Edge functions live | ❌ **not redeployed**: still running the old code, so they still 404 |
 | `ANTHROPIC_MODEL` secret | ❓ **unknown**: if it is set to the old ID, it overrides the new code default (see Step 1) |
