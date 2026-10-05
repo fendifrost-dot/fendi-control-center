@@ -1,7 +1,7 @@
 import "https://deno.land/x/xhr@0.1.0/mod.ts";
 
 const ANTHROPIC_API_KEY = Deno.env.get("ANTHROPIC_API_KEY");
-const DEFAULT_MODEL = Deno.env.get("ANTHROPIC_MODEL") || "claude-sonnet-4-20250514";
+const DEFAULT_MODEL = Deno.env.get("ANTHROPIC_MODEL") || "claude-sonnet-5-5";
 const DEFAULT_TIMEOUT_MS = 30_000;
 
 type SimpleSchema = {
@@ -57,10 +57,13 @@ export async function callClaude(
           "Content-Type": "application/json",
           "x-api-key": ANTHROPIC_API_KEY,
           "anthropic-version": "2023-06-01",
+          "anthropic-beta": "server-side-fallback-2026-07-01",
         },
         body: JSON.stringify({
           model: DEFAULT_MODEL,
           max_tokens: maxTokens,
+          output_config: { effort: "low" },
+          fallbacks: "default",
           system: systemPrompt,
           messages: [{ role: "user", content: userPrompt }],
         }),
@@ -72,8 +75,15 @@ export async function callClaude(
         throw new Error(`Claude API error ${resp.status}: ${errText.slice(0, 800)}`);
       }
       const data = await resp.json();
-      const text = data?.content?.[0]?.text;
-      if (typeof text !== "string" || !text.trim()) {
+      if (data?.stop_reason === "refusal") {
+        throw new Error("Claude declined the request (stop_reason=refusal)");
+      }
+      // Thinking blocks can precede the answer — join only the text blocks.
+      const text = (Array.isArray(data?.content) ? data.content : [])
+        .filter((b: { type?: string }) => b?.type === "text")
+        .map((b: { text?: string }) => b.text ?? "")
+        .join("");
+      if (!text.trim()) {
         throw new Error("Claude response had no text content");
       }
       return text;

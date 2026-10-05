@@ -29,7 +29,7 @@ import {
 } from "../_shared/video-providers/proxy.ts";
 
 const ANTHROPIC_URL = "https://api.anthropic.com/v1/messages";
-const DEFAULT_MODEL = Deno.env.get("ANTHROPIC_MODEL") || "claude-sonnet-4-20250514";
+const DEFAULT_MODEL = Deno.env.get("ANTHROPIC_MODEL") || "claude-sonnet-5-5";
 
 const PROSE_SYSTEM_PROMPT = `You are an experienced music-video director helping an
 independent artist draft a treatment for one of their songs. Your output
@@ -325,10 +325,13 @@ serve(async (req) => {
           "Content-Type": "application/json",
           "x-api-key": apiKey,
           "anthropic-version": "2023-06-01",
+          "anthropic-beta": "server-side-fallback-2026-07-01",
         },
         body: JSON.stringify({
           model: DEFAULT_MODEL,
           max_tokens: maxTokens,
+          output_config: { effort: "low" },
+          fallbacks: "default",
           system: systemPrompt,
           messages: [{ role: "user", content: userPrompt }],
         }),

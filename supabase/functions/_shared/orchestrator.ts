@@ -4,7 +4,7 @@
  */
 
 const ANTHROPIC_URL = "https://api.anthropic.com/v1/messages";
-const DEFAULT_MODEL = Deno.env.get("ANTHROPIC_MODEL") || "claude-sonnet-4-20250514";
+const DEFAULT_MODEL = Deno.env.get("ANTHROPIC_MODEL") || "claude-sonnet-5-5";
 const ORCH_TIMEOUT_MS = Number(Deno.env.get("CLAUDE_ORCHESTRATOR_TIMEOUT_MS") || "120000");
 
 export type ToolDefForOrchestrator = {
@@ -69,10 +69,13 @@ export async function callClaudeWithTools(params: {
         "Content-Type": "application/json",
         "x-api-key": apiKey,
         "anthropic-version": "2023-06-01",
+        "anthropic-beta": "server-side-fallback-2026-07-01",
       },
       body: JSON.stringify({
         model: DEFAULT_MODEL,
         max_tokens: maxTokens,
+        output_config: { effort: "low" },
+        fallbacks: "default",
         system: params.system,
         tools: params.tools,
         messages: [{ role: "user", content: params.user }],
