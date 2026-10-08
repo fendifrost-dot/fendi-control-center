@@ -148,7 +148,7 @@ insert into public.muse_api_tokens (label, token_sha256, scopes, expires_at, not
 values ('grok-bot',
         encode(extensions.digest('<plaintext>', 'sha256'), 'hex'),
         array['read','workboard:write'],
-        now() + interval '90 days',
+        NULL,  -- no expiry: Fendi decides when to expire or revoke a token
         'Grok Bot chief-of-staff credential; read + workboard write');
 -- Expected: INSERT 0 1
 ```
