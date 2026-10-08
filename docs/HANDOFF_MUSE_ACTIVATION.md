@@ -1,4 +1,4 @@
-# Handoff — Activate the Muse workboard loop (Muse → Grok Bot → Claude)
+# Handoff — Activate the Muse workboard loop (Enki → Grok Bot → Claude)
 
 **For:** Grok Bot as Chief of Staff, plus whoever holds database or agent-config access for the
 steps marked otherwise. Rule this serves: [`CLAUDE.md`](../CLAUDE.md) → handoff prompt.
@@ -20,7 +20,7 @@ Everything is **deployed**. Nothing is **operating**. This handoff makes work fl
 | **Write path ever used** | ❌ **never** | `muse_workboard_requests` = **0 rows** |
 | **Board content** | ❌ empty | `muse_missions` 0 · `muse_improvement_tasks` 0 · `muse_work_updates` 0 |
 | **Muse's credential** | ⚠️ read-only | every read in `muse_access_audit` is labelled `env-bootstrap` (the `MUSE_API_TOKEN` secret), which **cannot** write |
-| Write-capable token | ⚠️ exists, unused | one row in `muse_api_tokens`: label `thoth`, scopes `read`, `workboard:write`, not revoked |
+| Write-capable token | ⚠️ not Muse's | the only row in `muse_api_tokens` is `thoth`, scopes `read`, `workboard:write`. **Thoth is not the Muse agent; Muse is Enki** (confirmed by Fendi 2026-10-08). `thoth` is the token minted on Fendi's Mac on 2026-09-26 for `verify-muse-live.mjs` ([`HANDOFF_MUSE_LOVABLE_DEPLOY.md`](./HANDOFF_MUSE_LOVABLE_DEPLOY.md)); it later gained `workboard:write`, apparently on the mistaken belief that it was Muse's |
 | Grok Bot runtime | ❌ not wired | nothing reads `/executive/agent-queue` or writes back |
 | Signed-in UI (`/muse/missions`, `/daily`, `/agents`, `/impact`) | ❓ never observed | every check so far hit the login redirect |
 
@@ -44,7 +44,7 @@ per agent, or the audit trail can't tell Muse from Grok.
 
 | Step | Who can execute it |
 |---|---|
-| 1. Give Muse its write credential | Whoever configures Muse's runtime (Fendi, or an agent with access to Muse's secret store) |
+| 1. Give Enki (Muse) its write credential | An agent with database access to mint it, plus whoever configures Enki's runtime to install it |
 | 2. Mint Grok Bot's own token | An agent with database access: Lovable SQL editor, or the Lovable MCP `query_database` tool |
 | 3. Prove the write path end to end | **Grok Bot** (needs only HTTPS + its token from step 2) |
 | 4. Run the daily loop | **Grok Bot** |
@@ -56,29 +56,41 @@ with secret or database access. Grok should not guess these or work around them.
 
 ---
 
-## Step 1 — Give Muse a credential that can write
+## Step 1 — Give Enki (Muse) its own write credential
 
-Muse currently reads with the bootstrap secret. Writes need a hashed token with
-`workboard:write`.
+**Muse is Enki.** Enki currently reads with the bootstrap secret (`env-bootstrap` in the audit
+log) and has no token that can write. Writes need a hashed token with `workboard:write`.
 
-1. Find out whether the existing `thoth` token is Muse's. Only the hash is stored, so the
-   plaintext exists only wherever it was handed out on 2026-09-30.
-   * **If Muse holds `thoth`:** configure Muse to send that token on **both** APIs, reads and
-     writes. Done.
-   * **If nobody can produce `thoth`'s plaintext:** mint a dedicated Muse token as in step 2, with
-     label `muse`, and revoke `thoth`:
-     `update public.muse_api_tokens set revoked_at = now() where label = 'thoth';`
-2. Do **not** add `workboard:write` to the bootstrap secret. The write function only accepts
+1. Mint a dedicated token labelled **`enki`**, exactly as in step 2 but with `label = 'enki'`
+   and notes `'Enki (Muse executive agent); read + workboard write'`. The label becomes the
+   actor on everything Enki writes.
+2. Put the plaintext in Enki's runtime configuration. Enki then sends it on **both** APIs:
+   `muse-executive` for reads and `muse-workboard` for writes.
+3. **Do not hand Enki the `thoth` token.** `thoth` is Fendi's verification credential, not
+   Enki's. It has never written anything (`muse_workboard_requests` = 0 rows), and its
+   `workboard:write` scope was granted to the wrong agent. Return it to read-only:
+
+   ```sql
+   update public.muse_api_tokens set scopes = array['read'] where label = 'thoth';
+   -- Expected: UPDATE 1. verify-muse-live.mjs keeps working; it only reads.
+   ```
+4. Do **not** add `workboard:write` to the bootstrap secret. The write function only accepts
    hashed, registered tokens, by design.
 
-**Verify:** after Muse's next run, this query must show Muse's label (not `env-bootstrap`) on
-recent reads:
+**Verify:** after Enki's next run, recent reads must show `enki`, not `env-bootstrap`:
 
 ```sql
 select token_label, count(*), max(at)
   from public.muse_access_audit
  where at > now() - interval '1 day' and http_status = 200
  group by 1;
+```
+
+and the token register should read:
+
+```sql
+select label, scopes, revoked_at is null as live from public.muse_api_tokens order by created_at;
+-- Expected after steps 1–2: thoth {read} t · enki {read,workboard:write} t · grok-bot {read,workboard:write} t
 ```
 
 ## Step 2 — Mint Grok Bot's own token
@@ -225,7 +237,7 @@ These block domains from being measured at all. No agent should answer them:
 ## Report back
 
 1. Which steps you ran, and how (SQL editor, MCP, curl).
-2. Step 1: which label Muse now reads with (audit query output).
+2. Step 1: which label Enki now reads with (audit query output), and whether `thoth` is back to `{read}`.
 3. Step 2: the `muse_api_tokens` rows (labels and scopes only, **never** plaintext).
 4. Step 3: each HTTP status and the final `requests` / `closed_verification` row.
 5. Step 5: what each route rendered.
