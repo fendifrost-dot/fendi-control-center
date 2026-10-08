@@ -1,5 +1,5 @@
 import { assert, assertEquals, assertThrows } from "https://deno.land/std@0.224.0/assert/mod.ts";
-import { ACTIONS, isAction, boundedString, uuid, oneOf } from "./contract.ts";
+import { ACTIONS, isAction, boundedString, uuid, oneOf, reportDate, reportSections, REPORT_SECTION_KEYS } from "./contract.ts";
 
 Deno.test("workboard action allowlist is closed", () => {
   assert(ACTIONS.includes("create_task"));
@@ -22,4 +22,34 @@ Deno.test("uuid accepts valid ids and rejects arbitrary text", () => {
 Deno.test("oneOf rejects values outside the enum", () => {
   assertEquals(oneOf("P1", "priority", ["P0","P1","P2"]), "P1");
   assertThrows(() => oneOf("P9", "priority", ["P0","P1","P2"]));
+});
+
+Deno.test("record_daily_report is on the closed action list", () => {
+  assert(isAction("record_daily_report"));
+  assert(ACTIONS.includes("record_daily_report"));
+});
+
+Deno.test("report_date accepts a calendar date and rejects timestamps", () => {
+  assertEquals(reportDate("2026-10-08"), "2026-10-08");
+  assertThrows(() => reportDate("2026-10-08T13:38:00Z"));
+  assertThrows(() => reportDate("2026-02-31"));
+});
+
+Deno.test("report sections accept only the seven end-of-day items", () => {
+  assertEquals(REPORT_SECTION_KEYS, [
+    "execution",
+    "business_activity",
+    "daily_improvement",
+    "system_health",
+    "blockers_decisions",
+    "spend_commitments",
+    "next_day",
+  ]);
+  assertEquals(reportSections(undefined), {});
+  assertEquals(reportSections({ execution: "  shipped  ", next_day: "measure" }), {
+    execution: "shipped",
+    next_day: "measure",
+  });
+  assertThrows(() => reportSections({ mission_id: "6f14b53d-4c16-49ec-a475-a1bf94229499" }));
+  assertThrows(() => reportSections(["execution"]));
 });

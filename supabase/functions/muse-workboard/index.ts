@@ -1,6 +1,6 @@
 import { serve } from "https://deno.land/std@0.224.0/http/server.ts";
 import { createClient, type SupabaseClient } from "https://esm.sh/@supabase/supabase-js@2.49.1";
-import { isAction, boundedString, uuid, oneOf, type WorkboardAction } from "./contract.ts";
+import { isAction, boundedString, uuid, oneOf, reportDate, reportSections, type WorkboardAction } from "./contract.ts";
 
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
 const SERVICE_KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
@@ -96,6 +96,17 @@ async function execute(db: SupabaseClient, action: WorkboardAction, p: Record<st
     };
     if (!row.mission_id && !row.improvement_id && !row.task_id) throw new Error("one parent id is required");
     return await db.from("muse_work_updates").insert(row).select("*").single();
+  }
+  if (action === "record_daily_report") {
+    const row = {
+      report_date: reportDate(p.report_date),
+      cadence: oneOf(p.cadence, "cadence", ["START_OF_DAY", "END_OF_DAY"]),
+      actor,
+      message: boundedString(p.message, "message", 8000, true),
+      sections: reportSections(p.sections),
+      evidence_ref: boundedString(p.evidence_ref, "evidence_ref"),
+    };
+    return await db.from("muse_daily_reports").insert(row).select("*").single();
   }
   if (action === "record_measurement") {
     const row = {

@@ -27,6 +27,25 @@ Deno.test("resource keys and spec names agree", () => {
   }
 });
 
+Deno.test("work feed filters by the parent ids updates are written against", () => {
+  const filters = RESOURCES["work-feed"].filters ?? {};
+  assertEquals(filters.domain, "domain_key");
+  assertEquals(filters.actor, "actor");
+  assertEquals(filters.type, "update_type");
+  assertEquals(filters.task_id, "task_id");
+  assertEquals(filters.improvement_id, "improvement_id");
+  assertEquals(filters.mission_id, "mission_id");
+});
+
+Deno.test("daily reports are a first-class read resource", () => {
+  const spec = RESOURCES["daily-reports"];
+  assertEquals(spec.resource, "daily-reports");
+  assertEquals(spec.view, "muse_daily_report_board");
+  assertEquals(spec.filters?.actor, "actor");
+  assertEquals(spec.filters?.cadence, "cadence");
+  assertEquals(spec.filters?.report_date, "report_date");
+});
+
 Deno.test("redact strips credential-shaped fields, including nested", () => {
   const [out] = redact([{
     id: "1",
