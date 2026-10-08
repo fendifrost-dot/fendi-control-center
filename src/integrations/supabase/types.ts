@@ -736,6 +736,39 @@ export type Database = {
         }
         Relationships: []
       }
+      muse_daily_reports: {
+        Row: {
+          actor: string
+          cadence: string
+          created_at: string
+          evidence_ref: string | null
+          id: string
+          message: string
+          report_date: string
+          sections: Json
+        }
+        Insert: {
+          actor: string
+          cadence: string
+          created_at?: string
+          evidence_ref?: string | null
+          id?: string
+          message: string
+          report_date: string
+          sections?: Json
+        }
+        Update: {
+          actor?: string
+          cadence?: string
+          created_at?: string
+          evidence_ref?: string | null
+          id?: string
+          message?: string
+          report_date?: string
+          sections?: Json
+        }
+        Relationships: []
+      }
       muse_decisions: {
         Row: {
           classification: string
@@ -1704,39 +1737,6 @@ export type Database = {
           verification_state?: string
           verified_at?: string | null
           verified_by?: string | null
-        }
-        Relationships: []
-      }
-      muse_daily_reports: {
-        Row: {
-          actor: string
-          cadence: string
-          created_at: string
-          evidence_ref: string | null
-          id: string
-          message: string
-          report_date: string
-          sections: Json
-        }
-        Insert: {
-          actor: string
-          cadence: string
-          created_at?: string
-          evidence_ref?: string | null
-          id?: string
-          message: string
-          report_date: string
-          sections?: Json
-        }
-        Update: {
-          actor?: string
-          cadence?: string
-          created_at?: string
-          evidence_ref?: string | null
-          id?: string
-          message?: string
-          report_date?: string
-          sections?: Json
         }
         Relationships: []
       }
@@ -3172,6 +3172,42 @@ export type Database = {
           },
         ]
       }
+      muse_daily_report_board: {
+        Row: {
+          actor: string | null
+          as_of: string | null
+          cadence: string | null
+          created_at: string | null
+          evidence_ref: string | null
+          id: string | null
+          message: string | null
+          report_date: string | null
+          sections: Json | null
+        }
+        Insert: {
+          actor?: string | null
+          as_of?: never
+          cadence?: string | null
+          created_at?: string | null
+          evidence_ref?: string | null
+          id?: string | null
+          message?: string | null
+          report_date?: string | null
+          sections?: Json | null
+        }
+        Update: {
+          actor?: string | null
+          as_of?: never
+          cadence?: string | null
+          created_at?: string | null
+          evidence_ref?: string | null
+          id?: string | null
+          message?: string | null
+          report_date?: string | null
+          sections?: Json | null
+        }
+        Relationships: []
+      }
       muse_decisions_required: {
         Row: {
           as_of: string | null
@@ -3725,20 +3761,6 @@ export type Database = {
             referencedColumns: ["id"]
           },
         ]
-      }
-      muse_daily_report_board: {
-        Row: {
-          actor: string | null
-          as_of: string | null
-          cadence: string | null
-          created_at: string | null
-          evidence_ref: string | null
-          id: string | null
-          message: string | null
-          report_date: string | null
-          sections: Json | null
-        }
-        Relationships: []
       }
       muse_work_feed: {
         Row: {
