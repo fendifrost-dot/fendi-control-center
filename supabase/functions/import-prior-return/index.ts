@@ -129,17 +129,20 @@ Use 0 for any field not found. Negative refund_or_owed means a refund. Include A
       'Content-Type': 'application/json',
       'x-api-key': apiKey,
       'anthropic-version': '2023-06-01',
+      'anthropic-beta': 'server-side-fallback-2026-07-01',
     },
     body: JSON.stringify({
-      model: 'claude-sonnet-4-20250514',
+      model: 'claude-sonnet-5-5',
       max_tokens: 8192,
+      output_config: { effort: 'low' },
+      fallbacks: 'default',
       system: systemPrompt,
       messages: [
         {
           role: 'user',
           content: [
             {
-              type: 'image',
+              type: 'document',
               source: {
                 type: 'base64',
                 media_type: 'application/pdf',

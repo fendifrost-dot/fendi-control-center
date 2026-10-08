@@ -37,6 +37,7 @@ const FAL_BASE_URL = "https://queue.fal.run";
 const XAI_BASE_URL = "https://api.x.ai/v1";
 const DEFAULT_PIKA_FAL_MODEL = "fal-ai/pika/v2.2/text-to-video";
 const HIGGSFIELD_BASE_URL = "https://platform.higgsfield.ai";
+const HIGGSFIELD_API_BASE_URL = "https://api.higgsfield.ai";
 const HIGGSFIELD_USER_AGENT = "higgsfield-server-js/2.0";
 
 /** Strip Fal method suffixes (e.g. /text-to-video) from a model path so we can
@@ -140,7 +141,9 @@ serve(async (req) => {
         );
       }
       const hfAuth = `Key ${apiKey}:${hfSecret}`;
-      const resp = await fetch(
+      // DoP jobs live at the platform host; catalogue jobs (video-providers-higgsfield-model)
+      // at the api host. Try the platform host first, then the api host on a 404.
+      let resp = await fetch(
         `${HIGGSFIELD_BASE_URL}/requests/${encodeURIComponent(id)}/status`,
         {
           headers: {
@@ -149,6 +152,12 @@ serve(async (req) => {
           },
         },
       );
+      if (resp.status === 404) {
+        resp = await fetch(
+          `${HIGGSFIELD_API_BASE_URL}/requests/${encodeURIComponent(id)}/status`,
+          { headers: { Authorization: hfAuth, "User-Agent": HIGGSFIELD_USER_AGENT } },
+        );
+      }
       httpStatus = resp.status;
       const text = await resp.text();
       try { upstream = text ? JSON.parse(text) : {}; } catch { upstream = { raw: text }; }

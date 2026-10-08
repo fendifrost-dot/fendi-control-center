@@ -148,7 +148,7 @@ serve(async (req) => {
       .insert({
         client_id: clientId,
         analysis: analysis,
-        model: "claude-sonnet-4-20250514",
+        model: Deno.env.get("ANTHROPIC_MODEL") || "claude-sonnet-5-5",
       })
       .select("id, created_at")
       .single();
