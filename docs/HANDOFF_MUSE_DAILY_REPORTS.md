@@ -7,7 +7,7 @@ Do not treat a green local test as `LIVE`.
 
 | Thing | State |
 |---|---|
-| Code | On branch `cursor/muse-daily-reports-feed-filters-986c`. Not merged. Not deployed. |
+| Code | Commit `666aa6b` on `cursor/muse-daily-reports-feed-filters-986c`. Not merged. Not deployed. |
 | Schema in the live database | Not applied. `muse_daily_reports` does not exist yet. |
 | `muse-executive` live | Old contract. Work feed filters are `domain`, `actor`, `type` only. `daily-reports` is an unknown resource. |
 | `muse-workboard` live | Old action list. `record_daily_report` is rejected as `unknown_action`. |
