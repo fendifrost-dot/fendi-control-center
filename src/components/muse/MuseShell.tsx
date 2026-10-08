@@ -15,13 +15,9 @@ import { cn } from "@/lib/utils";
 
 const MUSE_NAV: Array<{ to: string; label: string }> = [
   { to: "/muse", label: "Brief" },
-  { to: "/muse/missions", label: "Missions" },
-  { to: "/muse/daily", label: "Daily" },
-  { to: "/muse/queue", label: "Agent queue" },
-  { to: "/muse/verification", label: "Verification" },
-  { to: "/muse/improvements", label: "Impact ledger" },
   { to: "/muse/portfolio", label: "Portfolio" },
   { to: "/muse/loops", label: "Open loops" },
+  { to: "/muse/improvements", label: "1% ledger" },
   { to: "/muse/sources", label: "Sources" },
   { to: "/muse/systems", label: "Systems" },
 ];
@@ -42,7 +38,7 @@ export function MuseShell() {
     <RequireSession>
       <div className="min-h-screen bg-background text-foreground">
         <header className="sticky top-0 z-40 border-b border-border/80 bg-background/95 backdrop-blur supports-[backdrop-filter]:bg-background/80">
-          <div className="container flex min-h-14 max-w-6xl items-center justify-between gap-4 px-4 py-2">
+          <div className="container flex h-14 max-w-6xl items-center justify-between gap-4 px-4">
             <nav className="flex min-w-0 flex-wrap items-center gap-3 sm:gap-5">
               <Link
                 to="/"
@@ -103,9 +99,8 @@ export function MuseShell() {
         </main>
         <footer className="container max-w-6xl px-4 pb-10">
           <p className="border-t border-border/60 pt-4 text-xs text-muted-foreground">
-            This view is read-only. State moves only through the database transition functions
-            (muse_transition_*, muse_verify), which enforce who may take each step. Domain systems
-            own their truth; Muse records interpretation, references and decisions. Anything marked{" "}
+            Muse is read-only. Domain systems own their truth; Muse records executive
+            interpretation, references and decisions. Anything marked{" "}
             <span className="font-mono">SOURCE EXISTS ACCESS NEEDED</span> is real but not connected.
           </p>
         </footer>

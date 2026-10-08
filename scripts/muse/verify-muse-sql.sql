@@ -11,12 +11,12 @@ DECLARE n int;
 BEGIN
   SELECT count(*) INTO n FROM pg_class c JOIN pg_namespace ns ON ns.oid=c.relnamespace
    WHERE ns.nspname='public' AND c.relname LIKE 'muse\_%' AND c.relkind='r';
-  IF n <> 15 THEN RAISE EXCEPTION 'expected 15 muse tables (11 v1 + 4 v2), found %', n; END IF;
+  IF n <> 11 THEN RAISE EXCEPTION 'expected 11 muse tables, found %', n; END IF;
   RAISE NOTICE 'PASS: % muse tables', n;
 
   SELECT count(*) INTO n FROM pg_class c JOIN pg_namespace ns ON ns.oid=c.relnamespace
    WHERE ns.nspname='public' AND c.relname LIKE 'muse\_%' AND c.relkind='v';
-  IF n <> 15 THEN RAISE EXCEPTION 'expected 15 muse views (11 v1 + 4 v2), found %', n; END IF;
+  IF n <> 11 THEN RAISE EXCEPTION 'expected 11 muse views, found %', n; END IF;
   RAISE NOTICE 'PASS: % muse views', n;
 
   -- No existing Control Hub object may have been altered by this migration.
@@ -57,11 +57,9 @@ BEGIN
   RAISE NOTICE 'PASS: seed volumes';
 END $$;
 
--- Idempotency: re-running the migration must not duplicate seeds. v1 was
--- already applied twice by verify-muse-sql.sh; once v2 is on top, the file to
--- re-run is v2 (v1 would fail loudly on the widened views, by design).
-\echo '== C. seed idempotency (re-applying v2 migration) =='
-\i supabase/migrations/20260927120000_muse_mission_board.sql
+-- Idempotency: re-running the migration must not duplicate seeds.
+\echo '== C. seed idempotency (re-applying migration) =='
+\i supabase/migrations/20260925120000_muse_executive_layer.sql
 DO $$
 DECLARE d int; l int; cf int;
 BEGIN
@@ -69,7 +67,7 @@ BEGIN
   SELECT count(*) INTO l FROM public.muse_open_loops;
   SELECT count(*) INTO cf FROM public.muse_source_conflicts;
   IF d <> 8 THEN RAISE EXCEPTION 'domains duplicated on re-apply: %', d; END IF;
-  IF l <> 14 THEN RAISE EXCEPTION 'open loops duplicated on re-apply: %', l; END IF;
+  IF l <> 13 THEN RAISE EXCEPTION 'open loops duplicated on re-apply: %', l; END IF;
   IF cf <> 1 THEN RAISE EXCEPTION 'conflicts duplicated on re-apply: %', cf; END IF;
   RAISE NOTICE 'PASS: migration is idempotent (% domains, % loops, % conflicts)', d, l, cf;
 END $$;
@@ -266,22 +264,21 @@ FROM public.muse_improvement_ledger ORDER BY created_at;
 DO $$
 DECLARE r record;
 BEGIN
-  -- v1's RUNNING row is mapped to MEASURING by the v2 migration.
-  SELECT * INTO r FROM public.muse_improvement_ledger WHERE status='MEASURING' LIMIT 1;
+  SELECT * INTO r FROM public.muse_improvement_ledger WHERE status='RUNNING' LIMIT 1;
   IF r.verdict <> 'PENDING' THEN RAISE EXCEPTION 'a running intervention cannot carry a verdict'; END IF;
   IF r.data_status <> 'NOT_MEASURED' THEN RAISE EXCEPTION 'unmeasured result must read NOT_MEASURED, got %', r.data_status; END IF;
   RAISE NOTICE 'PASS: ledger refuses a verdict before measurement';
 
   -- A claimed result is not a verified one.
-  UPDATE public.muse_improvements SET actual_result='8 domains mapped'
-   WHERE status='MEASURING';
-  SELECT * INTO r FROM public.muse_improvement_ledger WHERE status='MEASURING' LIMIT 1;
+  UPDATE public.muse_improvements SET actual_result='8 domains mapped', status='MEASURED'
+   WHERE status='RUNNING';
+  SELECT * INTO r FROM public.muse_improvement_ledger WHERE status='MEASURED' LIMIT 1;
   IF r.data_status <> 'NEEDS_VERIFICATION'
     THEN RAISE EXCEPTION 'a CLAIMED measurement must read NEEDS_VERIFICATION, got %', r.data_status; END IF;
   RAISE NOTICE 'PASS: agent-claimed result reads NEEDS_VERIFICATION until system/live verified';
 
-  UPDATE public.muse_improvements SET verification_state='LIVE_VERIFIED' WHERE status='MEASURING';
-  SELECT * INTO r FROM public.muse_improvement_ledger WHERE status='MEASURING' LIMIT 1;
+  UPDATE public.muse_improvements SET verification_state='LIVE_VERIFIED' WHERE status='MEASURED';
+  SELECT * INTO r FROM public.muse_improvement_ledger WHERE status='MEASURED' LIMIT 1;
   IF r.data_status <> 'KNOWN' THEN RAISE EXCEPTION 'live-verified result should read KNOWN, got %', r.data_status; END IF;
   RAISE NOTICE 'PASS: only live verification promotes a result to KNOWN';
 END $$;
@@ -409,4 +406,4 @@ BEGIN
 END $$;
 
 \echo ''
-\echo 'ALL MUSE v1 SQL CHECKS PASSED'
+\echo 'ALL MUSE SQL CHECKS PASSED'

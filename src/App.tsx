@@ -25,10 +25,6 @@ import MuseOpenLoopsPage from "./pages/muse/MuseOpenLoopsPage";
 import MuseImprovementsPage from "./pages/muse/MuseImprovementsPage";
 import MuseSourcesPage from "./pages/muse/MuseSourcesPage";
 import MuseSystemsPage from "./pages/muse/MuseSystemsPage";
-import MuseMissionsPage from "./pages/muse/MuseMissionsPage";
-import MuseDailyPage from "./pages/muse/MuseDailyPage";
-import MuseAgentQueuePage from "./pages/muse/MuseAgentQueuePage";
-import MuseVerificationPage from "./pages/muse/MuseVerificationPage";
 
 const queryClient = new QueryClient();
 
@@ -64,10 +60,6 @@ const App = () => (
                 RequireSession, matching how TaxShell is guarded. */}
             <Route path="/muse" element={<MuseShell />}>
               <Route index element={<MuseBriefPage />} />
-              <Route path="missions" element={<MuseMissionsPage />} />
-              <Route path="daily" element={<MuseDailyPage />} />
-              <Route path="queue" element={<MuseAgentQueuePage />} />
-              <Route path="verification" element={<MuseVerificationPage />} />
               <Route path="portfolio" element={<MusePortfolioPage />} />
               <Route path="loops" element={<MuseOpenLoopsPage />} />
               <Route path="improvements" element={<MuseImprovementsPage />} />

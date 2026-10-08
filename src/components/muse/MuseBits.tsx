@@ -17,8 +17,6 @@ import {
   verificationTone,
   priorityTone,
   stateTone,
-  taskStateTone,
-  verdictTone,
 } from "@/lib/muse/museFormat";
 import type { MuseDataStatus, MuseSystemStatus, MuseVerificationState } from "@/lib/muse/types";
 
@@ -58,22 +56,6 @@ export function StateBadge({ state }: { state: string | null | undefined }) {
   return (
     <Badge variant={stateTone(state)} className="font-mono text-[10px]">
       {state ?? "—"}
-    </Badge>
-  );
-}
-
-export function TaskStateBadge({ state }: { state: string | null | undefined }) {
-  return (
-    <Badge variant={taskStateTone(state)} className="font-mono text-[10px]">
-      {state ?? "—"}
-    </Badge>
-  );
-}
-
-export function VerdictBadge({ verdict }: { verdict: string | null | undefined }) {
-  return (
-    <Badge variant={verdictTone(verdict)} className="font-mono text-[10px]">
-      {verdict ?? "PENDING"}
     </Badge>
   );
 }

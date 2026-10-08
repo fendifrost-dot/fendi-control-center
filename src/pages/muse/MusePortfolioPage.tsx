@@ -45,11 +45,6 @@ function DomainCard({ row, kpis }: { row: MusePortfolioRow; kpis: MuseKpiRow[] }
             <Badge variant="outline" className="font-mono text-[10px]">
               {row.status}
             </Badge>
-            {row.attention_flag === "UNDER_ATTENDED" && (
-              <Badge variant="secondary" className="font-mono text-[10px]">
-                under-attended
-              </Badge>
-            )}
             <DataStatusBadge status={row.data_status} />
           </div>
         </div>
@@ -61,7 +56,7 @@ function DomainCard({ row, kpis }: { row: MusePortfolioRow; kpis: MuseKpiRow[] }
           <Counter label="decisions" value={row.decisions_pending} tone="warn" />
           <Counter label="conflicts" value={row.open_conflicts} tone="bad" />
           <Counter label="unhealthy" value={row.unhealthy_systems} tone="bad" />
-          <Counter label="improving" value={row.active_improvements} />
+          <Counter label="1% active" value={row.active_improvements} />
         </div>
 
         <div className="grid gap-3 sm:grid-cols-2">

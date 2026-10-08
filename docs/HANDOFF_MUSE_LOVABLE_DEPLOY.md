@@ -11,11 +11,6 @@ Design reference: [`docs/MUSE_EXECUTIVE_LAYER.md`](./MUSE_EXECUTIVE_LAYER.md).
 ## Status — COMPLETE (2026-09-26, 22:30 UTC)
 
 **Steps 1, 1a, 2, 3, 5 and 6 are all DONE and verified. Do not re-run this handoff.**
-
-> ⚠️ **Once the v2 mission-board migration (`20260927120000_muse_mission_board.sql`) is applied,
-> this v1 file must never be re-run on its own** — its views have fewer columns than v2's and it
-> will stop with `cannot drop columns from view`. Re-run the v2 file instead; it is idempotent.
-> See [`HANDOFF_MUSE_MISSION_BOARD_DEPLOY.md`](./HANDOFF_MUSE_MISSION_BOARD_DEPLOY.md).
 Re-running the migration is harmless (it is idempotent) but it is unnecessary load on a
 Tiny Lovable Cloud instance.
 

@@ -12,19 +12,15 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 import { useQuery, type UseQueryResult } from "@tanstack/react-query";
 import { supabase } from "@/integrations/supabase/client";
 import type {
-  MuseAgentTaskRow,
   MuseBriefRow,
   MuseConflictRow,
   MuseDecisionRow,
-  MuseImpactRow,
   MuseImprovementRow,
   MuseKpiRow,
-  MuseMissionRow,
   MuseOpenLoopRow,
   MusePortfolioRow,
   MuseSourceAuthorityRow,
   MuseSystemHealthRow,
-  MuseVerificationQueueRow,
 } from "./types";
 
 /**
@@ -45,10 +41,6 @@ export const MUSE_VIEWS = {
   sources: "muse_source_authority_state",
   conflicts: "muse_source_conflicts_open",
   improvements: "muse_improvement_ledger",
-  missions: "muse_mission_board",
-  agentQueue: "muse_agent_queue",
-  verificationQueue: "muse_verification_queue",
-  impact: "muse_impact_ledger",
 } as const;
 
 interface ReadOptions {
@@ -144,43 +136,6 @@ export function useMuseKpis(): UseQueryResult<MuseKpiRow[], Error> {
   return useQuery({
     queryKey: ["muse", "kpis"],
     queryFn: () => readView<MuseKpiRow>(MUSE_VIEWS.kpis, { orderBy: "sort_order" }),
-    ...COMMON,
-  });
-}
-
-export function useMuseMissions(): UseQueryResult<MuseMissionRow[], Error> {
-  return useQuery({
-    queryKey: ["muse", "missions"],
-    queryFn: () => readView<MuseMissionRow>(MUSE_VIEWS.missions, { orderBy: "priority" }),
-    ...COMMON,
-  });
-}
-
-export function useMuseAgentQueue(): UseQueryResult<MuseAgentTaskRow[], Error> {
-  return useQuery({
-    queryKey: ["muse", "agent-queue"],
-    queryFn: () => readView<MuseAgentTaskRow>(MUSE_VIEWS.agentQueue, { orderBy: "priority_rank" }),
-    ...COMMON,
-  });
-}
-
-export function useMuseVerificationQueue(): UseQueryResult<MuseVerificationQueueRow[], Error> {
-  return useQuery({
-    queryKey: ["muse", "verification-queue"],
-    queryFn: () =>
-      readView<MuseVerificationQueueRow>(MUSE_VIEWS.verificationQueue, {
-        orderBy: "claimed_at",
-        ascending: false,
-      }),
-    ...COMMON,
-  });
-}
-
-export function useMuseImpact(): UseQueryResult<MuseImpactRow[], Error> {
-  return useQuery({
-    queryKey: ["muse", "impact"],
-    queryFn: () =>
-      readView<MuseImpactRow>(MUSE_VIEWS.impact, { orderBy: "implemented_at", ascending: false }),
     ...COMMON,
   });
 }
