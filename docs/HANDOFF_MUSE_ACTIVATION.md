@@ -20,7 +20,7 @@ Everything is **deployed**. Nothing is **operating**. This handoff makes work fl
 | **Write path ever used** | ❌ **never** | `muse_workboard_requests` = **0 rows** |
 | **Board content** | ❌ empty | `muse_missions` 0 · `muse_improvement_tasks` 0 · `muse_work_updates` 0 |
 | **Muse's credential** | ⚠️ read-only | every read in `muse_access_audit` is labelled `env-bootstrap` (the `MUSE_API_TOKEN` secret), which **cannot** write |
-| Write-capable token | ⚠️ not Muse's | the only row in `muse_api_tokens` is `thoth`, scopes `read`, `workboard:write`. **Thoth is not the Muse agent; Muse is Enki** (confirmed by Fendi 2026-10-08). `thoth` is the token minted on Fendi's Mac on 2026-09-26 for `verify-muse-live.mjs` ([`HANDOFF_MUSE_LOVABLE_DEPLOY.md`](./HANDOFF_MUSE_LOVABLE_DEPLOY.md)); it later gained `workboard:write`, apparently on the mistaken belief that it was Muse's |
+| `thoth` token | ✅ read-only again (2026-10-08, Claude) | `thoth` is Fendi's verification token (minted on Fendi's Mac 2026-09-26 for `verify-muse-live.mjs`), **not** Muse's. Muse is **Enki**. It had been given `workboard:write` by mistake and never used it. Scope set back to `{read}`: `UPDATE 1`, verified |
 | Grok Bot runtime | ❌ not wired | nothing reads `/executive/agent-queue` or writes back |
 | Signed-in UI (`/muse/missions`, `/daily`, `/agents`, `/impact`) | ❓ never observed | every check so far hit the login redirect |
 
@@ -42,19 +42,61 @@ per agent, or the audit trail can't tell Muse from Grok.
 
 ## Who does what
 
-| Step | Who can execute it |
-|---|---|
-| 1. Give Enki (Muse) its write credential | An agent with database access to mint it, plus whoever configures Enki's runtime to install it |
-| 2. Mint Grok Bot's own token | An agent with database access: Lovable SQL editor, or the Lovable MCP `query_database` tool |
-| 3. Prove the write path end to end | **Grok Bot** (needs only HTTPS + its token from step 2) |
-| 4. Run the daily loop | **Grok Bot** |
-| 5. Signed-in UI check | An agent with a browser already signed in to the Control Hub |
-| 6. Owner decisions | **Fendi only** |
+Ordered so Fendi is the **last resort**. The only thing in this whole list that truly needs a human
+is the four business decisions (step 6). Everything else needs either an agent's own runtime or
+database access.
 
-Grok Bot can execute steps 3 and 4 on its own once step 2 is done. Steps 1 and 2 need someone
-with secret or database access. Grok should not guess these or work around them.
+| # | Step | Status / who |
+|---|---|---|
+| 0 | Return `thoth` to read-only | ✅ **done** by Claude Code, 2026-10-08 |
+| 1 | Enki token: **generate** the secret and keep it in Enki's own secret store | **Enki** itself if its platform has a secret store; otherwise Fendi |
+| 1b | Enki token: **register its hash** (`label = 'enki'`) | **Claude agent** with the Lovable MCP (`query_database`) or the Lovable SQL editor. The hash is not a secret and can be pasted to it |
+| 2 | Grok token: generate and keep the secret | **Grok Bot** itself if its runtime has a secret store; otherwise Fendi |
+| 2b | Grok token: register its hash (`label = 'grok-bot'`) | **Claude agent**, same as 1b |
+| 3 | Prove the write path end to end | **Grok Bot** (HTTPS + its token) |
+| 4 | Daily operating loop | **Grok Bot** |
+| 5 | Signed-in UI check | **Claude agent** with a browser signed in to the Control Hub; otherwise Fendi (2 minutes, 4 pages) |
+| 6 | Four business decisions | **Fendi only** |
 
----
+**Why the agents, not Claude Code, hold the secrets.** A token's plaintext must live only where it
+is used. Claude Code's cloud sandbox is not allowed to create credentials. The safe pattern:
+
+1. The **agent that will use the token** generates it and stores it in its own secret store.
+2. It computes `sha256(token)` and passes **only the hash** to a Claude agent with database access.
+   A hash is safe to share: it can't be turned back into the token.
+3. The Claude agent inserts the hash. The plaintext never leaves the agent that owns it.
+
+One-liner for step 2 of that pattern, if the agent or person has a shell:
+`T=$(openssl rand -hex 32); echo "store this in your secret store: $T"; printf %s "$T" | sha256sum | cut -d' ' -f1`
+(only the last line, the hash, goes to the Claude agent).
+
+### Paste-ready prompts
+
+**→ Enki (Muse):**
+> Generate a random 32-byte secret (64 hex chars) and store it in your own secret store as
+> `MUSE_TOKEN`. Do not show it to anyone. Compute its SHA-256 hex digest and report **only the
+> digest**, labelled "enki hash". From now on, send `Authorization: Bearer $MUSE_TOKEN` on every
+> call to `muse-executive` (reads) and `muse-workboard` (writes), instead of the bootstrap key.
+> Coordinates and rules: `docs/HANDOFF_MUSE_ACTIVATION.md` in fendifrost-dot/fendi-control-center.
+
+**→ Grok Bot:**
+> Same as Enki, but store it as `MUSE_TOKEN` in *your* runtime and report "grok-bot hash". Once
+> the hash is registered, run steps 3 and 4 of `docs/HANDOFF_MUSE_ACTIVATION.md` and report the
+> results listed under "Report back".
+
+**→ Claude agent with the Lovable MCP or SQL editor (steps 1b, 2b):**
+> Register these Muse API token hashes in the Control Center database (Lovable project
+> `7fce9fc6-fd96-4a31-8a89-649f00298c51`). Run the `insert` in step 2 of
+> `docs/HANDOFF_MUSE_ACTIVATION.md` once per hash, but with the **hash value directly** in
+> `token_sha256` (no `digest()` call, because you have the hash, not the token). Use label `enki`
+> for Enki's hash and `grok-bot` for Grok's. Then run the token-register check in step 1 and
+> report the rows (labels and scopes only).
+
+**→ Claude agent with a signed-in browser (step 5):** run step 5 below and report what renders.
+
+**→ Fendi (only if an agent above can't):** generate the token(s) with the one-liner above on
+your Mac, put each plaintext into Enki's / Grok's settings, and send the hashes to Claude. Then
+make the four decisions in step 6.
 
 ## Step 1 — Give Enki (Muse) its own write credential
 
@@ -68,7 +110,8 @@ log) and has no token that can write. Writes need a hashed token with `workboard
    `muse-executive` for reads and `muse-workboard` for writes.
 3. **Do not hand Enki the `thoth` token.** `thoth` is Fendi's verification credential, not
    Enki's. It has never written anything (`muse_workboard_requests` = 0 rows), and its
-   `workboard:write` scope was granted to the wrong agent. Return it to read-only:
+   `workboard:write` scope was granted to the wrong agent. **Done 2026-10-08** (Claude Code via
+   Lovable MCP, `UPDATE 1`, scopes now `{read}`). For reference, the statement was:
 
    ```sql
    update public.muse_api_tokens set scopes = array['read'] where label = 'thoth';
@@ -109,6 +152,9 @@ values ('grok-bot',
         'Grok Bot chief-of-staff credential; read + workboard write');
 -- Expected: INSERT 0 1
 ```
+
+**If you were given a hash rather than the token** (the normal path; see "Who does what"), put
+the hash in directly: `token_sha256 = '<64-hex-hash>'`, with no `digest()` call.
 
 Put the plaintext in Grok Bot's runtime secret store as `MUSE_TOKEN`. Then verify:
 
