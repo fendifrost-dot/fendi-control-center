@@ -35,3 +35,5 @@ jobs:
         run: deno test supabase/functions/_shared/creditKnowledgeRetrieval_test.ts --allow-env --no-check
       - name: Deno tests (Muse executive contract)
         run: deno test supabase/functions/muse-executive/contract.test.ts --allow-env --no-check
+      - name: Deno tests (Muse workboard contract)
+        run: deno test supabase/functions/muse-workboard/contract.test.ts --allow-env --no-check

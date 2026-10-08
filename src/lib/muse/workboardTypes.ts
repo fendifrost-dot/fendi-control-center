@@ -114,6 +114,35 @@ export interface MuseVerificationQueueRow {
   as_of: string;
 }
 
+export interface MuseWorkFeedRow {
+  id: string;
+  domain_key: string | null;
+  domain_name: string | null;
+  mission_id: string | null;
+  improvement_id: string | null;
+  task_id: string | null;
+  actor: string | null;
+  update_type: string | null;
+  message: string | null;
+  evidence_ref: string | null;
+  created_at: string | null;
+  as_of: string | null;
+}
+
+export type DailyReportCadence = "START_OF_DAY" | "END_OF_DAY";
+
+export interface MuseDailyReportRow {
+  id: string;
+  report_date: string;
+  cadence: DailyReportCadence;
+  actor: string;
+  message: string;
+  sections: Record<string, string> | null;
+  evidence_ref: string | null;
+  created_at: string;
+  as_of: string | null;
+}
+
 export interface MuseImprovementResultRow {
   improvement_id: string;
   domain_key: string;

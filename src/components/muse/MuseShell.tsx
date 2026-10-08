@@ -18,6 +18,8 @@ const MUSE_NAV: Array<{ to: string; label: string }> = [
   { to: "/muse/missions", label: "Missions" },
   { to: "/muse/daily", label: "Daily 1%" },
   { to: "/muse/agents", label: "Agent queue" },
+  { to: "/muse/feed", label: "Work feed" },
+  { to: "/muse/reports", label: "Reports" },
   { to: "/muse/impact", label: "Impact" },
   { to: "/muse/portfolio", label: "Portfolio" },
   { to: "/muse/loops", label: "Open loops" },

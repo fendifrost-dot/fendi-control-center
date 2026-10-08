@@ -131,7 +131,24 @@ export const RESOURCES: Record<string, ResourceSpec> = {
     resource: "work-feed", view: "muse_work_feed",
     authoritative_source: "Control Hub Muse append-only work update feed",
     timestampColumn: "created_at", orderBy: { column: "created_at", ascending: false },
-    filters: { domain: "domain_key", actor: "actor", type: "update_type" }, defaultLimit: 200, maxLimit: 500,
+    filters: {
+      domain: "domain_key",
+      actor: "actor",
+      type: "update_type",
+      // Same ids append_update writes. Exact match, so a save can be read back
+      // without scanning the feed.
+      task_id: "task_id",
+      improvement_id: "improvement_id",
+      mission_id: "mission_id",
+    },
+    defaultLimit: 200, maxLimit: 500,
+  },
+  "daily-reports": {
+    resource: "daily-reports", view: "muse_daily_report_board",
+    authoritative_source: "Control Hub Muse daily operating reports",
+    timestampColumn: "created_at", orderBy: { column: "created_at", ascending: false },
+    filters: { actor: "actor", cadence: "cadence", report_date: "report_date" },
+    defaultLimit: 60, maxLimit: 400,
   },
   verifications: {
     resource: "verifications", view: "muse_verifications",

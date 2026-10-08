@@ -28,6 +28,8 @@ import MuseMissionBoardPage from "./pages/muse/MuseMissionBoardPage";
 import MuseDailyImprovementPage from "./pages/muse/MuseDailyImprovementPage";
 import MuseAgentQueuePage from "./pages/muse/MuseAgentQueuePage";
 import MuseImpactLedgerPage from "./pages/muse/MuseImpactLedgerPage";
+import MuseWorkFeedPage from "./pages/muse/MuseWorkFeedPage";
+import MuseDailyReportsPage from "./pages/muse/MuseDailyReportsPage";
 
 const queryClient = new QueryClient();
 
@@ -64,6 +66,8 @@ const App = () => (
               <Route path="missions" element={<MuseMissionBoardPage />} />
               <Route path="daily" element={<MuseDailyImprovementPage />} />
               <Route path="agents" element={<MuseAgentQueuePage />} />
+              <Route path="feed" element={<MuseWorkFeedPage />} />
+              <Route path="reports" element={<MuseDailyReportsPage />} />
               <Route path="impact" element={<MuseImpactLedgerPage />} />
               <Route path="portfolio" element={<MusePortfolioPage />} />
               <Route path="loops" element={<MuseOpenLoopsPage />} />
