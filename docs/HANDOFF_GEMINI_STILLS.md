@@ -1,6 +1,24 @@
 # Direct Gemini stills — verification-first handoff, 11 October 2026
 
-## State
+## Deploy status — updated 11 October 2026 (post-merge)
+
+MERGED + EDGE-DEPLOYED. GENERATION NOT YET TESTED. Merged on the owner's explicit instruction ("merge commit"); the owner's instruction stands in for the Class C sign-offs below — no separate architecture/security review was recorded.
+
+| Step | Evidence |
+|--|--|
+| CC PR #46 squash-merged | `03bf444213c1f9556d32cf555f9432293e6919f8` |
+| AVT PR #231 squash-merged | `a14bc6ceabca172fa797fb59aafa66589d76061d` |
+| SQL | **None needed — checked live**: AVT enum `provider_name` already contains `gemini`; all 10 `provider_jobs` columns the route uses exist; CC `tool_execution_logs` has no provider CHECK and has every column `startLog`/`finishLog` write |
+| CC edge redeploy (Lovable) | `image-providers-gemini-generate` only, from `03bf444`. Secrets `Frost_Gemini`, `AVT_PROXY_KEY` present (yes/no only) |
+| CC probe | unauthenticated POST `{}` → **401** `{"errorCode":"UNAUTHORISED"}` (control: unknown function → 404) |
+| AVT edge redeploy (Lovable) | `world-still-proxy`, `avt-mcp`, from `a14bc6c`. Secrets `CONTROL_CENTER_URL`, `AVT_PROXY_KEY` present |
+| AVT probe | unauthenticated POST → **401** platform `UNAUTHORIZED_NO_AUTH_HEADER` (verify_jwt = true; expected) |
+| Free dry-run via AVT MCP | **200**, `ok:true`, `provider:"gemini"`, `dryRun:true`, `billed:false`, `credentialsConfigured:true`, `modelAccessVerified:false`, `referencesChecked:1`, `referencesSent:0` — every expected field matched |
+| Frontend Publish | not needed, not done |
+
+**Still NOT done:** (1) `scripts/qa/gemini_storage_rls.mjs` not run — needs two disposable identities; (2) no paid call yet, so Google model entitlement/billing on `Frost_Gemini` is unverified (`modelAccessVerified:false`); (3) no frontend model picker. Watch on the first paid call: `maxOutputTokens: 4096` includes thinking tokens at `thinkingLevel: "Medium"` — a `finishReason: MAX_TOKENS` with no image (`no_final_image`) would mean that budget is too tight; raise it in `contract.ts` (and `COST_BOUND_USD`) rather than retrying blindly.
+
+## State (at PR time — superseded above)
 
 CODED, NOT MERGED, NOT DEPLOYED, NO GENERATION. Implementation: `715fdd5521062dd1131db1e0f192cacdfc61964a` on `codex/gemini-stills`, based on `19930e4bc0fbc268381749dfe4b5f8df759a279a`.
 Companion AVT implementation: `be9ee5cdfe89006d489e1d1c61884367cfdfd7c7` in `fendifrost-dot/ai-video-tool`, same branch name. Published through the authenticated GitHub connector; its implementation tree hashes match the locally tested trees exactly. This handoff commit only adds documentation.
