@@ -1,0 +1,55 @@
+# Direct Gemini stills — verification-first handoff, 11 October 2026
+
+## State
+
+CODED, NOT MERGED, NOT DEPLOYED, NO GENERATION. Implementation: `715fdd5521062dd1131db1e0f192cacdfc61964a` on `codex/gemini-stills`, based on `19930e4bc0fbc268381749dfe4b5f8df759a279a`.
+Companion AVT implementation: `be9ee5cdfe89006d489e1d1c61884367cfdfd7c7` in `fendifrost-dot/ai-video-tool`, same branch name. Published through the authenticated GitHub connector; its implementation tree hashes match the locally tested trees exactly. This handoff commit only adds documentation.
+
+The user asked to wire Nano Banana through Gemini/Control Center into AVT and correctly noted that Runway also offers it. Existing CC Gemini code handled OCR and Veo, not native still generation. Existing Runway generation code is video-only. Do not infer API funding from a web-app credit balance or tell the user to top up an unverified account.
+
+## Exact route and scope
+
+`AVT world-still-proxy` → `CC image-providers-gemini-generate` → Google `gemini-nano-banana-2.1:generateContent`.
+
+- CC owns existing secret name `Frost_Gemini`. Its live presence, billing status and model entitlement are **not verified**. Do not ask for the key in chat.
+- Shared `AVT_PROXY_KEY` authenticates the CC endpoint; no provider credential goes into AVT or the browser. This function is **not** added to the browser's generic CC allowlist.
+- Google bills this route. It does not spend Higgsfield API dollars, Higgsfield web credits, Runway app credits, or Runway API credits.
+- Model is pinned to `gemini-nano-banana-2.1`, one candidate per request, 1K/2K. Up to 14 references, subject to input-token and byte limits. Reference bytes are sent inline, not signed URLs, to Google.
+- References must be AVT signed URLs on `qoyxgnkvjukovkrvdaiq.supabase.co`, from approved buckets under the authenticated caller's UID; project buckets must also match the project. Redirects, traversal, external hosts and arbitrary URLs fail before Google submission. AVT first resolves owned records and signs as the user.
+- 8 MiB per image, 12 MiB combined reference bytes; no silent compression, resizing or dropping references. At most 16,384 counted input tokens and 4,096 output tokens (including thinking budget); cost gate uses a conservative **$0.147456 list-rate upper estimate per request**, not an invoice. The AVT reference-rate display rounds this to $0.1475. Use a $0.15 or greater explicit cap if a test is authorised. One 2K output image's published rate alone is $0.0504, but input/thinking costs are additional.
+- Count tokens before generation. A count failure/unsupported count API stops with no generation. No automatic retry. Transport ambiguity after submission is possibly billed, never recorded as $0. Usage and provider-reported model version survive successful/no-image responses. Actual billed amount remains null.
+- Audit must start before generation; image bytes and signed URLs are not logged. Outputs are returned to AVT, which stores pending, unselected project assets and finalises its job. No shot/variation is auto-selected.
+
+## What was verified locally
+
+- Clean `npm ci --ignore-scripts --no-audit --no-fund`, production build, app typecheck and full `npm test`: passed. The new edge tests are included in normal `npm test`, not hidden behind a separate command.
+- New tests: **4 unit, 7 mocked integration, 0 provider-live, 0 real-media benchmark, 0 deployment smoke**. They test fixed routing/cost/input limits, owner URL scope, bytes/MIME, free dry-run, failed token counting, no paid retries, output extraction, usage and redaction.
+- Edge entry bundled with esbuild (remote HTTPS imports external); local edge graph typechecked with ambient declarations for Deno/CDN imports. These are compile checks, **not a Deno runtime boot or live Google call**.
+- No source dependency/lockfile change, no SQL migration, no provider key change, no production data mutation, no spend.
+
+## Gates before merge/deploy
+
+This is Class C (provider, money, private reference delivery). AVT's `CLAUDE.md` / `docs/ARCHITECTURE_REVIEW.md` require architecture, product and security sign-offs; none has been obtained for this change. Do not invent approvals or self-approve the three roles. The companion RLS test is also outstanding.
+
+Review explicitly: list-rate bound vs actual bill; truncated output at the bounded token budget; countTokens support for this model; protected file ownership; byte/memory limits; Google-side timeout ambiguity; AVT job replay handling. Verify normal Grok routing remains unchanged and production wardrobe/performance work stays isolated.
+
+## After the reviews: deploy through Lovable only
+
+1. Re-fetch both repos and inspect active-agent handoffs. Merge the reviewed CC change and its AVT companion through normal PRs. Do not force-push unrelated branches.
+2. CC Lovable project `7fce9fc6-fd96-4a31-8a89-649f00298c51`, backend `wkzwcfmvnwolgrdpnygc`: redeploy **only `image-providers-gemini-generate`** from the reviewed merge. No SQL and no frontend Publish required. Do not use Supabase CLI/dashboard.
+3. Unauthenticated POST to `/functions/v1/image-providers-gemini-generate` with `{}` must yield **401 `UNAUTHORISED`**. 404 means missing deploy; 503/boot failure is not success. No generation occurs on this probe.
+4. Through AVT's signed-in MCP, run the **dryRun body in the companion handoff** after AVT edge deployment. Expect `ok:true`, model `gemini-nano-banana-2.1`, `billingAccount:"Google Gemini API"`, `dryRun:true`, `billed:false`, `credentialsConfigured:true`, `modelAccessVerified:false`, `referencesSent:0`. Missing `Frost_Gemini` must surface a configuration failure, not a fallback.
+5. Run `scripts/qa/gemini_storage_rls.mjs` in AVT against two existing disposable identities/objects. Positive own-file controls must pass; cross-owner and anonymous signing must fail. These credentials belong in the runner's secret environment, never chat. Existing RISK-001 is not fixed by this PR; a failure is a real blocker, not a reason to weaken the test.
+6. **Paid reference submission is not authorised by this handoff.** A previous attempted portrait-upload test was blocked by automatic approval review; that is not permission to switch routes and retry it. First reconcile the user's current generation authorisation and reference-transfer scope. Any later authorised live test is one unselected still with a new Gemini job, no auto-retry; inspect the raw response, filed image and billing evidence. Do not change the approved rider/shot selections automatically.
+
+## Primary sources checked 11 October 2026
+
+- https://ai.google.dev/gemini-api/docs/models/gemini-nano-banana-2.1 — stable ID, sizes and reference support.
+- https://ai.google.dev/gemini-api/docs/generate-content/image-generation — documented v1 REST generateContent, `responseFormat.image`, reference inlineData and thought parts.
+- https://ai.google.dev/api/tokens — documented v1beta countTokens endpoint.
+- https://ai.google.dev/gemini-api/docs/pricing — input $1.50/M, text/thinking output $7.50/M, image output $30/M.
+- https://docs.dev.runwayml.com/guides/models/ — Runway aliases `gemini_image3.1_flash` (Nano Banana 2), `gemini_image3_pro` (Pro), and legacy `gemini_2.5_flash`. They are not interchangeable endpoint/model IDs for the new Google route. No Runway API balance read was performed.
+
+## Report back
+
+PR/merge revisions; three review outcomes; exact redeployed function names; unauthenticated/dry-run/RLS results; whether key/model access was actually checked; any paid test's input IDs, request/model version, usage, invoice-unknown status and output ID. Do not call this live, funded or photoreal until the corresponding evidence exists.
