@@ -1,5 +1,9 @@
 project_id = "wkzwcfmvnwolgrdpnygc"
 
+# Still-image route; authenticates AVT server calls with AVT_PROXY_KEY internally.
+[functions.image-providers-gemini-generate]
+verify_jwt = false
+
 [functions.drive-sync]
 verify_jwt = false
 

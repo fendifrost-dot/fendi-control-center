@@ -133,7 +133,7 @@ export async function promptHash(text: string): Promise<string> {
 
 /** Write the initial "attempted" log row and return its id. */
 export async function startLog(params: {
-  provider: ProviderName | "anthropic";
+  provider: ProviderName | "anthropic" | "gemini";
   toolName: string;
   audit: AvtAuditFields;
   modelVariant: string | undefined;
