@@ -31,7 +31,8 @@ describe("unit: Gemini route contract", () => {
     expect(() => parseInput({ ...raw, references: [{ ...raw.references[0], url: "https://example.com/a.png" }] })).toThrow("reference_forbidden");
   });
   it("keeps output configuration explicit and validates MIME against bytes", () => {
-    expect(generationConfig(parseInput(raw))).toMatchObject({ maxOutputTokens: 4096, candidateCount: 1, responseFormat: { image: { aspectRatio: "9:16", imageSize: "2K" } } });
+    expect(generationConfig(parseInput(raw))).toMatchObject({ maxOutputTokens: 4096, candidateCount: 1, imageConfig: { aspectRatio: "9:16", imageSize: "2K" }, thinkingConfig: { thinkingLevel: "MEDIUM" } });
+    expect(generationConfig(parseInput(raw))).not.toHaveProperty("responseFormat");
     expect(decodeImage(data, "image/png")).toEqual(png);
     expect(() => decodeImage(data, "image/jpeg")).toThrow();
     expect(() => outputImage({ candidates: [{ content: { parts: [{ thought: true, inlineData: { data, mimeType: "image/png" } }] } }] })).toThrow("no_final_image");
