@@ -5,7 +5,11 @@ export const MAX_REFERENCES = 14;
 export const MAX_INPUT_TOKENS = 16_384;
 export const MAX_OUTPUT_TOKENS = 4_096;
 export const MAX_IMAGE_BYTES = 8 * 1024 * 1024;
-export const MAX_REFERENCE_BYTES = 12 * 1024 * 1024;
+// Google: "Inline image data limits your total request size (text prompts, system instructions, and inline bytes)
+// to 20MB" (ai.google.dev/gemini-api/docs/image-understanding). Base64 adds a third, so 14 MiB of reference bytes is
+// ~19.6 MB on the wire. The old 12 MiB cap refused the 7.5 MB identity portrait with two guides (12 Oct 2026).
+export const MAX_REQUEST_BYTES = 20_000_000;
+export const MAX_REFERENCE_BYTES = 14 * 1024 * 1024;
 // The answer is streamed, not buffered (answerStream.ts): this bounds bytes read and time spent, not memory held.
 export const MAX_ANSWER_BYTES = 48 * 1024 * 1024;
 // Conservative list-rate ceiling, NOT an invoice: all output tokens priced at the
