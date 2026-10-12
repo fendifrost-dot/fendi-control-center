@@ -15,6 +15,11 @@ export type BadgeTone = "default" | "secondary" | "destructive" | "outline";
 export const BRIEF_SECTIONS: Array<{ key: MuseBriefSection; label: string; blurb: string }> = [
   { key: "priorities", label: "Top priorities", blurb: "P0 and P1 loops that are still real" },
   { key: "decisions_required", label: "Decisions required", blurb: "Owed by a human owner" },
+  {
+    key: "workboard",
+    label: "Workboard (last 48 hours)",
+    blurb: "Exact ASSIGNMENT and NOTE bodies agents posted, newest first. Older posts stay on the workboard feed.",
+  },
   { key: "blockers", label: "Blockers", blurb: "Work that cannot move" },
   { key: "system_failures", label: "System & agent failures", blurb: "Derived from live telemetry" },
   { key: "waiting", label: "Waiting", blurb: "On someone or something else" },

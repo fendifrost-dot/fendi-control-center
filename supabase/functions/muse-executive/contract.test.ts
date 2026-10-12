@@ -2,13 +2,14 @@
  * Contract tests for the Muse executive read surface.
  * Run with: deno test supabase/functions/muse-executive/contract.test.ts
  */
-import { assert, assertEquals } from "https://deno.land/std@0.224.0/assert/mod.ts";
+import { assert, assertEquals, assertThrows } from "https://deno.land/std@0.224.0/assert/mod.ts";
 import {
   RESOURCES,
   redact,
   newestTimestamp,
   freshnessMinutes,
   rollUpStatus,
+  parseSince,
 } from "./contract.ts";
 
 Deno.test("resource map is a closed allowlist of muse_ views", () => {
@@ -35,6 +36,33 @@ Deno.test("work feed filters by the parent ids updates are written against", () 
   assertEquals(filters.task_id, "task_id");
   assertEquals(filters.improvement_id, "improvement_id");
   assertEquals(filters.mission_id, "mission_id");
+  assertEquals(RESOURCES["work-feed"].sinceColumn, "created_at");
+});
+
+Deno.test("workboard and assignments are first-class reads of the live board", () => {
+  const board = RESOURCES.workboard;
+  assertEquals(board.view, "muse_work_feed");
+  assertEquals(board.sinceColumn, "created_at");
+  assertEquals(board.orderBy, { column: "created_at", ascending: false });
+  assertEquals(board.filters?.mission_id, "mission_id");
+  assertEquals(board.filters?.type, "update_type");
+
+  const assignments = RESOURCES.assignments;
+  assertEquals(assignments.view, "muse_workboard_assignments");
+  assertEquals(assignments.sinceColumn, "created_at");
+  assertEquals(assignments.filters?.mission_id, "mission_id");
+  assert(assignments.defaultLimit <= assignments.maxLimit);
+});
+
+Deno.test("since accepts a UTC day or timestamp and rejects operators", () => {
+  assertEquals(parseSince(null), null);
+  assertEquals(parseSince("2026-10-12"), "2026-10-12T00:00:00.000Z");
+  assertEquals(parseSince("2026-10-12T01:22:30Z"), "2026-10-12T01:22:30.000Z");
+  assertEquals(parseSince("  2026-10-12T01:22:30.480371Z  "), "2026-10-12T01:22:30.480Z");
+  assertThrows(() => parseSince(""));
+  assertThrows(() => parseSince("2026-02-31"));
+  assertThrows(() => parseSince("2026-10-12T01:22:30+00:00"));
+  assertThrows(() => parseSince("2026-10-12 or created_at.gt.1"));
 });
 
 Deno.test("daily reports are a first-class read resource", () => {

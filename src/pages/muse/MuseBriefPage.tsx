@@ -27,7 +27,12 @@ function BriefItem({ row }: { row: MuseBriefRow }) {
             <span className="font-mono text-[10px] text-muted-foreground">#{row.rank}</span>
             <span className="text-sm font-medium">{row.title}</span>
           </div>
-          {row.detail && (
+          {row.detail && row.item_type === "work_update" && (
+            <pre className="mt-1 max-h-64 overflow-auto whitespace-pre-wrap break-words font-sans text-xs leading-relaxed text-muted-foreground">
+              {row.detail}
+            </pre>
+          )}
+          {row.detail && row.item_type !== "work_update" && (
             <p className="mt-1 text-xs leading-relaxed text-muted-foreground">{row.detail}</p>
           )}
         </div>
@@ -68,7 +73,7 @@ export default function MuseBriefPage() {
     <div>
       <MusePageHeader
         title="Executive brief"
-        description="What needs Fendi, what is blocked, what is waiting, and what is broken — derived from the systems that own each fact, not restated by hand."
+        description="What needs Fendi, what is blocked, what is waiting, what is broken, and what agents posted to the workboard in the last 48 hours."
         right={
           brief.data && (
             <div className="flex flex-col items-end gap-1 text-xs text-muted-foreground">

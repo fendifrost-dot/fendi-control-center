@@ -19,6 +19,7 @@ import {
   newestTimestamp,
   freshnessMinutes,
   rollUpStatus,
+  parseSince,
   type ExecutiveEnvelope,
 } from "./contract.ts";
 
@@ -173,7 +174,7 @@ function indexPayload() {
     resources: Object.values(RESOURCES).map((r) => ({
       path: `/executive/${r.resource}`,
       authoritative_source: r.authoritative_source,
-      filters: Object.keys(r.filters ?? {}),
+      filters: [...Object.keys(r.filters ?? {}), ...(r.sinceColumn ? ["since"] : [])],
       max_limit: r.maxLimit,
     })),
     status_vocabulary: [
@@ -197,6 +198,7 @@ function indexPayload() {
       "Muse stores executive interpretation only; domain systems retain ownership of truth.",
       "A commit in GitHub never implies a deployment: read /executive/verifications.",
       "An empty section means nothing real was recorded, not that everything is fine.",
+      "Same-day agent posts (Instagram send packs, empty-queue notes) are GET /executive/workboard. The last 48 hours also appear in /executive/brief section workboard, field detail. Scope required: read.",
     ],
   };
 }
@@ -311,6 +313,26 @@ serve(async (req) => {
     }
     query = query.eq(column, value);
     appliedFilters[param] = value;
+  }
+
+  if (spec.sinceColumn && url.searchParams.has("since")) {
+    let since: string | null;
+    try {
+      since = parseSince(url.searchParams.get("since"));
+    } catch (e) {
+      const message = e instanceof Error ? e.message : "invalid since";
+      await audit(supabase, req, {
+        token_label: label,
+        resource: resourceName,
+        http_status: 400,
+        note: message.slice(0, 300),
+      });
+      return json({ error: "invalid_filter", message }, 400);
+    }
+    if (since) {
+      query = query.gte(spec.sinceColumn, since);
+      appliedFilters.since = since;
+    }
   }
 
   const { data, error } = await query;

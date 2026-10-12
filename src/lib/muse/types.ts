@@ -45,12 +45,13 @@ export type MuseBriefSection =
   | "financial"
   | "system_failures"
   | "opportunities"
-  | "commitments";
+  | "commitments"
+  | "workboard";
 
 export interface MuseBriefRow {
   section: MuseBriefSection;
   rank: number;
-  item_type: "open_loop" | "decision" | "system";
+  item_type: "open_loop" | "decision" | "system" | "work_update";
   item_id: string;
   title: string;
   domain_key: string;
