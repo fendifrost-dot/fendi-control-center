@@ -161,7 +161,7 @@ describe("mocked integration: request body acceptance and large answers", () => 
     // A runtime that transfers enqueued chunks would leave the next body with empty images and no error.
     const detaching = async (_u: unknown, init: RequestInit) => {
       const reader = (init.body as ReadableStream<Uint8Array>).getReader();
-      for (;;) { const { done, value } = await reader.read(); if (done) break; if (value.byteLength > 100) structuredClone(value, { transfer: [value.buffer] }); }
+      for (;;) { const { done, value } = await reader.read(); if (done) break; if (value.byteLength > 100) structuredClone(value, { transfer: [value.buffer as ArrayBuffer] }); }
       return Response.json({ totalTokens: 1 });
     };
     const big = new Uint8Array(4096); big.set([137, 80, 78, 71, 13, 10, 26, 10]);
