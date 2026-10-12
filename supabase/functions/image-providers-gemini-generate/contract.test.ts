@@ -33,7 +33,11 @@ describe("unit: Gemini route contract", () => {
   it("keeps output configuration explicit and validates MIME against bytes", () => {
     expect(generationConfig(parseInput(raw))).toMatchObject({ maxOutputTokens: 4096, candidateCount: 1, imageConfig: { aspectRatio: "9:16", imageSize: "2K" }, thinkingConfig: { thinkingLevel: "MEDIUM" } });
     expect(generationConfig(parseInput(raw))).not.toHaveProperty("responseFormat");
-    expect(decodeImage(data, "image/png")).toEqual(png);
+    expect(decodeImage(data, "image/png")).toBe(png.length);
+    for (const n of [0, 1, 2, 3, 24569, 24570, 24571, 50001]) {
+      const b = Uint8Array.from({ length: n }, (_, i) => (i * 7919) % 256);
+      expect(encode(b)).toBe(Buffer.from(b).toString("base64"));
+    }
     expect(() => decodeImage(data, "image/jpeg")).toThrow();
     expect(() => outputImage({ candidates: [{ content: { parts: [{ thought: true, inlineData: { data, mimeType: "image/png" } }] } }] })).toThrow("no_final_image");
   });
@@ -73,9 +77,12 @@ describe("mocked integration: Google transport, no live provider", () => {
     expect(fetcher.mock.calls[0][1].headers).toBeUndefined();
     expect(fetcher.mock.calls[1][0]).toContain("/v1beta/models/");
     expect(fetcher.mock.calls[2][0]).toBe(`https://generativelanguage.googleapis.com/v1beta/models/${MODEL}:generateContent`);
-    const sent = JSON.parse(fetcher.mock.calls[2][1].body);
+    const text = (b: unknown) => typeof b === "string" ? b : new TextDecoder().decode(b as Uint8Array);
+    const sent = JSON.parse(text(fetcher.mock.calls[2][1].body));
     expect(sent.contents[0].parts[2]).toEqual({ inlineData: { mimeType: "image/png", data } });
     expect(JSON.stringify(sent)).not.toContain("?token=");
+    expect(sent.generationConfig).toMatchObject({ imageConfig: { aspectRatio: "9:16", imageSize: "2K" }, candidateCount: 1 });
+    expect(JSON.parse(text(fetcher.mock.calls[1][1].body))).toEqual({ contents: sent.contents });
   });
   it("fails closed when countTokens is unavailable or over budget", async () => {
     for (const counted of [Response.json({ totalTokens: 20_000 }), Response.json({}), new Response("error", { status: 404 })]) {

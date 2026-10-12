@@ -67,7 +67,7 @@ export async function run(input: Input, key: string, fetcher: typeof fetch = fet
   };
   // One request, no automatic retries. A lost response is possibly billed, never $0.
   try {
-    const images: { mimeType: string; data: string }[] = []; let bytesTotal = 0;
+    let images: { mimeType: string; data: string }[] = []; let bytesTotal = 0;
     for (const ref of input.references) {
       const r = await fetcher(ref.url, { redirect: "error", signal: timeout(15_000) });
       if (!r.ok) throw new Error("reference_download_failed");
@@ -78,20 +78,23 @@ export async function run(input: Input, key: string, fetcher: typeof fetch = fet
       if (!mimeType) throw new Error("reference_not_supported_image");
       images.push({ mimeType, data: encode(bytes) });
     }
-    const contents = requestContents(input, images);
+    // Serialise once and drop the image copies: worker memory, not Google, was the limit (12 Oct 2026).
+    const countBody = JSON.stringify({ contents: requestContents(input, images) });
+    const referencesSent = images.length; images = [];
+    const generateBody = `${countBody.slice(0, -1)},"generationConfig":${JSON.stringify(generationConfig(input))}}`;
     const headers = { "Content-Type": "application/json", "x-goog-api-key": key };
-    const count = await fetcher(`${GOOGLE}:countTokens`, { method: "POST", headers, body: JSON.stringify({ contents }), redirect: "error", signal: timeout(20_000) });
+    const count = await fetcher(`${GOOGLE}:countTokens`, { method: "POST", headers, body: countBody, redirect: "error", signal: timeout(20_000) });
     if (!count.ok) { refused = await googleError(count, key); throw new Error(`token_count_http_${count.status}`); }
     const counted = record(JSON.parse(new TextDecoder().decode(await boundedBytes(count, 64 * 1024))));
     if (!Number.isInteger(counted.totalTokens) || Number(counted.totalTokens) < 1 || Number(counted.totalTokens) > MAX_INPUT_TOKENS) throw new Error("input_token_gate");
     const generationSignal = timeout(110_000);
     submitted = true;
-    const response = await fetcher(`${GOOGLE}:generateContent`, { method: "POST", headers, body: JSON.stringify({ contents, generationConfig: generationConfig(input) }), redirect: "error", signal: generationSignal });
+    const response = await fetcher(`${GOOGLE}:generateContent`, { method: "POST", headers, body: generateBody, redirect: "error", signal: generationSignal });
     if (!response.ok) { refused = await googleError(response, key); throw new Error(`generation_http_${response.status}`); }
     const payload = record(JSON.parse(new TextDecoder().decode(await boundedBytes(response, 12 * 1024 * 1024))));
     usage = payload.usageMetadata ?? null; modelVersion = payload.modelVersion ?? null; finish = finishEvidence(payload);
     const image = outputImage(payload);
-    return { ok: true, ...plan, billingStatus: "invoice_unknown", billed: "unknown", possiblyBilled: true, submitted: true, referencesSent: images.length, countedInputTokens: counted.totalTokens, usage, modelVersion, ...finish, images: [image] };
+    return { ok: true, ...plan, billingStatus: "invoice_unknown", billed: "unknown", possiblyBilled: true, submitted: true, referencesSent, countedInputTokens: counted.totalTokens, usage, modelVersion, ...finish, images: [image] };
   } catch (e) {
     // Only our fixed codes escape; a fetch exception can contain a signed URL or key.
     const msg = e instanceof Error ? e.message : "";

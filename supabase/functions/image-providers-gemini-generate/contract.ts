@@ -64,15 +64,18 @@ export function sniffMime(bytes: Uint8Array): string | null {
   if (String.fromCharCode(...bytes.slice(0, 4)) === "RIFF" && String.fromCharCode(...bytes.slice(8, 12)) === "WEBP") return "image/webp";
   return null;
 }
+/** Base64 in 3-byte-aligned slices: no full-size binary string is ever held (a 7.5 MB reference crashed the worker). */
 export function encode(bytes: Uint8Array): string {
-  let s = "";
-  for (let i = 0; i < bytes.length; i += 8192) s += String.fromCharCode(...bytes.subarray(i, i + 8192));
-  return btoa(s);
+  const parts: string[] = []; const step = 3 * 8190;
+  for (let i = 0; i < bytes.length; i += step) parts.push(btoa(String.fromCharCode(...bytes.subarray(i, i + step))));
+  return parts.join("");
 }
-export function decodeImage(data: unknown, mime: unknown): Uint8Array {
-  if (typeof data !== "string" || data.length > Math.ceil(MAX_IMAGE_BYTES / 3) * 4 || !/^[A-Za-z0-9+/]*={0,2}$/.test(data)) throw new Error("invalid_image_data");
-  const s = atob(data); const bytes = Uint8Array.from(s, (c) => c.charCodeAt(0));
-  if (bytes.length > MAX_IMAGE_BYTES || !sniffMime(bytes) || sniffMime(bytes) !== mime) throw new Error("invalid_image_type");
+/** Validates base64 and the image signature from the first bytes; returns the decoded size without decoding it all. */
+export function decodeImage(data: unknown, mime: unknown): number {
+  if (typeof data !== "string" || data.length > Math.ceil(MAX_IMAGE_BYTES / 3) * 4 || data.length % 4 !== 0 || !/^[A-Za-z0-9+/]*={0,2}$/.test(data)) throw new Error("invalid_image_data");
+  const head = atob(data.slice(0, 16)); const bytes = data.length / 4 * 3 - (data.endsWith("==") ? 2 : data.endsWith("=") ? 1 : 0);
+  const kind = sniffMime(Uint8Array.from(head, (c) => c.charCodeAt(0)));
+  if (bytes > MAX_IMAGE_BYTES || !kind || kind !== mime) throw new Error("invalid_image_type");
   return bytes;
 }
 export function requestContents(input: Input, images: { mimeType: string; data: string }[]) {
@@ -99,8 +102,7 @@ export function outputImage(payload: unknown): { data: string; mimeType: string;
       const image = record(part.inlineData ?? part.inline_data);
       if (!image.data) continue;
       const mimeType = image.mimeType ?? image.mime_type;
-      const bytes = decodeImage(image.data, mimeType);
-      return { data: image.data as string, mimeType: mimeType as string, bytes: bytes.length };
+      return { data: image.data as string, mimeType: mimeType as string, bytes: decodeImage(image.data, mimeType) };
     }
   }
   throw new Error("no_final_image");
