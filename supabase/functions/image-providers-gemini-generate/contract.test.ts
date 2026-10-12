@@ -73,7 +73,8 @@ describe("mocked integration: Google transport, no live provider", () => {
   it("sends reference bytes in order, only to Google, and skips thought images", async () => {
     const fetcher = vi.fn().mockResolvedValueOnce(new Response(png)).mockResolvedValueOnce(Response.json({ totalTokens: 120 })).mockImplementationOnce(success);
     const result = await run(parseInput(raw), "secret", fetcher);
-    expect(result).toMatchObject({ ok: true, model: MODEL, modelVersion: "observed-provider-version", actualCostUsd: null, referencesSent: 1, usage: { promptTokenCount: 120 }, images: [{ data, mimeType: "image/png" }] });
+    expect(result).toMatchObject({ ok: true, model: MODEL, modelVersion: "observed-provider-version", actualCostUsd: null, referencesSent: 1, usage: { promptTokenCount: 120 }, finalImageParts: 1, thoughtImageParts: 1, images: [{ data, mimeType: "image/png" }] });
+    expect(result.responseBytes).toBeGreaterThan(0);
     expect(fetcher).toHaveBeenCalledTimes(3);
     expect(fetcher.mock.calls[0][1]).toMatchObject({ redirect: "error" });
     expect(fetcher.mock.calls[0][1].headers).toBeUndefined();
