@@ -346,7 +346,7 @@ export async function upsertPdfInDriveFolder(
             Authorization: `Bearer ${accessToken}`,
             "Content-Type": "application/pdf",
           },
-          body: fileContent,
+          body: fileContent as BodyInit,
         },
       );
       if (!patchResp.ok) {
