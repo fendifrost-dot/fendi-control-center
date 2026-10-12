@@ -19,8 +19,8 @@ export const MAX_ANSWER_BYTES = 48 * 1024 * 1024;
 // tokens are <= MAX_INPUT_TOKENS (checked before the call) and (b) Google bills no more output than maxOutputTokens
 // (assumed, unverified: nothing here reads the invoice, and interim/thought images may be billed differently). All
 // output tokens are priced at the highest modality rate, including thinking. countTokens must succeed before spend.
-export const COST_BOUND_USD = (MAX_INPUT_TOKENS * 1.5 + MAX_OUTPUT_TOKENS * 30) / 1e6;
-export const COST_BASIS = "Google list rates 2026-10-11; input <=16384 at $1.50/M, all output <=8192 at $30/M (conditional estimate: holds only if billed output never exceeds maxOutputTokens, which is unverified); invoice unknown";
+export const COST_CONDITIONAL_USD = (MAX_INPUT_TOKENS * 1.5 + MAX_OUTPUT_TOKENS * 30) / 1e6;
+export const COST_BASIS = "Google list rates 2026-10-11; conditional estimate, not a ceiling: input <=16384 tokens at $1.50/M (counted before the call) and all output <=8192 tokens at $30/M (assumes Google bills no more output than maxOutputTokens and prices interim/thought images no higher: unverified); invoice unknown";
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const ASPECTS = new Set(["1:1", "2:3", "3:2", "3:4", "4:3", "4:5", "5:4", "9:16", "16:9", "21:9"]);
 const BUCKETS = new Set(["project-references", "project-clips", "artist-assets", "wardrobe-refs", "prop-refs"]);
@@ -54,7 +54,7 @@ export function parseInput(raw: unknown): Input {
   if (b.n !== undefined && b.n !== 1) throw new Error("one_candidate_per_request");
   if (b.resolution !== "1k" && b.resolution !== "2k") throw new Error("invalid_resolution");
   if (typeof b.aspectRatio !== "string" || !ASPECTS.has(b.aspectRatio)) throw new Error("invalid_aspect_ratio");
-  if (typeof b.maxCostUsd !== "number" || !Number.isFinite(b.maxCostUsd) || b.maxCostUsd < COST_BOUND_USD) throw new Error("cost_gate");
+  if (typeof b.maxCostUsd !== "number" || !Number.isFinite(b.maxCostUsd) || b.maxCostUsd < COST_CONDITIONAL_USD) throw new Error("cost_gate");
   if (b.dryRun !== undefined && typeof b.dryRun !== "boolean") throw new Error("invalid_dry_run");
   if (typeof b.avt_user_id !== "string" || !UUID.test(b.avt_user_id) || typeof b.avt_project_id !== "string" || !UUID.test(b.avt_project_id)) throw new Error("owner_required");
   if (b.dryRun !== true && (typeof b.jobRowId !== "string" || !UUID.test(b.jobRowId))) throw new Error("job_required");
@@ -116,8 +116,12 @@ export function bodyOf(parts: Uint8Array[], mode: BodyMode): BodyInit {
   return all;
 }
 /** Validates base64 and the image signature from the first bytes; returns the decoded size without decoding it all. */
-/** Smaller than any real 1K+ photograph; a header-only forgery is refused as invalid_image_data. */
-export const MIN_IMAGE_BYTES = 16 * 1024;
+/**
+ * Floor below which an "image" cannot even hold a header and a trailer; refused as image_too_small. A flat 1K PNG or
+ * WebP is only a few KB (measured 3,129 B black PNG, 1,926 B WebP), so the floor must stay far under that: forgery
+ * is signalled by trailerOk, not by size.
+ */
+export const MIN_IMAGE_BYTES = 512;
 /**
  * Checks the base64 of an image without decoding it all: alphabet, size bounds, the declared MIME against the magic
  * bytes, and the file trailer. The trailer (JPEG FFD9, PNG IEND+CRC, WebP RIFF length) is reported, not enforced:
@@ -126,7 +130,7 @@ export const MIN_IMAGE_BYTES = 16 * 1024;
 export function decodeImage(data: unknown, mime: unknown): { bytes: number; trailerOk: boolean } {
   if (typeof data !== "string" || data.length > Math.ceil(MAX_IMAGE_BYTES / 3) * 4 || data.length % 4 !== 0 || !/^[A-Za-z0-9+/]*={0,2}$/.test(data)) throw new Error("invalid_image_data");
   const bytes = data.length / 4 * 3 - (data.endsWith("==") ? 2 : data.endsWith("=") ? 1 : 0);
-  if (bytes < MIN_IMAGE_BYTES) throw new Error("invalid_image_data");
+  if (bytes < MIN_IMAGE_BYTES) throw new Error("image_too_small");
   const head = Uint8Array.from(atob(data.slice(0, 16)), (c) => c.charCodeAt(0));
   const kind = sniffMime(head);
   if (bytes > MAX_IMAGE_BYTES || !kind || kind !== mime) throw new Error("invalid_image_type");

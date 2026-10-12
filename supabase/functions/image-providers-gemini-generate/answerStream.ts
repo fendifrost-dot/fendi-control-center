@@ -43,6 +43,7 @@ export class AnswerReader {
   private keep = true;
   private imagePieces: string[] | null = null; // image base64, decoded as it streams (one copy)
   private imageDecoder = new TextDecoder("utf-8");
+  private discardDecoder = new TextDecoder("utf-8", { fatal: true });
   private bytes = 0;
   private containers = 0;
   private escapeHex = 0; // hex digits still owed by a \u escape (validated even in strings that are not kept)
@@ -102,6 +103,7 @@ export class AnswerReader {
 
   private startString(isKey: boolean): void {
     this.tok = "string"; this.isKey = isKey; this.escaped = false; this.raw = [new Uint8Array([QUOTE])]; this.rawLen = 1; this.keep = true;
+    this.discardDecoder = new TextDecoder("utf-8", { fatal: true });
     this.imagePieces = null;
     if (!isKey && IMAGE_DATA.has(this.path())) {
       // An interim thought image whose flag was already read is counted, never kept.
@@ -113,6 +115,9 @@ export class AnswerReader {
 
   private readString(chunk: Uint8Array, start: number): number {
     let i = start;
+    // Next quote / backslash positions are cached per chunk and only recomputed once passed: recomputing on every
+    // escape made a run of escapes before the closing quote quadratic (2 MB of "\n" took 12 s).
+    let q = -2, s = -2;
     while (i < chunk.length) {
       if (this.escapeHex > 0) { if (!isHex(chunk[i])) throw bad(); this.escapeHex--; i++; continue; }
       if (this.escaped) {
@@ -123,7 +128,8 @@ export class AnswerReader {
         i++; continue;
       }
       // Jump natively to the next quote or backslash: base64 and signatures are long runs of neither.
-      const q = chunk.indexOf(QUOTE, i), s = chunk.indexOf(BACKSLASH, i);
+      if (q !== -1 && q < i) q = chunk.indexOf(QUOTE, i);
+      if (s !== -1 && s < i) s = chunk.indexOf(BACKSLASH, i);
       const next = q === -1 ? s : s === -1 ? q : Math.min(q, s);
       const end = next === -1 ? chunk.length : next;
       // Raw control characters are not allowed in JSON strings, kept or discarded.
@@ -140,10 +146,17 @@ export class AnswerReader {
 
   private push(slice: Uint8Array): void {
     this.rawLen += slice.length;
-    if (!this.keep) return;
+    if (!this.keep) { this.validateDiscarded(slice); return; }
     if (this.imagePieces) { this.pushImage(slice); return; }
-    if (!this.isKey && this.rawLen > SMALL_STRING && !IMAGE_DATA.has(this.path())) { this.keep = false; this.raw = []; return; }
+    if (!this.isKey && this.rawLen > SMALL_STRING && !IMAGE_DATA.has(this.path())) {
+      this.keep = false; for (const r of this.raw) this.validateDiscarded(r); this.raw = []; this.validateDiscarded(slice); return;
+    }
     this.raw.push(slice.slice());
+  }
+
+  /** A discarded string is still JSON: its bytes must be valid UTF-8 even though nothing is retained. */
+  private validateDiscarded(slice: Uint8Array): void {
+    try { this.discardDecoder.decode(slice, { stream: true }); } catch { throw bad(); }
   }
 
   /** Base64 is ASCII, so streaming UTF-8 decoding is exact; JSON escapes inside it are resolved in imageValue. */
@@ -158,10 +171,10 @@ export class AnswerReader {
     this.imagePieces = null;
     v = v.slice(0, -1); // closing quote
     if (v.includes("\\")) {
-      // Valid JSON may escape any character: "\/" and "\u0041"-style escapes of ASCII are resolved here. Anything that
-      // resolves outside base64's alphabet is left for decodeImage to refuse as invalid_image_data.
-      v = v.replace(/\\u([0-9a-fA-F]{4})/g, (_, h: string) => String.fromCharCode(parseInt(h, 16))).replace(/\\\//g, "/");
-      if (v.includes("\\")) throw bad();
+      // Valid JSON may escape any character ("\/", "\u0041", "\n", "\\" ...): every escape was already validated by
+      // readString, so JSON.parse resolves them all here. Anything that resolves outside base64's alphabet is left for
+      // decodeImage to refuse as invalid_image_data, never reported as malformed JSON.
+      try { v = JSON.parse('"' + v + '"') as string; } catch { throw bad(); }
     }
     return v;
   }
@@ -183,6 +196,7 @@ export class AnswerReader {
     const path = this.path();
     const part = this.stack.at(-1)?.kind === "obj" && path === SIGNATURE ? this.stack.at(-1) : undefined;
     if (!this.keep) {
+      try { this.discardDecoder.decode(); } catch { throw bad(); } // a multibyte sequence cut off at the closing quote
       const bytes = this.rawLen - 2;
       if (IMAGE_DATA.has(path)) { this.stack[this.stack.length - 2].thoughtImage = true; this.assign(null); return; }
       this.omitted.push({ path, bytes });

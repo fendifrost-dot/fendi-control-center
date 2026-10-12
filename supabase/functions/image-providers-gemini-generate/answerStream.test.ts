@@ -53,6 +53,33 @@ describe("unit: strictness holds for strings that are not kept, and limits bound
       for (const cut of [whole, randomCuts]) expect(() => readIn(text, cut), bad.slice(-8)).toThrow("invalid_answer_json");
     }
   });
+  it("rejects invalid UTF-8 inside a discarded string, however it is split", () => {
+    const head = enc.encode(`{"a":"${huge}`), tail = enc.encode('"}');
+    for (const badBytes of [[0xff], [0xc3], [0xe2, 0x82], [0xed, 0xa0, 0x80]]) {
+      const bytes = new Uint8Array([...head, ...badBytes, ...tail]);
+      for (const cut of [whole, ones, randomCuts]) {
+        const r = new AnswerReader(); let at = 0;
+        expect(() => { for (const size of cut(bytes.length)) { r.feed(bytes.subarray(at, at + size)); at += size; } r.feed(bytes.subarray(at)); r.finish(); }, String(badBytes)).toThrow("invalid_answer_json");
+      }
+    }
+    const okBytes = new Uint8Array([...head, 0xc3, 0xa9, 0xe2, 0x82, 0xac, ...tail]);
+    for (const cut of [whole, ones]) { const r = new AnswerReader(); let at = 0; for (const size of cut(okBytes.length)) { r.feed(okBytes.subarray(at, at + size)); at += size; } r.feed(okBytes.subarray(at)); expect(r.finish().payload).toEqual({ a: null }); }
+  });
+  it("a run of escapes is linear, not quadratic (2 MB of \\n in one chunk and in 64 KiB chunks)", () => {
+    const text = `{"a":"${"\\n".repeat(1_000_000)}"}`;
+    const t0 = performance.now();
+    expect(readIn(text, whole).payload).toEqual({ a: null });
+    expect(readIn(text, (n) => Array(Math.ceil(n / 65536)).fill(65536)).payload).toEqual({ a: null });
+    expect(performance.now() - t0).toBeLessThan(3000); // measured 12 s+ before the per-chunk cache
+  });
+  it("every legal JSON escape inside image base64 is resolved, and a non-base64 result is left for decodeImage", () => {
+    const img = (data: string) => `{"candidates":[{"content":{"parts":[{"inlineData":{"mimeType":"image/png","data":"${data}"}}]}}]}`;
+    const read = (t: string) => readIn(t, whole).images[0].data;
+    expect(read(img("AA\\/AA\\u0041"))).toBe("AA/AAA");
+    expect(read(img("AA\\nAA"))).toBe("AA\nAA"); // well-formed JSON; decodeImage refuses it as invalid_image_data
+    expect(read(img("AA\\\\AA\\\"AA"))).toBe("AA\\AA\"AA");
+    expect(() => read(img("AA\\qAA"))).toThrow("invalid_answer_json");
+  });
   it("accepts every legal escape inside a discarded string, split anywhere", () => {
     const text = `{"a":"${huge}\\"\\\\\\/\\b\\f\\n\\r\\t\\u00e9"}`;
     expect(JSON.parse(text)).toBeTruthy();

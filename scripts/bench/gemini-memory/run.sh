@@ -15,9 +15,11 @@ echo "impl=$REV files: $(ls impl | tr '\n' ' ')" >&2
 deno run -A fake-google.ts > fake.log 2>&1 & SP=$!
 for i in $(seq 1 50); do grep -q ready fake.log && break; sleep 0.2; done
 trap 'kill $SP 2>/dev/null' EXIT
-for r in $(seq 1 "$REPS"); do deno run -A --v8-flags=--expose-gc bench.ts "$REFS" "$MODE" 2>/dev/null | grep '^{"refs'; done | python3 -c '
+: > bench.err
+for r in $(seq 1 "$REPS"); do deno run -A --v8-flags=--expose-gc bench.ts "$REFS" "$MODE" 2>>bench.err | grep '^{"refs'; done | python3 -c '
 import json,sys,statistics as st
 rows=[json.loads(l) for l in sys.stdin]
+if not rows: sys.exit("no bench rows: see scripts/bench/gemini-memory/bench.err and fake.log")
 def med(k): return st.median(r[k] for r in rows)
 print(json.dumps({"rev":sys.argv[1],"refs":int(sys.argv[2]),"mode":sys.argv[3],"runs":len(rows),"ok":all(r["ok"] for r in rows),"errors":sorted({str(r["err"]) for r in rows if not r["ok"]}),
  "median_peakRssAboveBaseMB":med("peakRssAboveBaseMB"),"max_peakRssAboveBaseMB":max(r["peakRssAboveBaseMB"] for r in rows),

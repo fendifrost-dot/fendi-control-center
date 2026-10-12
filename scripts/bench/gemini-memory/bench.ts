@@ -2,7 +2,7 @@
 // the fake Google in fake-google.ts and reports SAMPLED memory (at the function's own phase marks) and PEAK memory
 // (polled every 5 ms for the whole run; the true peak may fall between polls, so it is a lower bound on the real peak).
 // Usage: deno run -A bench.ts <implDir> <refs:1|2|3> <mode:stream|blob|bytes>   (see run.sh)
-import { parseInput } from "./impl/contract.ts"; // re-pointed by run.sh via the symlink `impl`
+import { parseInput } from "./impl/contract.ts"; // `impl/` is materialised by run.sh from the requested git revision (not tracked)
 import { run } from "./impl/run.ts";
 const [refsArg = "1", mode = "stream"] = Deno.args;
 const user = "00000000-0000-4000-8000-000000000001", project = "00000000-0000-4000-8000-000000000002";
@@ -16,9 +16,11 @@ const m0 = Deno.memoryUsage(); const mb = (b: number) => Math.round(b / 1048576 
 let peakRss = m0.rss, peakHeap = m0.heapUsed + m0.external;
 const poll = setInterval(() => { const m = Deno.memoryUsage(); peakRss = Math.max(peakRss, m.rss); peakHeap = Math.max(peakHeap, m.heapUsed + m.external); }, 5);
 const t0 = performance.now();
+// Older revisions take no mode argument (they buffer): report that honestly instead of echoing the requested label.
+const modeHonoured = run.length >= 4;
 const result = await run(input, "k", local as typeof fetch, mode as "stream" | "blob" | "bytes");
 clearInterval(poll);
 const m = Deno.memoryUsage(); peakRss = Math.max(peakRss, m.rss);
 // deno-lint-ignore no-explicit-any
 const phases = (result as any).phases ?? null;
-console.log(JSON.stringify({ refs: n, mode, ok: result.ok, err: result.ok ? null : result.errorCode, ms: Math.round(performance.now() - t0), baseRssMB: mb(m0.rss), peakRssAboveBaseMB: mb(peakRss - m0.rss), peakHeapExtAboveBaseMB: mb(peakHeap - (m0.heapUsed + m0.external)), sampledPhases: phases }));
+console.log(JSON.stringify({ refs: n, mode: modeHonoured ? mode : `n/a (impl at this revision ignores mode; buffered)`, ok: result.ok, err: result.ok ? null : result.errorCode, ms: Math.round(performance.now() - t0), baseRssMB: mb(m0.rss), peakRssAboveBaseMB: mb(peakRss - m0.rss), peakHeapExtAboveBaseMB: mb(peakHeap - (m0.heapUsed + m0.external)), sampledPhases: phases }));

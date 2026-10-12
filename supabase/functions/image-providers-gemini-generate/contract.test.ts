@@ -1,6 +1,6 @@
 // @vitest-environment node
 import { describe, expect, it, vi } from "vitest";
-import { COST_BOUND_USD, MAX_IMAGE_BYTES, MAX_REFERENCE_BYTES, MAX_REQUEST_BYTES, MIN_IMAGE_BYTES, MODEL, decodeImage, encode, generationConfig, parseInput, referenceUrlAllowed, base64Bytes, bodyOf, requestBodyParts, requestContents } from "./contract.ts";
+import { COST_CONDITIONAL_USD, MAX_IMAGE_BYTES, MAX_REFERENCE_BYTES, MAX_REQUEST_BYTES, MIN_IMAGE_BYTES, MODEL, decodeImage, encode, generationConfig, parseInput, referenceUrlAllowed, base64Bytes, bodyOf, requestBodyParts, requestContents } from "./contract.ts";
 import { boundedBytes, run } from "./run.ts";
 
 const user = "00000000-0000-4000-8000-000000000001";
@@ -22,7 +22,7 @@ describe("unit: Gemini route contract", () => {
     expect(parseInput(raw).model).toBe(MODEL);
     for (const change of [{ model: "latest" }, { n: 2 }, { maxCostUsd: .01 }, { maxCostUsd: NaN }, { maxCostUsd: "1" }, { resolution: "4k" }, { dryRun: "true" }, { jobRowId: undefined }, { prompt: "" }, { aspectRatio: "invented" }]) expect(() => parseInput({ ...raw, ...change })).toThrow();
     expect(() => parseInput({ ...raw, jobRowId: undefined, dryRun: true })).not.toThrow();
-    expect(COST_BOUND_USD).toBeCloseTo(.270336);
+    expect(COST_CONDITIONAL_USD).toBeCloseTo(.270336);
   });
   it("allows only the fixed AVT host, owner prefix and project folders", () => {
     expect(referenceUrlAllowed(url, user, project)).toBe(true);
@@ -45,7 +45,7 @@ describe("unit: Gemini route contract", () => {
   });
   it("refuses header-only forgeries and reports an unverified trailer instead of losing a paid image", () => {
     const twelve = new Uint8Array([255,216,255,224,0,16,74,70,73,70,0,1]);
-    expect(() => decodeImage(encode(twelve), "image/jpeg")).toThrow("invalid_image_data");
+    expect(() => decodeImage(encode(twelve), "image/jpeg")).toThrow("image_too_small");
     const headerOnly = new Uint8Array(MIN_IMAGE_BYTES); headerOnly.set(twelve);
     expect(decodeImage(encode(headerOnly), "image/jpeg")).toEqual({ bytes: MIN_IMAGE_BYTES, trailerOk: false });
     expect(decodeImage(encode(fakeJpeg(MIN_IMAGE_BYTES)), "image/jpeg")).toEqual({ bytes: MIN_IMAGE_BYTES, trailerOk: true });
@@ -233,11 +233,11 @@ describe("mocked integration: request body acceptance and large answers", () => 
     const plain = vi.fn().mockResolvedValueOnce(new Response(png)).mockResolvedValueOnce(Response.json({ totalTokens: 1 })).mockImplementationOnce(success);
     expect(await run(parseInput(raw), "secret", plain)).toMatchObject({ ok: true, finishReasonUnusual: true, imageTrailerOk: true }); // fixture carries no finishReason
   });
-  it("a header-only image from the provider is refused as invalid_image_data, possibly billed", async () => {
+  it("a header-only image from the provider is refused as image_too_small, possibly billed", async () => {
     const tiny = encode(new Uint8Array([137,80,78,71,13,10,26,10,0,0,0,0,1]));
     const answer = () => Response.json({ candidates: [{ finishReason: "STOP", content: { parts: [{ inlineData: { mimeType: "image/png", data: tiny } }] } }] });
     const fetcher = vi.fn().mockResolvedValueOnce(new Response(png)).mockResolvedValueOnce(Response.json({ totalTokens: 1 })).mockImplementationOnce(answer);
-    expect(await run(parseInput(raw), "secret", fetcher)).toMatchObject({ ok: false, errorCode: "invalid_image_data", submitted: true, possiblyBilled: true });
+    expect(await run(parseInput(raw), "secret", fetcher)).toMatchObject({ ok: false, errorCode: "image_too_small", submitted: true, possiblyBilled: true });
   });
   it("two references within limits are both sent, in order", async () => {
     const two = parseInput({ ...raw, references: [raw.references[0], { ...raw.references[0], label: "Second" }] });
