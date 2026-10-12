@@ -13,6 +13,10 @@ export REMOTE_BRIDGE_TOKEN="PASTE_SAME_VALUE_AS_SUPABASE_SECRET"
 export REMOTE_BRIDGE_WORKDIR="$HOME"
 export REMOTE_BRIDGE_DEVICE_NAME="primary-mac"
 export REMOTE_BRIDGE_POLL_MS="3000"
+# Agent Hub: local checkouts the bridge may review (owner/repo -> path)
+export REMOTE_BRIDGE_REPOS='{"fendifrost-dot/fendi-control-center":"'"$HOME"'/Projects/fendi-control-center"}'
+# 1 = let Claude/Codex edit files on TASK/REVISE handoffs (in a per-thread worktree, never your main checkout)
+export REMOTE_BRIDGE_ALLOW_EDITS="0"
 EOF
   chmod 600 "$ENV_FILE"
   echo "Created $ENV_FILE — edit REMOTE_BRIDGE_TOKEN, then run this script again."

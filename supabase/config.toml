@@ -156,3 +156,6 @@ verify_jwt = false
 # session. GET-only; rejects the service-role key as a Muse credential.
 [functions.muse-executive]
 verify_jwt = false
+
+[functions.agent-hub]
+verify_jwt = false
