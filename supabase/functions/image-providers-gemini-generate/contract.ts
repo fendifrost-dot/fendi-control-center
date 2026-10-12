@@ -15,10 +15,12 @@ export const MAX_REQUEST_BYTES = 20_000_000;
 export const MAX_REFERENCE_BYTES = 14 * 1024 * 1024;
 // The answer is streamed, not buffered (answerStream.ts): this bounds bytes read and time spent, not memory held.
 export const MAX_ANSWER_BYTES = 48 * 1024 * 1024;
-// Conservative list-rate ceiling, NOT an invoice: all output tokens priced at the
-// highest modality rate, including thinking. countTokens must succeed before spend.
+// CONDITIONAL ESTIMATE, not a guaranteed ceiling and NOT an invoice. It is the list-rate cost IF (a) counted input
+// tokens are <= MAX_INPUT_TOKENS (checked before the call) and (b) Google bills no more output than maxOutputTokens
+// (assumed, unverified: nothing here reads the invoice, and interim/thought images may be billed differently). All
+// output tokens are priced at the highest modality rate, including thinking. countTokens must succeed before spend.
 export const COST_BOUND_USD = (MAX_INPUT_TOKENS * 1.5 + MAX_OUTPUT_TOKENS * 30) / 1e6;
-export const COST_BASIS = "Google list rates 2026-10-11; input <=16384 at $1.50/M, all output <=8192 at $30/M (assumes billed output never exceeds maxOutputTokens: unverified); invoice unknown";
+export const COST_BASIS = "Google list rates 2026-10-11; input <=16384 at $1.50/M, all output <=8192 at $30/M (conditional estimate: holds only if billed output never exceeds maxOutputTokens, which is unverified); invoice unknown";
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const ASPECTS = new Set(["1:1", "2:3", "3:2", "3:4", "4:3", "4:5", "5:4", "9:16", "16:9", "21:9"]);
 const BUCKETS = new Set(["project-references", "project-clips", "artist-assets", "wardrobe-refs", "prop-refs"]);
@@ -114,12 +116,27 @@ export function bodyOf(parts: Uint8Array[], mode: BodyMode): BodyInit {
   return all;
 }
 /** Validates base64 and the image signature from the first bytes; returns the decoded size without decoding it all. */
-export function decodeImage(data: unknown, mime: unknown): number {
+/** Smaller than any real 1K+ photograph; a header-only forgery is refused as invalid_image_data. */
+export const MIN_IMAGE_BYTES = 16 * 1024;
+/**
+ * Checks the base64 of an image without decoding it all: alphabet, size bounds, the declared MIME against the magic
+ * bytes, and the file trailer. The trailer (JPEG FFD9, PNG IEND+CRC, WebP RIFF length) is reported, not enforced:
+ * refusing a paid image over a trailer quirk would lose it, so the caller files it with `trailerOk: false`.
+ */
+export function decodeImage(data: unknown, mime: unknown): { bytes: number; trailerOk: boolean } {
   if (typeof data !== "string" || data.length > Math.ceil(MAX_IMAGE_BYTES / 3) * 4 || data.length % 4 !== 0 || !/^[A-Za-z0-9+/]*={0,2}$/.test(data)) throw new Error("invalid_image_data");
-  const head = atob(data.slice(0, 16)); const bytes = data.length / 4 * 3 - (data.endsWith("==") ? 2 : data.endsWith("=") ? 1 : 0);
-  const kind = sniffMime(Uint8Array.from(head, (c) => c.charCodeAt(0)));
+  const bytes = data.length / 4 * 3 - (data.endsWith("==") ? 2 : data.endsWith("=") ? 1 : 0);
+  if (bytes < MIN_IMAGE_BYTES) throw new Error("invalid_image_data");
+  const head = Uint8Array.from(atob(data.slice(0, 16)), (c) => c.charCodeAt(0));
+  const kind = sniffMime(head);
   if (bytes > MAX_IMAGE_BYTES || !kind || kind !== mime) throw new Error("invalid_image_type");
-  return bytes;
+  const tail = Uint8Array.from(atob(data.slice(-8)), (c) => c.charCodeAt(0)); // last 4–6 bytes
+  const t = (n: number) => tail[tail.length - n];
+  let trailerOk = false;
+  if (kind === "image/jpeg") trailerOk = t(2) === 0xff && t(1) === 0xd9;
+  else if (kind === "image/png") trailerOk = t(4) === 0xae && t(3) === 0x42 && t(2) === 0x60 && t(1) === 0x82;
+  else if (kind === "image/webp") trailerOk = (head[4] | (head[5] << 8) | (head[6] << 16) | (head[7] << 24)) >>> 0 === bytes - 8;
+  return { bytes, trailerOk };
 }
 export function requestContents(input: Input, images: { mimeType: string; data: string }[]) {
   return [{ role: "user", parts: [
@@ -134,19 +151,4 @@ export function generationConfig(input: Input) {
   // v1beta schema (discovery, 12 Oct 2026): responseFormat.image takes enums (ASPECT_RATIO_FOUR_BY_FIVE…) and
   // rejected "4:5"/"2K" with 400; imageConfig takes these strings. thinkingLevel is the enum MEDIUM.
   return { responseModalities: ["IMAGE"], imageConfig: { aspectRatio: input.aspectRatio, imageSize: input.resolution.toUpperCase() }, thinkingConfig: { thinkingLevel: "MEDIUM", includeThoughts: false }, maxOutputTokens: MAX_OUTPUT_TOKENS, candidateCount: 1 };
-}
-export function outputImage(payload: unknown): { data: string; mimeType: string; bytes: number } {
-  const p = record(payload); const candidates = Array.isArray(p.candidates) ? p.candidates : [];
-  for (const c of candidates) {
-    const parts = record(record(c).content).parts;
-    for (const raw of Array.isArray(parts) ? parts : []) {
-      const part = record(raw);
-      if (part.thought === true) continue;
-      const image = record(part.inlineData ?? part.inline_data);
-      if (!image.data) continue;
-      const mimeType = image.mimeType ?? image.mime_type;
-      return { data: image.data as string, mimeType: mimeType as string, bytes: decodeImage(image.data, mimeType) };
-    }
-  }
-  throw new Error("no_final_image");
 }

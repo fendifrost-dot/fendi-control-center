@@ -81,7 +81,7 @@ async function imageModels(key: string, fetcher: typeof fetch): Promise<string[]
 }
 /** Dependency injection allows contract + mocked HTTP tests without importing Deno or secrets. */
 export async function run(input: Input, key: string, fetcher: typeof fetch = fetch, bodyMode: BodyMode = "stream"): Promise<Record<string, unknown>> {
-  const plan = { provider: "gemini", billingAccount: "Google Gemini API", model: MODEL, costBasis: COST_BASIS, estimatedCostUsd: COST_BOUND_USD, costIsEstimate: true, costIsUpperBound: true, actualCostUsd: null, maxReferences: 14 };
+  const plan = { provider: "gemini", billingAccount: "Google Gemini API", model: MODEL, costBasis: COST_BASIS, estimatedCostUsd: COST_BOUND_USD, costIsEstimate: true, costIsUpperBound: false, costBoundConditional: true, actualCostUsd: null, maxReferences: 14 };
   if (!key) return { ok: false, ...plan, errorCode: "PROVIDER_KEY_NOT_CONFIGURED", billed: false, ...(input.dryRun ? { dryRun: true, referencesSent: 0 } : {}) };
   if (input.dryRun) {
     // models.get is free metadata: it proves this key can see the model, not that billing will accept a generation.
@@ -157,9 +157,13 @@ export async function run(input: Input, key: string, fetcher: typeof fetch = fet
     usage = payload.usageMetadata ?? null; modelVersion = payload.modelVersion ?? null; finish = finishEvidence(payload); evidence = answerEvidence(answer);
     const final = answer.images.find((i) => !i.thought);
     if (!final) throw new Error("no_final_image");
-    const image = { data: final.data, mimeType: final.mimeType as string, bytes: decodeImage(final.data, final.mimeType) };
+    const checked = decodeImage(final.data, final.mimeType);
+    const image = { data: final.data, mimeType: final.mimeType as string, bytes: checked.bytes };
     track.mark("image_checked");
-    return { ok: true, ...plan, billingStatus: "invoice_unknown", billed: "unknown", possiblyBilled: true, submitted: true, referencesSent, countedInputTokens: counted.totalTokens, usage, modelVersion, ...finish, ...evidence, requestBodyMode: mode, phases: track.phases, images: [image] };
+    // DECISION: a structurally valid final image is returned whatever the finish reason (it was paid for); a finish
+    // other than STOP, or a trailer that does not verify, is flagged so AVT files the still with a note, never silently.
+    const finishReasonUnusual = finish.finishReason !== "STOP";
+    return { ok: true, ...plan, billingStatus: "invoice_unknown", billed: "unknown", possiblyBilled: true, submitted: true, referencesSent, countedInputTokens: counted.totalTokens, usage, modelVersion, ...finish, finishReasonUnusual, imageTrailerOk: checked.trailerOk, ...evidence, requestBodyMode: mode, phases: track.phases, images: [image] };
   } catch (e) {
     // Only our fixed codes escape; a fetch exception can contain a signed URL or key.
     const msg = e instanceof Error ? e.message : "";

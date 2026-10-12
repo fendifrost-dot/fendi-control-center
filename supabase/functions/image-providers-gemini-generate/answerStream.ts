@@ -8,6 +8,10 @@
 // Interim "thought" images are dropped as soon as their part closes. Nothing here is ever sent back to Google.
 
 export const SMALL_STRING = 64 * 1024;
+/** Nesting deeper than any real answer (candidates → content → parts → inlineData is 6): refuse pathological input. */
+export const MAX_DEPTH = 64;
+/** Containers (objects + arrays) a single answer may hold; a real answer has a few dozen. */
+export const MAX_CONTAINERS = 100_000;
 const PART = "candidates[].content.parts[]";
 const IMAGE_DATA = new Set([`${PART}.inlineData.data`, `${PART}.inline_data.data`]);
 const SIGNATURE = `${PART}.thoughtSignature`;
@@ -21,6 +25,7 @@ const QUOTE = 0x22, BACKSLASH = 0x5c, COMMA = 0x2c, COLON = 0x3a;
 const OPEN_OBJ = 0x7b, CLOSE_OBJ = 0x7d, OPEN_ARR = 0x5b, CLOSE_ARR = 0x5d;
 const isWs = (b: number) => b === 0x20 || b === 0x09 || b === 0x0a || b === 0x0d;
 const bad = () => new Error("invalid_answer_json");
+const isHex = (b: number) => (b >= 0x30 && b <= 0x39) || (b >= 0x41 && b <= 0x46) || (b >= 0x61 && b <= 0x66);
 
 /** Incremental JSON reader: feed() chunks in order, then finish(). Throws "invalid_answer_json" on malformed input. */
 export class AnswerReader {
@@ -39,6 +44,8 @@ export class AnswerReader {
   private imagePieces: string[] | null = null; // image base64, decoded as it streams (one copy)
   private imageDecoder = new TextDecoder("utf-8");
   private bytes = 0;
+  private containers = 0;
+  private escapeHex = 0; // hex digits still owed by a \u escape (validated even in strings that are not kept)
   private decoder = new TextDecoder("utf-8", { fatal: true });
   readonly omitted: OmittedField[] = [];
   readonly images: AnswerImage[] = [];
@@ -77,7 +84,7 @@ export class AnswerReader {
 
   finish(): StreamedAnswer {
     if (this.tok === "scalar") this.endScalar();
-    if (!this.done || this.tok !== "none" || this.stack.length) throw bad();
+    if (!this.done || this.tok !== "none" || this.stack.length || this.escaped || this.escapeHex) throw bad();
     const payload = this.root;
     if (!payload || typeof payload !== "object" || Array.isArray(payload)) throw bad();
     return { payload: payload as Record<string, unknown>, images: this.images, omitted: this.omitted, answerBytes: this.bytes };
@@ -107,10 +114,20 @@ export class AnswerReader {
   private readString(chunk: Uint8Array, start: number): number {
     let i = start;
     while (i < chunk.length) {
-      if (this.escaped) { this.escaped = false; i++; continue; }
+      if (this.escapeHex > 0) { if (!isHex(chunk[i])) throw bad(); this.escapeHex--; i++; continue; }
+      if (this.escaped) {
+        // JSON allows exactly these escapes; anything else is malformed even inside a string we will not keep.
+        const b = chunk[i]; this.escaped = false;
+        if (b === 0x75) this.escapeHex = 4;
+        else if (!(b === QUOTE || b === BACKSLASH || b === 0x2f || b === 0x62 || b === 0x66 || b === 0x6e || b === 0x72 || b === 0x74)) throw bad();
+        i++; continue;
+      }
       // Jump natively to the next quote or backslash: base64 and signatures are long runs of neither.
       const q = chunk.indexOf(QUOTE, i), s = chunk.indexOf(BACKSLASH, i);
       const next = q === -1 ? s : s === -1 ? q : Math.min(q, s);
+      const end = next === -1 ? chunk.length : next;
+      // Raw control characters are not allowed in JSON strings, kept or discarded.
+      for (let k = i; k < end; k++) if (chunk[k] < 0x20) throw bad();
       if (next === -1) break;
       if (chunk[next] === BACKSLASH) { this.escaped = true; i = next + 1; continue; }
       this.push(chunk.subarray(start, next + 1));
@@ -129,7 +146,7 @@ export class AnswerReader {
     this.raw.push(slice.slice());
   }
 
-  /** Base64 is ASCII; the only escape JSON may use inside it is "\/". Anything else is not image data. */
+  /** Base64 is ASCII, so streaming UTF-8 decoding is exact; JSON escapes inside it are resolved in imageValue. */
   private pushImage(slice: Uint8Array): void {
     // Base64 is ASCII, so streaming UTF-8 decoding is exact (a non-ASCII byte fails validation later).
     this.imagePieces!.push(this.imageDecoder.decode(slice, { stream: true }));
@@ -141,8 +158,10 @@ export class AnswerReader {
     this.imagePieces = null;
     v = v.slice(0, -1); // closing quote
     if (v.includes("\\")) {
-      if (/\\[^/]/.test(v)) throw bad();
-      v = v.replace(/\\\//g, "/");
+      // Valid JSON may escape any character: "\/" and "\u0041"-style escapes of ASCII are resolved here. Anything that
+      // resolves outside base64's alphabet is left for decodeImage to refuse as invalid_image_data.
+      v = v.replace(/\\u([0-9a-fA-F]{4})/g, (_, h: string) => String.fromCharCode(parseInt(h, 16))).replace(/\\\//g, "/");
+      if (v.includes("\\")) throw bad();
     }
     return v;
   }
@@ -185,6 +204,7 @@ export class AnswerReader {
   private endScalar(): void { this.tok = "none"; this.assign(this.parsed()); }
 
   private open(kind: "obj" | "arr"): void {
+    if (this.stack.length >= MAX_DEPTH || ++this.containers > MAX_CONTAINERS) throw bad();
     this.stack.push({ kind, value: kind === "obj" ? {} : [], key: null });
     this.want = kind === "obj" ? "key" : "value";
     this.emptyOk = true;
@@ -208,7 +228,8 @@ export class AnswerReader {
     const top = this.stack.at(-1);
     if (!top) { this.root = value; this.done = true; return; }
     if (top.kind === "arr") (top.value as unknown[]).push(value);
-    else (top.value as Record<string, unknown>)[top.key!] = value;
+    // An own property even for "__proto__": plain assignment would set the object's prototype instead.
+    else Object.defineProperty(top.value, top.key!, { value, enumerable: true, writable: true, configurable: true });
     this.want = "next";
   }
 }
