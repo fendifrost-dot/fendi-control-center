@@ -6,6 +6,8 @@ export const MAX_INPUT_TOKENS = 16_384;
 export const MAX_OUTPUT_TOKENS = 4_096;
 export const MAX_IMAGE_BYTES = 8 * 1024 * 1024;
 export const MAX_REFERENCE_BYTES = 12 * 1024 * 1024;
+// The answer is streamed, not buffered (answerStream.ts): this bounds bytes read and time spent, not memory held.
+export const MAX_ANSWER_BYTES = 48 * 1024 * 1024;
 // Conservative list-rate ceiling, NOT an invoice: all output tokens priced at the
 // highest modality rate, including thinking. countTokens must succeed before spend.
 export const COST_BOUND_USD = (MAX_INPUT_TOKENS * 1.5 + MAX_OUTPUT_TOKENS * 30) / 1e6;
@@ -64,11 +66,45 @@ export function sniffMime(bytes: Uint8Array): string | null {
   if (String.fromCharCode(...bytes.slice(0, 4)) === "RIFF" && String.fromCharCode(...bytes.slice(8, 12)) === "WEBP") return "image/webp";
   return null;
 }
-/** Base64 in 3-byte-aligned slices: no full-size binary string is ever held (a 7.5 MB reference crashed the worker). */
-export function encode(bytes: Uint8Array): string {
-  const parts: string[] = []; const step = 3 * 8190;
-  for (let i = 0; i < bytes.length; i += step) parts.push(btoa(String.fromCharCode(...bytes.subarray(i, i + step))));
-  return parts.join("");
+const B64 = new TextEncoder().encode("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/");
+/** Base64 written straight into ASCII bytes: no intermediate strings or argument arrays (worker memory, 12 Oct 2026). */
+export function base64Bytes(src: Uint8Array): Uint8Array {
+  const out = new Uint8Array(Math.ceil(src.length / 3) * 4); let o = 0, i = 0;
+  for (; i + 2 < src.length; i += 3) {
+    const n = (src[i] << 16) | (src[i + 1] << 8) | src[i + 2];
+    out[o++] = B64[n >> 18]; out[o++] = B64[(n >> 12) & 63]; out[o++] = B64[(n >> 6) & 63]; out[o++] = B64[n & 63];
+  }
+  if (src.length - i === 1) { const n = src[i] << 16; out[o++] = B64[n >> 18]; out[o++] = B64[(n >> 12) & 63]; out[o++] = 61; out[o++] = 61; }
+  else if (src.length - i === 2) { const n = (src[i] << 16) | (src[i + 1] << 8); out[o++] = B64[n >> 18]; out[o++] = B64[(n >> 12) & 63]; out[o++] = B64[(n >> 6) & 63]; out[o++] = 61; }
+  return out;
+}
+/** String form, for callers that need text (tests, small payloads). */
+export function encode(bytes: Uint8Array): string { return new TextDecoder().decode(base64Bytes(bytes)); }
+/**
+ * A request body as byte pieces: the JSON text around each reference, with the references' base64 bytes spliced in.
+ * No multi-megabyte body string is built and nothing is re-encoded by fetch. `tail` closes the top-level object.
+ */
+export function requestBodyParts(input: Input, images: { mimeType: string; b64: Uint8Array }[], tail: string): Uint8Array[] {
+  const marker = `@@ref-${crypto.randomUUID()}-`;
+  let json = JSON.stringify({ contents: requestContents(input, images.map((im, i) => ({ mimeType: im.mimeType, data: `${marker}${i}@@` }))) });
+  json = json.slice(0, -1) + tail;
+  const text = new TextEncoder(); const parts: Uint8Array[] = [];
+  images.forEach((im, i) => {
+    const at = json.indexOf(`${marker}${i}@@`);
+    if (at < 0) throw new Error("request_build_failed");
+    parts.push(text.encode(json.slice(0, at)), im.b64);
+    json = json.slice(at + `${marker}${i}@@`.length);
+  });
+  parts.push(text.encode(json));
+  return parts;
+}
+export type BodyMode = "bytes" | "blob" | "stream";
+export function bodyOf(parts: Uint8Array[], mode: BodyMode): BodyInit {
+  if (mode === "blob") return new Blob(parts as BlobPart[]);
+  if (mode === "stream") { let i = 0; return new ReadableStream<Uint8Array>({ pull(c) { if (i >= parts.length) c.close(); else c.enqueue(parts[i++]); } }); }
+  const all = new Uint8Array(parts.reduce((n, p) => n + p.length, 0)); let o = 0;
+  for (const p of parts) { all.set(p, o); o += p.length; }
+  return all;
 }
 /** Validates base64 and the image signature from the first bytes; returns the decoded size without decoding it all. */
 export function decodeImage(data: unknown, mime: unknown): number {
