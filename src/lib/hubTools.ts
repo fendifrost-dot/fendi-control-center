@@ -25,6 +25,15 @@ export type HubToolDef =
 /** Single source of truth for cover menu + tool grid tiles. */
 export const HUB_TOOL_DEFS: HubToolDef[] = [
   {
+    id: "agent-hub",
+    name: "Agent Hub",
+    tagline: "Talk to your AI agents, hand work between them for review, and keep it all in one thread",
+    kind: "internal",
+    path: "/agents",
+    status: "beta",
+    accentClass: "bg-violet-500",
+  },
+  {
     id: "muse",
     name: "Muse",
     tagline: "Executive brief, portfolio map, open loops, and system health",

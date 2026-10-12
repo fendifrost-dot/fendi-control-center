@@ -30,6 +30,8 @@ import MuseAgentQueuePage from "./pages/muse/MuseAgentQueuePage";
 import MuseImpactLedgerPage from "./pages/muse/MuseImpactLedgerPage";
 import MuseWorkFeedPage from "./pages/muse/MuseWorkFeedPage";
 import MuseDailyReportsPage from "./pages/muse/MuseDailyReportsPage";
+import AgentHubPage from "./pages/agents/AgentHubPage";
+import ThreadPage from "./pages/agents/ThreadPage";
 
 const queryClient = new QueryClient();
 
@@ -47,6 +49,8 @@ const App = () => (
             <Route path="/" element={<HubHomePage />} />
             <Route path="/ops" element={<Ops />} />
             <Route path="/remote" element={<RemoteControlPage />} />
+            <Route path="/agents" element={<AgentHubPage />} />
+            <Route path="/agents/t/:threadId" element={<ThreadPage />} />
             <Route path="/test" element={<Test />} />
             <Route path="/tax" element={<Navigate to="/clients" replace />} />
             <Route path="/tax/*" element={<Navigate to="/clients" replace />} />

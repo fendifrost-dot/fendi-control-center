@@ -411,9 +411,33 @@ async function handle(db: SupabaseClient, actor: Actor, action: string, p: Recor
     case "threads": {
       let q = db.from("agent_hub_threads").select("*").order("last_activity_at", { ascending: false }).limit(Math.min(Number(p.limit ?? 50), 200));
       if (p.status) q = q.eq("status", String(p.status));
+      else q = q.neq("status", "ARCHIVED");
+      const agentKey = str(p.agent, "agent", 100);
+      if (agentKey) {
+        // Threads this agent wrote in or was handed work in.
+        const [{ data: m }, { data: h }] = await Promise.all([
+          db.from("agent_hub_messages").select("thread_id").eq("author", agentKey).limit(1000),
+          db.from("agent_hub_handoffs").select("thread_id").eq("to_agent", agentKey).limit(1000),
+        ]);
+        const ids = [...new Set([...(m ?? []), ...(h ?? [])].map((r) => r.thread_id as string))];
+        if (!ids.length) return { threads: [] };
+        q = q.in("id", ids);
+      }
       const { data, error } = await q;
       if (error) throw new Error(error.message);
-      return { threads: data };
+      const ids = (data ?? []).map((t) => t.id as string);
+      const previews: Record<string, unknown> = {};
+      const pending: Record<string, string[]> = {};
+      if (ids.length) {
+        const [{ data: msgs }, { data: open }] = await Promise.all([
+          db.from("agent_hub_messages").select("thread_id,author,kind,body,created_at").in("thread_id", ids).neq("kind", "SYSTEM")
+            .order("created_at", { ascending: false }).limit(500),
+          db.from("agent_hub_handoffs").select("thread_id,to_agent").in("thread_id", ids).in("status", ["QUEUED", "DELIVERED", "IN_PROGRESS"]),
+        ]);
+        for (const m of msgs ?? []) if (!previews[m.thread_id]) previews[m.thread_id] = { ...m, body: String(m.body).slice(0, 200) };
+        for (const o of open ?? []) (pending[o.thread_id] ??= []).push(o.to_agent);
+      }
+      return { threads: (data ?? []).map((t) => ({ ...t, last_message: previews[t.id] ?? null, waiting_on: pending[t.id] ?? [] })) };
     }
     case "thread": {
       const id = uuid(p.thread_id, "thread_id")!;
