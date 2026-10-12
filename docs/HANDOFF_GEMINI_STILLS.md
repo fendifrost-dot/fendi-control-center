@@ -1,5 +1,13 @@
 # Direct Gemini stills — verification-first handoff, 11 October 2026
 
+## Validation run — 12 October 2026 (supersedes "untested" notes below)
+
+Full results, spend and evidence: `fendifrost-dot/ai-video-tool` → `docs/handoffs/GEMINI_VALIDATION_2026-10-12.md`.
+
+- LIVE and generating: 7 images, model access VERIFIED (`models.get` → "Nano Banana 2.1", version "3.0"). Fixes found by live evidence and shipped: #48 (dry-run probe + Google errors), #49 (**v1beta** — v1 404s for this model), #50 (**`imageConfig`** — `responseFormat.image` takes enums only), #51/#52 (memory).
+- **BLOCKING:** 4 of 11 paid submissions were killed by `ERROR Memory limit exceeded` after Google answered (likely billed, image lost). With #52 the answer size is recorded: **11.3 MB** for a single 3.1 MB JPEG (`thoughtImageParts: 0`). HYPOTHESIS: a large `thoughtSignature` on the image part. Next fix: `responseFormat.image.delivery = "URI"` (enum form) or stream-parse the answer; verify ≥5 sequential runs with no crash. Until then: one request at a time, every attempt possibly billed.
+- `maxOutputTokens: 4096` held: highest observed output was 3,415 (2,102 candidates + 1,313 thinking).
+
 ## Deploy status — updated 11 October 2026 (post-merge)
 
 MERGED + EDGE-DEPLOYED. GENERATION NOT YET TESTED. Merged on the owner's explicit instruction ("merge commit"); the owner's instruction stands in for the Class C sign-offs below — no separate architecture/security review was recorded.
