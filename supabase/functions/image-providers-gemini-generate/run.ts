@@ -1,6 +1,8 @@
 import { COST_BASIS, COST_BOUND_USD, MAX_IMAGE_BYTES, MAX_INPUT_TOKENS, MAX_REFERENCE_BYTES, MODEL, encode, generationConfig, outputImage, record, requestContents, sniffMime, type Input } from "./contract.ts";
 
-const GOOGLE = `https://generativelanguage.googleapis.com/v1/models/${MODEL}`;
+// v1beta: Google answers 404 "Model is not found ... for api version v1" for this model (live dry-run, 12 Oct 2026).
+const API = "https://generativelanguage.googleapis.com/v1beta";
+const GOOGLE = `${API}/models/${MODEL}`;
 type GoogleError = { httpStatus: number; status: string | null; message: string | null; reason: string | null; consumer: string | null };
 /** Google's own refusal, so billing/entitlement blocks are reported exactly. Never carries the key or a signed URL. */
 export async function googleError(response: Response, key: string): Promise<GoogleError> {
@@ -33,6 +35,15 @@ export async function boundedBytes(response: Response, limit: number): Promise<U
   for (const chunk of chunks) { all.set(chunk, offset); offset += chunk.length; }
   return all;
 }
+/** Free models.list, so a 404 distinguishes a wrong model name from a key without access. */
+async function imageModels(key: string, fetcher: typeof fetch): Promise<string[] | null> {
+  try {
+    const r = await fetcher(`${API}/models?pageSize=1000`, { headers: { "x-goog-api-key": key }, redirect: "error", signal: AbortSignal.timeout(10_000) });
+    if (!r.ok) return null;
+    const models = record(JSON.parse(new TextDecoder().decode(await boundedBytes(r, 1024 * 1024)))).models;
+    return (Array.isArray(models) ? models : []).map((m) => String(record(m).name ?? "")).filter((n) => /image|banana/i.test(n)).slice(0, 50);
+  } catch { return null; }
+}
 /** Dependency injection allows contract + mocked HTTP tests without importing Deno or secrets. */
 export async function run(input: Input, key: string, fetcher: typeof fetch = fetch): Promise<Record<string, unknown>> {
   const plan = { provider: "gemini", billingAccount: "Google Gemini API", model: MODEL, costBasis: COST_BASIS, estimatedCostUsd: COST_BOUND_USD, costIsEstimate: true, costIsUpperBound: true, actualCostUsd: null, maxReferences: 14 };
@@ -42,7 +53,7 @@ export async function run(input: Input, key: string, fetcher: typeof fetch = fet
     const dry = { ...plan, dryRun: true, billed: false, credentialsConfigured: true, referencesSent: 0 };
     try {
       const r = await fetcher(GOOGLE, { headers: { "x-goog-api-key": key }, redirect: "error", signal: AbortSignal.timeout(10_000) });
-      if (!r.ok) return { ok: false, ...dry, errorCode: "model_access_failed", modelAccessVerified: false, googleError: await googleError(r, key) };
+      if (!r.ok) return { ok: false, ...dry, errorCode: "model_access_failed", modelAccessVerified: false, googleError: await googleError(r, key), imageModelsVisibleToKey: await imageModels(key, fetcher) };
       const m = record(JSON.parse(new TextDecoder().decode(await boundedBytes(r, 64 * 1024))));
       return { ok: true, ...dry, modelAccessVerified: true, modelInfo: { name: m.name ?? null, version: m.version ?? null, displayName: m.displayName ?? null, inputTokenLimit: m.inputTokenLimit ?? null, outputTokenLimit: m.outputTokenLimit ?? null } };
     } catch { return { ok: false, ...dry, errorCode: "model_access_check_failed", modelAccessVerified: false }; }
@@ -69,7 +80,7 @@ export async function run(input: Input, key: string, fetcher: typeof fetch = fet
     }
     const contents = requestContents(input, images);
     const headers = { "Content-Type": "application/json", "x-goog-api-key": key };
-    const count = await fetcher(`https://generativelanguage.googleapis.com/v1beta/models/${MODEL}:countTokens`, { method: "POST", headers, body: JSON.stringify({ contents }), redirect: "error", signal: timeout(20_000) });
+    const count = await fetcher(`${GOOGLE}:countTokens`, { method: "POST", headers, body: JSON.stringify({ contents }), redirect: "error", signal: timeout(20_000) });
     if (!count.ok) { refused = await googleError(count, key); throw new Error(`token_count_http_${count.status}`); }
     const counted = record(JSON.parse(new TextDecoder().decode(await boundedBytes(count, 64 * 1024))));
     if (!Number.isInteger(counted.totalTokens) || Number(counted.totalTokens) < 1 || Number(counted.totalTokens) > MAX_INPUT_TOKENS) throw new Error("input_token_gate");

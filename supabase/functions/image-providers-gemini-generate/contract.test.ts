@@ -44,13 +44,13 @@ describe("mocked integration: Google transport, no live provider", () => {
     const result = await run(parseInput({ ...raw, dryRun: true }), "configured", fetcher);
     expect(result).toMatchObject({ ok: true, billed: false, referencesSent: 0, actualCostUsd: null, modelAccessVerified: true, modelInfo: { version: "2.1" } });
     expect(fetcher).toHaveBeenCalledTimes(1);
-    expect(fetcher.mock.calls[0][0]).toBe(`https://generativelanguage.googleapis.com/v1/models/${MODEL}`);
+    expect(fetcher.mock.calls[0][0]).toBe(`https://generativelanguage.googleapis.com/v1beta/models/${MODEL}`);
     expect(fetcher.mock.calls[0][1].method).toBeUndefined();
   });
   it("dry-run reports Google's exact refusal without the key", async () => {
     const denial = { error: { code: 403, status: "PERMISSION_DENIED", message: "Billing is not enabled (key=configured)", details: [{ reason: "BILLING_DISABLED", metadata: { consumer: "projects/123" } }] } };
-    const result = await run(parseInput({ ...raw, dryRun: true }), "configured", vi.fn().mockResolvedValueOnce(Response.json(denial, { status: 403 })));
-    expect(result).toMatchObject({ ok: false, billed: false, modelAccessVerified: false, errorCode: "model_access_failed", googleError: { httpStatus: 403, status: "PERMISSION_DENIED", reason: "BILLING_DISABLED", consumer: "projects/123" } });
+    const result = await run(parseInput({ ...raw, dryRun: true }), "configured", vi.fn().mockResolvedValueOnce(Response.json(denial, { status: 403 })).mockResolvedValueOnce(Response.json({ models: [{ name: "models/gemini-3.1-flash-image" }, { name: "models/gemini-2.5-pro" }] })));
+    expect(result).toMatchObject({ imageModelsVisibleToKey: ["models/gemini-3.1-flash-image"], ok: false, billed: false, modelAccessVerified: false, errorCode: "model_access_failed", googleError: { httpStatus: 403, status: "PERMISSION_DENIED", reason: "BILLING_DISABLED", consumer: "projects/123" } });
     expect(JSON.stringify(result)).not.toContain("configured)");
   });
   it("a refused generation carries Google's error and is never retried", async () => {
@@ -71,7 +71,7 @@ describe("mocked integration: Google transport, no live provider", () => {
     expect(fetcher.mock.calls[0][1]).toMatchObject({ redirect: "error" });
     expect(fetcher.mock.calls[0][1].headers).toBeUndefined();
     expect(fetcher.mock.calls[1][0]).toContain("/v1beta/models/");
-    expect(fetcher.mock.calls[2][0]).toBe(`https://generativelanguage.googleapis.com/v1/models/${MODEL}:generateContent`);
+    expect(fetcher.mock.calls[2][0]).toBe(`https://generativelanguage.googleapis.com/v1beta/models/${MODEL}:generateContent`);
     const sent = JSON.parse(fetcher.mock.calls[2][1].body);
     expect(sent.contents[0].parts[2]).toEqual({ inlineData: { mimeType: "image/png", data } });
     expect(JSON.stringify(sent)).not.toContain("?token=");
