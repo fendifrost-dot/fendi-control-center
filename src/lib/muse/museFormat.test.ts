@@ -28,6 +28,7 @@ describe("brief sections", () => {
       "priorities",
       "system_failures",
       "waiting",
+      "workboard",
     ]);
   });
 });

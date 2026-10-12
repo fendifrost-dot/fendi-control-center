@@ -38,6 +38,8 @@ export interface ResourceSpec {
   timestampColumn: string | null;
   orderBy?: { column: string; ascending: boolean };
   filters?: Record<string, string>;
+  /** When set, `?since=` is a lower bound on this column (UTC), not an equality filter. */
+  sinceColumn?: string;
   defaultLimit: number;
   maxLimit: number;
 }
@@ -131,6 +133,7 @@ export const RESOURCES: Record<string, ResourceSpec> = {
     resource: "work-feed", view: "muse_work_feed",
     authoritative_source: "Control Hub Muse append-only work update feed",
     timestampColumn: "created_at", orderBy: { column: "created_at", ascending: false },
+    sinceColumn: "created_at",
     filters: {
       domain: "domain_key",
       actor: "actor",
@@ -142,6 +145,39 @@ export const RESOURCES: Record<string, ResourceSpec> = {
       mission_id: "mission_id",
     },
     defaultLimit: 200, maxLimit: 500,
+  },
+  // Canonical name for the same feed. Enki's reader was calling brief/decisions/
+  // improvements/verifications and 404ing anything that sounded like the board.
+  workboard: {
+    resource: "workboard", view: "muse_work_feed",
+    authoritative_source: "Control Hub Muse append-only workboard (muse_work_updates)",
+    timestampColumn: "created_at", orderBy: { column: "created_at", ascending: false },
+    sinceColumn: "created_at",
+    filters: {
+      domain: "domain_key",
+      actor: "actor",
+      type: "update_type",
+      task_id: "task_id",
+      improvement_id: "improvement_id",
+      mission_id: "mission_id",
+    },
+    defaultLimit: 50, maxLimit: 200,
+  },
+  // ASSIGNMENT + NOTE only. This is the Instagram send-pack correspondence.
+  assignments: {
+    resource: "assignments", view: "muse_workboard_assignments",
+    authoritative_source: "Control Hub Muse workboard ASSIGNMENT and NOTE rows",
+    timestampColumn: "created_at", orderBy: { column: "created_at", ascending: false },
+    sinceColumn: "created_at",
+    filters: {
+      domain: "domain_key",
+      actor: "actor",
+      type: "update_type",
+      task_id: "task_id",
+      improvement_id: "improvement_id",
+      mission_id: "mission_id",
+    },
+    defaultLimit: 50, maxLimit: 200,
   },
   "daily-reports": {
     resource: "daily-reports", view: "muse_daily_report_board",
@@ -157,6 +193,33 @@ export const RESOURCES: Record<string, ResourceSpec> = {
     filters: { state: "verification_state" }, defaultLimit: 100, maxLimit: 300,
   },
 };
+
+/**
+ * Lower bound for `?since=` on workboard reads.
+ * Date-only values mean the start of that UTC day. Offsets are rejected:
+ * `+` in a query string is easy to turn into a space, so callers send `Z`.
+ */
+export function parseSince(value: string | null): string | null {
+  if (value === null) return null;
+  const trimmed = value.trim();
+  if (!trimmed) throw new Error("since is empty");
+  if (trimmed.length > 40) throw new Error("since is too long");
+  if (!/^\d{4}-\d{2}-\d{2}(?:T\d{2}:\d{2}(?::\d{2}(?:\.\d{1,6})?)?Z)?$/.test(trimmed)) {
+    throw new Error("since must be YYYY-MM-DD or YYYY-MM-DDTHH:MM:SSZ (UTC, Z suffix)");
+  }
+  const dateOnly = trimmed.length === 10;
+  const iso = dateOnly ? `${trimmed}T00:00:00.000Z` : trimmed;
+  const parsed = Date.parse(iso);
+  if (Number.isNaN(parsed)) throw new Error("since must be a real timestamp");
+  const d = new Date(parsed);
+  if (dateOnly) {
+    const [year, month, day] = trimmed.split("-").map((part) => Number(part));
+    if (d.getUTCFullYear() !== year || d.getUTCMonth() !== month - 1 || d.getUTCDate() !== day) {
+      throw new Error("since must be a real calendar date");
+    }
+  }
+  return d.toISOString();
+}
 
 const REDACT_KEY = /(secret|token|api[_-]?key|password|passwd|credential|bearer|jwt|authorization|service[_-]?role)/i;
 
