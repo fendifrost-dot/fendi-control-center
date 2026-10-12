@@ -1,6 +1,6 @@
 // @vitest-environment node
 import { describe, expect, it, vi } from "vitest";
-import { COST_BOUND_USD, MAX_IMAGE_BYTES, MODEL, decodeImage, encode, generationConfig, outputImage, parseInput, referenceUrlAllowed } from "./contract.ts";
+import { COST_BOUND_USD, MAX_IMAGE_BYTES, MODEL, decodeImage, encode, generationConfig, outputImage, parseInput, referenceUrlAllowed, base64Bytes, bodyOf, requestBodyParts, requestContents } from "./contract.ts";
 import { boundedBytes, run } from "./run.ts";
 
 const user = "00000000-0000-4000-8000-000000000001";
@@ -80,12 +80,12 @@ describe("mocked integration: Google transport, no live provider", () => {
     expect(fetcher.mock.calls[0][1].headers).toBeUndefined();
     expect(fetcher.mock.calls[1][0]).toContain("/v1beta/models/");
     expect(fetcher.mock.calls[2][0]).toBe(`https://generativelanguage.googleapis.com/v1beta/models/${MODEL}:generateContent`);
-    const text = (b: unknown) => typeof b === "string" ? b : new TextDecoder().decode(b as Uint8Array);
-    const sent = JSON.parse(text(fetcher.mock.calls[2][1].body));
+    const sent = JSON.parse(await new Response(fetcher.mock.calls[2][1].body).text());
     expect(sent.contents[0].parts[2]).toEqual({ inlineData: { mimeType: "image/png", data } });
     expect(JSON.stringify(sent)).not.toContain("?token=");
     expect(sent.generationConfig).toMatchObject({ imageConfig: { aspectRatio: "9:16", imageSize: "2K" }, candidateCount: 1 });
-    expect(JSON.parse(text(fetcher.mock.calls[1][1].body))).toEqual({ contents: sent.contents });
+    expect(JSON.parse(await new Response(fetcher.mock.calls[1][1].body).text())).toEqual({ contents: sent.contents });
+    expect(fetcher.mock.calls[1][1].body).toBeInstanceOf(ReadableStream);
   });
   it("fails closed when countTokens is unavailable or over budget", async () => {
     for (const counted of [Response.json({ totalTokens: 20_000 }), Response.json({}), new Response("error", { status: 404 })]) {
@@ -113,5 +113,87 @@ describe("mocked integration: Google transport, no live provider", () => {
     const fetcher = vi.fn().mockResolvedValueOnce(new Response(png, { headers: { "Content-Length": String(MAX_IMAGE_BYTES + 1) } }));
     expect(await run(parseInput(raw), "secret", fetcher)).toMatchObject({ ok: false, billed: false, errorCode: "response_too_large" });
     expect(fetcher).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("unit: lean request bodies (worker memory)", () => {
+  it("base64Bytes is byte-identical to btoa for every length class", () => {
+    for (const n of [0, 1, 2, 3, 4, 5, 255, 256, 257, 65_535, 65_536, 65_537, 1_000_003]) {
+      const b = Uint8Array.from({ length: n }, (_, i) => (i * 7919 + n) % 256);
+      expect(new TextDecoder().decode(base64Bytes(b)), String(n)).toBe(toBase64(b));
+    }
+  });
+  it("body pieces reassemble to exactly the JSON the old string path sent, even when the prompt imitates the marker", async () => {
+    const input = parseInput({ ...raw, prompt: "Keep <IMAGE_0>. @@ref-00000000-0000-0000-0000-000000000000-0@@ and quotes \" é", references: [raw.references[0], { ...raw.references[0], label: "Second \"one\"" }] });
+    const imgs = [Uint8Array.from([1, 2, 3, 4, 5]), Uint8Array.from([250, 251])].map((b) => ({ mimeType: "image/png", b64: base64Bytes(b), str: toBase64(b) }));
+    const tail = `,"generationConfig":${JSON.stringify(generationConfig(input))}}`;
+    const expected = `${JSON.stringify({ contents: requestContents(input, imgs.map((i) => ({ mimeType: i.mimeType, data: i.str }))) }).slice(0, -1)}${tail}`;
+    for (const mode of ["bytes", "blob", "stream"] as const) {
+      expect(await new Response(bodyOf(requestBodyParts(input, imgs, tail), mode)).text(), mode).toBe(expected);
+    }
+  });
+  it("downloads a sized reference in one read, and still refuses a lying or oversized one", async () => {
+    const b = new Uint8Array(1000);
+    expect((await boundedBytes(new Response(b, { headers: { "Content-Length": "1000" } }), 1000)).length).toBe(1000);
+    await expect(boundedBytes(new Response(b, { headers: { "Content-Length": "1001" } }), 1000)).rejects.toThrow("response_too_large");
+  });
+});
+
+describe("mocked integration: request body acceptance and large answers", () => {
+  it("a 411 from countTokens (free) switches to a sized body; nothing billable is sent twice", async () => {
+    const fetcher = vi.fn().mockResolvedValueOnce(new Response(png)).mockResolvedValueOnce(new Response("", { status: 411 })).mockResolvedValueOnce(Response.json({ totalTokens: 1 })).mockImplementationOnce(success);
+    const result = await run(parseInput(raw), "secret", fetcher);
+    expect(result).toMatchObject({ ok: true, requestBodyMode: "blob" });
+    expect(fetcher.mock.calls.filter(([u]) => String(u).endsWith(":generateContent"))).toHaveLength(1);
+    expect(fetcher.mock.calls[3][1].body).toBeInstanceOf(Blob);
+  });
+  it("a runtime that throws on a streamed body falls back to a sized body during the free countTokens", async () => {
+    const fetcher = vi.fn().mockResolvedValueOnce(new Response(png)).mockRejectedValueOnce(new TypeError("streams unsupported")).mockResolvedValueOnce(Response.json({ totalTokens: 1 })).mockImplementationOnce(success);
+    expect(await run(parseInput(raw), "secret", fetcher)).toMatchObject({ ok: true, requestBodyMode: "blob" });
+    expect(fetcher.mock.calls.filter(([u]) => String(u).endsWith(":generateContent"))).toHaveLength(1);
+  });
+  it("a sized-body countTokens failure stops before spending", async () => {
+    const fetcher = vi.fn().mockResolvedValueOnce(new Response(png)).mockRejectedValueOnce(new TypeError("network down"));
+    expect(await run(parseInput(raw), "secret", fetcher, "blob")).toMatchObject({ ok: false, errorCode: "request_failed", submitted: false, possiblyBilled: false, billed: false });
+    expect(fetcher).toHaveBeenCalledTimes(2);
+  });
+  it("if sending countTokens consumed the reference buffers, the paid request is never sent", async () => {
+    // A runtime that transfers enqueued chunks would leave the next body with empty images and no error.
+    const detaching = async (_u: unknown, init: RequestInit) => {
+      const reader = (init.body as ReadableStream<Uint8Array>).getReader();
+      for (;;) { const { done, value } = await reader.read(); if (done) break; if (value.byteLength > 100) structuredClone(value, { transfer: [value.buffer] }); }
+      return Response.json({ totalTokens: 1 });
+    };
+    const big = new Uint8Array(4096); big.set([137, 80, 78, 71, 13, 10, 26, 10]);
+    const fetcher = vi.fn().mockResolvedValueOnce(new Response(big)).mockImplementationOnce(detaching);
+    expect(await run(parseInput(raw), "secret", fetcher)).toMatchObject({ ok: false, errorCode: "request_build_failed", submitted: false, billed: false });
+    expect(fetcher.mock.calls.filter(([u]) => String(u).endsWith(":generateContent"))).toHaveLength(0);
+  });
+  it("an ~11 MB answer with a 7 MB signature yields the image and reports field sizes only", async () => {
+    const jpeg = new Uint8Array(3_000_000); jpeg.set([255, 216, 255, 224]);
+    const data = encode(jpeg); const signature = "S".repeat(7_100_000);
+    const answer = JSON.stringify({ candidates: [{ finishReason: "STOP", content: { parts: [{ inlineData: { mimeType: "image/jpeg", data }, thoughtSignature: signature }] } }], usageMetadata: { promptTokenCount: 1 }, modelVersion: MODEL });
+    const fetcher = vi.fn().mockResolvedValueOnce(new Response(png)).mockResolvedValueOnce(Response.json({ totalTokens: 1 })).mockResolvedValueOnce(new Response(answer));
+    const result = await run(parseInput(raw), "secret", fetcher);
+    expect(result).toMatchObject({ ok: true, responseBytes: answer.length, finalImageParts: 1, thoughtImageParts: 0, finalImageSignatureBytes: signature.length, images: [{ data, mimeType: "image/jpeg", bytes: 3_000_000 }] });
+    expect(result.largeFields).toEqual({ "candidates[].content.parts[].thoughtSignature": signature.length });
+    expect(JSON.stringify({ ...result, images: [] })).not.toContain("SSSS");
+  });
+  it("an answer over the byte bound fails closed as possibly billed, with no retry", async () => {
+    const fetcher = vi.fn().mockResolvedValueOnce(new Response(png)).mockResolvedValueOnce(Response.json({ totalTokens: 1 })).mockResolvedValueOnce(new Response("{}", { headers: { "content-length": String(60 * 1024 * 1024) } }));
+    expect(await run(parseInput(raw), "secret", fetcher)).toMatchObject({ ok: false, errorCode: "response_too_large", submitted: true, possiblyBilled: true, billed: "unknown" });
+    expect(fetcher).toHaveBeenCalledTimes(3);
+  });
+  it("a provider timeout after submission is possibly billed and not retried", async () => {
+    const fetcher = vi.fn().mockResolvedValueOnce(new Response(png)).mockResolvedValueOnce(Response.json({ totalTokens: 1 })).mockRejectedValueOnce(new DOMException("timed out", "TimeoutError"));
+    expect(await run(parseInput(raw), "secret", fetcher)).toMatchObject({ ok: false, errorCode: "request_failed", submitted: true, possiblyBilled: true });
+    expect(fetcher).toHaveBeenCalledTimes(3);
+  });
+  it("two references within limits are both sent, in order", async () => {
+    const two = parseInput({ ...raw, references: [raw.references[0], { ...raw.references[0], label: "Second" }] });
+    const fetcher = vi.fn().mockResolvedValueOnce(new Response(png)).mockResolvedValueOnce(new Response(png)).mockResolvedValueOnce(Response.json({ totalTokens: 2 })).mockImplementationOnce(success);
+    expect(await run(two, "secret", fetcher)).toMatchObject({ ok: true, referencesSent: 2 });
+    const sent = JSON.parse(await new Response(fetcher.mock.calls[3][1].body).text());
+    expect(sent.contents[0].parts.map((p: Record<string, unknown>) => p.text ?? "image")).toEqual([two.prompt, "<IMAGE_0>: The rider (cast).", "image", "<IMAGE_1>: Second (cast).", "image"]);
   });
 });
