@@ -3,7 +3,10 @@
 export const MODEL = "gemini-nano-banana-2.1";
 export const MAX_REFERENCES = 14;
 export const MAX_INPUT_TOKENS = 16_384;
-export const MAX_OUTPUT_TOKENS = 4_096;
+// Room for the final 2K image (1,680 tokens), thinking, and up to two interim "thought" images, which Google says
+// the model may draw before the final one. Live 12 Oct 2026: a 4,096 cap ended one run MAX_TOKENS with no image
+// (1,768 tokens reported, ~2,330 unaccounted) — interim images are not billed but appear to count toward the cap.
+export const MAX_OUTPUT_TOKENS = 8_192;
 export const MAX_IMAGE_BYTES = 8 * 1024 * 1024;
 // Google: "Inline image data limits your total request size (text prompts, system instructions, and inline bytes)
 // to 20MB" (ai.google.dev/gemini-api/docs/image-understanding). Base64 adds a third, so 14 MiB of reference bytes is
@@ -15,7 +18,7 @@ export const MAX_ANSWER_BYTES = 48 * 1024 * 1024;
 // Conservative list-rate ceiling, NOT an invoice: all output tokens priced at the
 // highest modality rate, including thinking. countTokens must succeed before spend.
 export const COST_BOUND_USD = (MAX_INPUT_TOKENS * 1.5 + MAX_OUTPUT_TOKENS * 30) / 1e6;
-export const COST_BASIS = "Google list rates 2026-10-11; input <=16384 at $1.50/M, all output <=4096 at $30/M; invoice unknown";
+export const COST_BASIS = "Google list rates 2026-10-11; input <=16384 at $1.50/M, all output <=8192 at $30/M (assumes billed output never exceeds maxOutputTokens: unverified); invoice unknown";
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const ASPECTS = new Set(["1:1", "2:3", "3:2", "3:4", "4:3", "4:5", "5:4", "9:16", "16:9", "21:9"]);
 const BUCKETS = new Set(["project-references", "project-clips", "artist-assets", "wardrobe-refs", "prop-refs"]);
