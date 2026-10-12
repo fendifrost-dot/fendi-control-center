@@ -13,6 +13,18 @@ export async function googleError(response: Response, key: string): Promise<Goog
   const scrub = (v: unknown, n: number) => typeof v === "string" ? (key ? v.split(key).join("[redacted]") : v).replace(/https?:\/\/\S+\?\S*token=\S+/g, "[url]").slice(0, n) : null;
   return { httpStatus: response.status, status: scrub(body.status, 60), message: scrub(body.message, 500), reason: scrub(info.reason, 80), consumer: scrub(record(info.metadata).consumer, 80) };
 }
+/** How many image parts came back (final vs interim "thought" images): the answer size depends on it. */
+export function imageParts(payload: Record<string, unknown>) {
+  let finalImageParts = 0; let thoughtImageParts = 0;
+  for (const c of Array.isArray(payload.candidates) ? payload.candidates : []) {
+    const list = record(record(c).content).parts;
+    for (const p of Array.isArray(list) ? list.map(record) : []) {
+      if (!record(p.inlineData ?? p.inline_data).data) continue;
+      if (p.thought === true) thoughtImageParts++; else finalImageParts++;
+    }
+  }
+  return { finalImageParts, thoughtImageParts };
+}
 export function finishEvidence(payload: Record<string, unknown>) {
   const first = record(Array.isArray(payload.candidates) ? payload.candidates[0] : null);
   return { finishReason: typeof first.finishReason === "string" ? first.finishReason : null, blockReason: typeof record(payload.promptFeedback).blockReason === "string" ? record(payload.promptFeedback).blockReason as string : null };
@@ -58,7 +70,7 @@ export async function run(input: Input, key: string, fetcher: typeof fetch = fet
       return { ok: true, ...dry, modelAccessVerified: true, modelInfo: { name: m.name ?? null, version: m.version ?? null, displayName: m.displayName ?? null, inputTokenLimit: m.inputTokenLimit ?? null, outputTokenLimit: m.outputTokenLimit ?? null } };
     } catch { return { ok: false, ...dry, errorCode: "model_access_check_failed", modelAccessVerified: false }; }
   }
-  let submitted = false; let usage: unknown = null; let modelVersion: unknown = null; let refused: GoogleError | null = null; let finish = { finishReason: null as string | null, blockReason: null as string | null };
+  let submitted = false; let usage: unknown = null; let modelVersion: unknown = null; let refused: GoogleError | null = null; let responseBytes: number | null = null; let parts: ReturnType<typeof imageParts> | null = null; let finish = { finishReason: null as string | null, blockReason: null as string | null };
   const deadline = Date.now() + 150_000;
   const timeout = (ms: number) => {
     const remaining = deadline - Date.now();
@@ -79,9 +91,9 @@ export async function run(input: Input, key: string, fetcher: typeof fetch = fet
       images.push({ mimeType, data: encode(bytes) });
     }
     // Serialise once and drop the image copies: worker memory, not Google, was the limit (12 Oct 2026).
-    const countBody = JSON.stringify({ contents: requestContents(input, images) });
+    let countBody = JSON.stringify({ contents: requestContents(input, images) });
     const referencesSent = images.length; images = [];
-    const generateBody = `${countBody.slice(0, -1)},"generationConfig":${JSON.stringify(generationConfig(input))}}`;
+    let generateBody = `${countBody.slice(0, -1)},"generationConfig":${JSON.stringify(generationConfig(input))}}`;
     const headers = { "Content-Type": "application/json", "x-goog-api-key": key };
     const count = await fetcher(`${GOOGLE}:countTokens`, { method: "POST", headers, body: countBody, redirect: "error", signal: timeout(20_000) });
     if (!count.ok) { refused = await googleError(count, key); throw new Error(`token_count_http_${count.status}`); }
@@ -90,15 +102,21 @@ export async function run(input: Input, key: string, fetcher: typeof fetch = fet
     const generationSignal = timeout(110_000);
     submitted = true;
     const response = await fetcher(`${GOOGLE}:generateContent`, { method: "POST", headers, body: generateBody, redirect: "error", signal: generationSignal });
+    // The request has been sent: release both bodies before the (large) answer is read. Four of ten paid runs on
+    // 12 Oct 2026 were killed by the worker memory limit after Google had answered.
+    countBody = ""; generateBody = "";
     if (!response.ok) { refused = await googleError(response, key); throw new Error(`generation_http_${response.status}`); }
-    const payload = record(JSON.parse(new TextDecoder().decode(await boundedBytes(response, 12 * 1024 * 1024))));
-    usage = payload.usageMetadata ?? null; modelVersion = payload.modelVersion ?? null; finish = finishEvidence(payload);
+    let raw: Uint8Array | null = await boundedBytes(response, 12 * 1024 * 1024);
+    responseBytes = raw.length;
+    let text = new TextDecoder().decode(raw); raw = null;
+    const payload = record(JSON.parse(text)); text = "";
+    usage = payload.usageMetadata ?? null; modelVersion = payload.modelVersion ?? null; finish = finishEvidence(payload); parts = imageParts(payload);
     const image = outputImage(payload);
-    return { ok: true, ...plan, billingStatus: "invoice_unknown", billed: "unknown", possiblyBilled: true, submitted: true, referencesSent, countedInputTokens: counted.totalTokens, usage, modelVersion, ...finish, images: [image] };
+    return { ok: true, ...plan, billingStatus: "invoice_unknown", billed: "unknown", possiblyBilled: true, submitted: true, referencesSent, countedInputTokens: counted.totalTokens, usage, modelVersion, ...finish, responseBytes, ...parts, images: [image] };
   } catch (e) {
     // Only our fixed codes escape; a fetch exception can contain a signed URL or key.
     const msg = e instanceof Error ? e.message : "";
     const code = /^(response_too_large|empty_response|reference_download_failed|references_too_large|reference_not_supported_image|token_count_http_\d+|input_token_gate|generation_http_\d+|no_final_image|invalid_image_data|invalid_image_type)$/.test(msg) ? msg : "request_failed";
-    return { ok: false, ...plan, errorCode: code, retryable: false, submitted, possiblyBilled: submitted, billed: submitted ? "unknown" : false, usage, modelVersion, ...finish, googleError: refused, referencesSent: submitted ? input.references.length : 0 };
+    return { ok: false, ...plan, errorCode: code, retryable: false, submitted, possiblyBilled: submitted, billed: submitted ? "unknown" : false, usage, modelVersion, ...finish, responseBytes, ...(parts ?? {}), googleError: refused, referencesSent: submitted ? input.references.length : 0 };
   }
 }
