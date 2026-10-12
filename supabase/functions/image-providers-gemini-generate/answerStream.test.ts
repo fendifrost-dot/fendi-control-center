@@ -79,6 +79,10 @@ describe("unit: AnswerReader keeps the image, drops the bulk", () => {
     expect(r.images.map((i) => [i.thought, i.data.length, i.mimeType])).toEqual([[true, 0, "image/jpeg"], [true, 0, "image/jpeg"], [false, 11 + 80_000, "image/png"]]);
     expect(r.images[2].signatureBytes).toBe(signature.length);
   });
+  it("only the first final image's data is held; later ones are counted", () => {
+    const r = readIn(answer([{ inlineData: { mimeType: "image/jpeg", data: image } }, { inlineData: { mimeType: "image/png", data: "iVBORw0KGgo" } }]), randomCuts);
+    expect(r.images.map((i) => [i.thought, i.data.length, i.mimeType])).toEqual([[false, image.length, "image/jpeg"], [false, 0, "image/png"]]);
+  });
   it("a large non-image string anywhere is counted, not kept", () => {
     const big = "x".repeat(SMALL_STRING + 1);
     const r = readIn(JSON.stringify({ candidates: [{ content: { parts: [{ text: big }] } }], promptFeedback: { note: big } }), randomCuts);
@@ -101,5 +105,11 @@ describe("mocked integration: readAnswer bounds", () => {
   });
   it("a truncated answer is an error, not an empty success", async () => {
     await expect(readAnswer(stream('{"candidates":[{"content":'), 1000)).rejects.toThrow("invalid_answer_json");
+  });
+  it("a malformed answer cancels the rest of the body", async () => {
+    let cancelled = false;
+    const body = new ReadableStream({ pull(c) { c.enqueue(enc.encode('{"a":1} x')); }, cancel() { cancelled = true; } });
+    await expect(readAnswer(new Response(body), 1_000_000)).rejects.toThrow("invalid_answer_json");
+    expect(cancelled).toBe(true);
   });
 });

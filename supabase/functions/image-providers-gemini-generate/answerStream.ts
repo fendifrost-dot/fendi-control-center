@@ -197,7 +197,9 @@ export class AnswerReader {
       const part = f.value as Record<string, unknown>;
       const blob = (part.inlineData ?? part.inline_data) as Record<string, unknown> | undefined;
       const thought = part.thought === true;
-      this.images.push({ data: thought ? "" : (f.data ?? ""), mimeType: blob?.mimeType ?? blob?.mime_type, thought, signatureBytes: f.signatureBytes ?? 0 });
+      // Only the first final image is used; later ones are counted, not held.
+      const keep = !thought && !this.images.some((i) => !i.thought && i.data !== "");
+      this.images.push({ data: keep ? (f.data ?? "") : "", mimeType: blob?.mimeType ?? blob?.mime_type, thought, signatureBytes: f.signatureBytes ?? 0 });
     }
     this.assign(f.value);
   }
@@ -225,6 +227,9 @@ export async function readAnswer(response: Response, limit: number): Promise<Str
       if (reader.answerBytes + value.length > limit) { await body.cancel(); throw new Error("response_too_large"); }
       reader.feed(value);
     }
+  } catch (e) {
+    await body.cancel().catch(() => {}); // don't leave the rest of the answer open
+    throw e;
   } finally { body.releaseLock(); }
   return reader.finish();
 }

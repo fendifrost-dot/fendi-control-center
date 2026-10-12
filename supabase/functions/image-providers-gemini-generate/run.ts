@@ -120,18 +120,24 @@ export async function run(input: Input, key: string, fetcher: typeof fetch = fet
     // Streamed bodies keep the worker's peak flat (DECISION, measured on Deno with real fetch: see handoff).
     // countTokens is free, so it also proves Google accepts a body without a declared length before any spend.
     let mode = bodyMode;
-    track.mark("request_serialised");
+    const encodedLengths = images.map((im) => im.b64.byteLength);
     const headers = { "Content-Type": "application/json", "x-goog-api-key": key };
-    let count = await fetcher(`${GOOGLE}:countTokens`, { method: "POST", headers, body: bodyOf(requestBodyParts(input, images, "}"), mode), redirect: "error", signal: timeout(20_000) });
-    if (count.status === 411 && mode === "stream") {
-      await count.body?.cancel(); mode = "blob"; // Length Required: same bytes, declared length; still free
-      count = await fetcher(`${GOOGLE}:countTokens`, { method: "POST", headers, body: bodyOf(requestBodyParts(input, images, "}"), mode), redirect: "error", signal: timeout(20_000) });
+    const countTokens = () => fetcher(`${GOOGLE}:countTokens`, { method: "POST", headers, body: bodyOf(requestBodyParts(input, images, "}"), mode), redirect: "error", signal: timeout(20_000) });
+    let count: Response | null = null;
+    try { count = await countTokens(); } catch (e) { if (mode !== "stream") throw e; } // a runtime that can't stream throws
+    if (mode === "stream" && (count === null || count.status === 411)) {
+      await count?.body?.cancel(); mode = "blob"; // same bytes with a declared length; countTokens is still free
+      count = await countTokens();
     }
+    if (!count) throw new Error("request_failed");
     track.mark(`count_sent_${mode}`);
     if (!count.ok) { refused = await googleError(count, key); throw new Error(`token_count_http_${count.status}`); }
     const counted = record(JSON.parse(new TextDecoder().decode(await boundedBytes(count, 64 * 1024))));
     if (!Number.isInteger(counted.totalTokens) || Number(counted.totalTokens) < 1 || Number(counted.totalTokens) > MAX_INPUT_TOKENS) throw new Error("input_token_gate");
     track.mark("tokens_counted");
+    // The same reference buffers feed every body: if a runtime had consumed them, the paid request would carry
+    // empty images without an error. Refuse before spending instead.
+    if (images.some((im, i) => im.b64.byteLength !== encodedLengths[i] || im.b64.byteLength === 0)) throw new Error("request_build_failed");
     let generateBody: BodyInit | null = bodyOf(requestBodyParts(input, images, `,"generationConfig":${JSON.stringify(generationConfig(input))}}`), mode);
     images = [];
     const generationSignal = timeout(110_000);
@@ -155,7 +161,7 @@ export async function run(input: Input, key: string, fetcher: typeof fetch = fet
   } catch (e) {
     // Only our fixed codes escape; a fetch exception can contain a signed URL or key.
     const msg = e instanceof Error ? e.message : "";
-    const code = /^(response_too_large|empty_response|invalid_answer_json|reference_download_failed|references_too_large|reference_not_supported_image|token_count_http_\d+|input_token_gate|generation_http_\d+|no_final_image|invalid_image_data|invalid_image_type)$/.test(msg) ? msg : "request_failed";
+    const code = /^(response_too_large|empty_response|invalid_answer_json|request_build_failed|reference_download_failed|references_too_large|reference_not_supported_image|token_count_http_\d+|input_token_gate|generation_http_\d+|no_final_image|invalid_image_data|invalid_image_type)$/.test(msg) ? msg : "request_failed";
     return { ok: false, ...plan, errorCode: code, retryable: false, submitted, possiblyBilled: submitted, billed: submitted ? "unknown" : false, usage, modelVersion, ...finish, ...(evidence ?? {}), phases: track.phases, googleError: refused, referencesSent: submitted ? input.references.length : 0 };
   }
 }

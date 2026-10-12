@@ -147,6 +147,28 @@ describe("mocked integration: request body acceptance and large answers", () => 
     expect(fetcher.mock.calls.filter(([u]) => String(u).endsWith(":generateContent"))).toHaveLength(1);
     expect(fetcher.mock.calls[3][1].body).toBeInstanceOf(Blob);
   });
+  it("a runtime that throws on a streamed body falls back to a sized body during the free countTokens", async () => {
+    const fetcher = vi.fn().mockResolvedValueOnce(new Response(png)).mockRejectedValueOnce(new TypeError("streams unsupported")).mockResolvedValueOnce(Response.json({ totalTokens: 1 })).mockImplementationOnce(success);
+    expect(await run(parseInput(raw), "secret", fetcher)).toMatchObject({ ok: true, requestBodyMode: "blob" });
+    expect(fetcher.mock.calls.filter(([u]) => String(u).endsWith(":generateContent"))).toHaveLength(1);
+  });
+  it("a sized-body countTokens failure stops before spending", async () => {
+    const fetcher = vi.fn().mockResolvedValueOnce(new Response(png)).mockRejectedValueOnce(new TypeError("network down"));
+    expect(await run(parseInput(raw), "secret", fetcher, "blob")).toMatchObject({ ok: false, errorCode: "request_failed", submitted: false, possiblyBilled: false, billed: false });
+    expect(fetcher).toHaveBeenCalledTimes(2);
+  });
+  it("if sending countTokens consumed the reference buffers, the paid request is never sent", async () => {
+    // A runtime that transfers enqueued chunks would leave the next body with empty images and no error.
+    const detaching = async (_u: unknown, init: RequestInit) => {
+      const reader = (init.body as ReadableStream<Uint8Array>).getReader();
+      for (;;) { const { done, value } = await reader.read(); if (done) break; if (value.byteLength > 100) structuredClone(value, { transfer: [value.buffer] }); }
+      return Response.json({ totalTokens: 1 });
+    };
+    const big = new Uint8Array(4096); big.set([137, 80, 78, 71, 13, 10, 26, 10]);
+    const fetcher = vi.fn().mockResolvedValueOnce(new Response(big)).mockImplementationOnce(detaching);
+    expect(await run(parseInput(raw), "secret", fetcher)).toMatchObject({ ok: false, errorCode: "request_build_failed", submitted: false, billed: false });
+    expect(fetcher.mock.calls.filter(([u]) => String(u).endsWith(":generateContent"))).toHaveLength(0);
+  });
   it("an ~11 MB answer with a 7 MB signature yields the image and reports field sizes only", async () => {
     const jpeg = new Uint8Array(3_000_000); jpeg.set([255, 216, 255, 224]);
     const data = encode(jpeg); const signature = "S".repeat(7_100_000);
