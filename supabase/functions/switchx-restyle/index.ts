@@ -1298,7 +1298,7 @@ async function uploadFileToFalCdn(
   const putResp = await fetch(upload_url, {
     method: "PUT",
     headers: { "Content-Type": contentType },
-    body: bytes,
+    body: bytes as BodyInit,
   });
   if (!putResp.ok) {
     throw new Error(`fal_cdn_upload_${putResp.status}: ${await putResp.text().catch(() => "")}`);

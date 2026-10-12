@@ -202,6 +202,7 @@
         "npm:@supabase/supabase-js@^2.98.0",
         "npm:@tailwindcss/typography@~0.5.16",
         "npm:@tanstack/react-query@^5.83.0",
+        "npm:@testing-library/dom@^10.4.1",
         "npm:@testing-library/jest-dom@^6.6.0",
         "npm:@testing-library/react@16",
         "npm:@types/node@^22.16.5",
