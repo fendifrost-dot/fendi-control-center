@@ -49,12 +49,36 @@ function AttachmentView({ a }: { a: Attachment }) {
   );
 }
 
+/** Light formatting for agent replies: headings, **bold**, `code` and fenced blocks. No HTML is injected. */
+function Rich({ text }: { text: string }) {
+  const parts = text.split(/```[\w-]*\n?/);
+  return (
+    <>
+      {parts.map((part, i) =>
+        i % 2 === 1 ? (
+          <pre key={i} className="my-1.5 overflow-x-auto rounded bg-muted p-2 font-mono text-[11px] leading-snug">{part.replace(/\n$/, "")}</pre>
+        ) : (
+          part.split("\n").map((line, j) => {
+            const h = /^#{1,6}\s+(.*)$/.exec(line);
+            const content = (h ? h[1] : line).split(/(\*\*[^*]+\*\*|`[^`]+`)/).map((seg, k) =>
+              seg.startsWith("**") && seg.endsWith("**") && seg.length > 4 ? <strong key={k}>{seg.slice(2, -2)}</strong>
+                : seg.startsWith("`") && seg.endsWith("`") && seg.length > 2 ? <code key={k} className="rounded bg-muted px-1 font-mono text-[12px]">{seg.slice(1, -1)}</code>
+                : seg,
+            );
+            return <div key={`${i}-${j}`} className={cn(h && "mt-2 font-semibold", !line.trim() && "h-2")}>{content}</div>;
+          })
+        ),
+      )}
+    </>
+  );
+}
+
 function Body({ text }: { text: string }) {
   const [more, setMore] = useState(false);
   const long = text.length > 1400;
   return (
     <div className="text-sm leading-relaxed">
-      <div className={cn("whitespace-pre-wrap break-words", long && !more && "line-clamp-[18]")}>{text}</div>
+      <div className={cn("whitespace-pre-wrap break-words", long && !more && "max-h-[26rem] overflow-hidden")}><Rich text={text} /></div>
       {long && (
         <button type="button" className="mt-1 text-xs text-muted-foreground underline" onClick={() => setMore((m) => !m)}>
           {more ? "Show less" : "Show all"}
@@ -210,7 +234,7 @@ export default function ThreadPage() {
               value={draft}
               onChange={(e) => setDraft(e.target.value)}
               rows={1}
-              placeholder={to ? `Message ${agentName(agents.data, to)}` : "Add a note to this thread"}
+              placeholder={to ? "Message" : "Add a note"}
               className="max-h-40 min-h-[40px] flex-1 resize-none text-base sm:text-sm"
             />
             <Button size="icon" className="shrink-0" aria-label="Send" disabled={!draft.trim() || sending} onClick={send}>

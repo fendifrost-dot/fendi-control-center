@@ -99,6 +99,11 @@ async function getAgent(db: SupabaseClient, key: string) {
   return await must(db.from("agent_hub_agents").select("*").eq("key", key).maybeSingle(), `agent ${key}`) as Record<string, any>;
 }
 
+async function displayName(db: SupabaseClient, key: string): Promise<string> {
+  const { data } = await db.from("agent_hub_agents").select("display_name").eq("key", key).maybeSingle();
+  return (data?.display_name as string) ?? key;
+}
+
 async function insertMessage(db: SupabaseClient, row: {
   thread_id: string; author: string; author_kind: "agent" | "human" | "system"; kind: MessageKind; body: string;
   reply_to?: string | null; handoff_id?: string | null; context?: Record<string, unknown>; attachments?: Attachment[];
@@ -345,7 +350,7 @@ async function createHandoff(db: SupabaseClient, actor: Actor, input: {
   await db.from("agent_hub_handoffs").update({ context: packet }).eq("id", handoff.id);
   await insertMessage(db, {
     thread_id: thread.id, author: actor.key, author_kind: actor.type === "human" ? "human" : "system", kind: "SYSTEM",
-    body: `${input.purpose} handoff to ${agent.display_name}${source ? ` of ${source.author}'s ${String(source.kind).toLowerCase()}` : ""}.${input.instructions ? ` Instructions: ${input.instructions}` : ""}`,
+    body: `${input.purpose.charAt(0) + input.purpose.slice(1).toLowerCase()} sent to ${agent.display_name}${source ? ` (${source.author === "fendi" ? "your" : `${await displayName(db, source.author)}'s`} ${String(source.kind).toLowerCase()})` : ""}.${input.instructions ? ` Instructions: ${input.instructions}` : ""}`,
     handoff_id: handoff.id, reply_to: source?.id ?? null,
   });
   await db.from("agent_hub_threads").update({ status: "WAITING_ON_AGENT" }).eq("id", thread.id);
