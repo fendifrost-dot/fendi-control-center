@@ -1,10 +1,6 @@
 // @vitest-environment node
 import { describe, expect, it, vi } from "vitest";
-<<<<<<< HEAD
 import { COST_BOUND_USD, MAX_IMAGE_BYTES, MAX_REFERENCE_BYTES, MAX_REQUEST_BYTES, MODEL, decodeImage, encode, generationConfig, outputImage, parseInput, referenceUrlAllowed, base64Bytes, bodyOf, requestBodyParts, requestContents } from "./contract.ts";
-=======
-import { COST_BOUND_USD, MAX_IMAGE_BYTES, MODEL, decodeImage, encode, generationConfig, outputImage, parseInput, referenceUrlAllowed, base64Bytes, bodyOf, requestBodyParts, requestContents } from "./contract.ts";
->>>>>>> origin/claude/determined-faraday-4rzanq
 import { boundedBytes, run } from "./run.ts";
 
 const user = "00000000-0000-4000-8000-000000000001";
@@ -193,7 +189,6 @@ describe("mocked integration: request body acceptance and large answers", () => 
     expect(await run(parseInput(raw), "secret", fetcher)).toMatchObject({ ok: false, errorCode: "request_failed", submitted: true, possiblyBilled: true });
     expect(fetcher).toHaveBeenCalledTimes(3);
   });
-<<<<<<< HEAD
   it("the identity portrait with two guides (13.4 MB, live 12 Oct) is sent whole; the body stays under Google's 20 MB", async () => {
     const sized = (n: number) => { const b = new Uint8Array(n); b.set([137, 80, 78, 71, 13, 10, 26, 10]); return b; };
     const three = parseInput({ ...raw, references: [raw.references[0], { ...raw.references[0], label: "Outfit" }, { ...raw.references[0], label: "Horse" }] });
@@ -215,8 +210,6 @@ describe("mocked integration: request body acceptance and large answers", () => 
     // UTF-16 unit escapes to 6 JSON bytes (\uXXXX), plus 4 KB of structure.
     expect(Math.ceil(MAX_REFERENCE_BYTES / 3) * 4 + 20_000 * 6 + 14 * 240 * 6 + 4096).toBeLessThan(MAX_REQUEST_BYTES);
   });
-=======
->>>>>>> origin/claude/determined-faraday-4rzanq
   it("two references within limits are both sent, in order", async () => {
     const two = parseInput({ ...raw, references: [raw.references[0], { ...raw.references[0], label: "Second" }] });
     const fetcher = vi.fn().mockResolvedValueOnce(new Response(png)).mockResolvedValueOnce(new Response(png)).mockResolvedValueOnce(Response.json({ totalTokens: 2 })).mockImplementationOnce(success);
