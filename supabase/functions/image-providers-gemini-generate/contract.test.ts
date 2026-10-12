@@ -38,7 +38,7 @@ describe("unit: Gemini route contract", () => {
     expect(decodeImage(data, "image/png")).toBe(png.length);
     for (const n of [0, 1, 2, 3, 24569, 24570, 24571, 50001]) {
       const b = Uint8Array.from({ length: n }, (_, i) => (i * 7919) % 256);
-      expect(encode(b)).toBe(Buffer.from(b).toString("base64"));
+      expect(encode(b)).toBe(toBase64(b));
     }
     expect(() => decodeImage(data, "image/jpeg")).toThrow();
     expect(() => outputImage({ candidates: [{ content: { parts: [{ thought: true, inlineData: { data, mimeType: "image/png" } }] } }] })).toThrow("no_final_image");
