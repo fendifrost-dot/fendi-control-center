@@ -14,6 +14,355 @@ export type Database = {
   }
   public: {
     Tables: {
+      agent_hub_agents: {
+        Row: {
+          auth: string
+          availability: string
+          availability_note: string | null
+          billing: string
+          bridge_cli: string | null
+          connects_to: string
+          conversation_state: string
+          created_at: string
+          display_name: string
+          key: string
+          kind: string
+          last_seen_at: string | null
+          last_verified_at: string | null
+          model: string | null
+          secret_name: string | null
+          sort_order: number
+          token_label: string | null
+          tool_access: string
+          transport: string
+          updated_at: string
+          workboard_mirror: boolean
+        }
+        Insert: {
+          auth: string
+          availability?: string
+          availability_note?: string | null
+          billing: string
+          bridge_cli?: string | null
+          connects_to: string
+          conversation_state: string
+          created_at?: string
+          display_name: string
+          key: string
+          kind: string
+          last_seen_at?: string | null
+          last_verified_at?: string | null
+          model?: string | null
+          secret_name?: string | null
+          sort_order?: number
+          token_label?: string | null
+          tool_access: string
+          transport: string
+          updated_at?: string
+          workboard_mirror?: boolean
+        }
+        Update: {
+          auth?: string
+          availability?: string
+          availability_note?: string | null
+          billing?: string
+          bridge_cli?: string | null
+          connects_to?: string
+          conversation_state?: string
+          created_at?: string
+          display_name?: string
+          key?: string
+          kind?: string
+          last_seen_at?: string | null
+          last_verified_at?: string | null
+          model?: string | null
+          secret_name?: string | null
+          sort_order?: number
+          token_label?: string | null
+          tool_access?: string
+          transport?: string
+          updated_at?: string
+          workboard_mirror?: boolean
+        }
+        Relationships: []
+      }
+      agent_hub_handoffs: {
+        Row: {
+          context: Json
+          created_at: string
+          delivered_at: string | null
+          delivery: Json
+          error: string | null
+          from_agent: string
+          id: string
+          instructions: string | null
+          purpose: string
+          requested_by: string
+          responded_at: string | null
+          response_message_id: string | null
+          source_message_id: string | null
+          status: string
+          thread_id: string
+          to_agent: string
+          updated_at: string
+        }
+        Insert: {
+          context?: Json
+          created_at?: string
+          delivered_at?: string | null
+          delivery?: Json
+          error?: string | null
+          from_agent: string
+          id?: string
+          instructions?: string | null
+          purpose?: string
+          requested_by: string
+          responded_at?: string | null
+          response_message_id?: string | null
+          source_message_id?: string | null
+          status?: string
+          thread_id: string
+          to_agent: string
+          updated_at?: string
+        }
+        Update: {
+          context?: Json
+          created_at?: string
+          delivered_at?: string | null
+          delivery?: Json
+          error?: string | null
+          from_agent?: string
+          id?: string
+          instructions?: string | null
+          purpose?: string
+          requested_by?: string
+          responded_at?: string | null
+          response_message_id?: string | null
+          source_message_id?: string | null
+          status?: string
+          thread_id?: string
+          to_agent?: string
+          updated_at?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "agent_hub_handoffs_response_message_id_fkey"
+            columns: ["response_message_id"]
+            isOneToOne: false
+            referencedRelation: "agent_hub_messages"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "agent_hub_handoffs_source_message_id_fkey"
+            columns: ["source_message_id"]
+            isOneToOne: false
+            referencedRelation: "agent_hub_messages"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "agent_hub_handoffs_thread_id_fkey"
+            columns: ["thread_id"]
+            isOneToOne: false
+            referencedRelation: "agent_hub_threads"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "agent_hub_handoffs_to_agent_fkey"
+            columns: ["to_agent"]
+            isOneToOne: false
+            referencedRelation: "agent_hub_agents"
+            referencedColumns: ["key"]
+          },
+        ]
+      }
+      agent_hub_messages: {
+        Row: {
+          attachments: Json
+          author: string
+          author_kind: string
+          body: string
+          context: Json
+          created_at: string
+          handoff_id: string | null
+          id: string
+          kind: string
+          reply_to: string | null
+          thread_id: string
+        }
+        Insert: {
+          attachments?: Json
+          author: string
+          author_kind?: string
+          body: string
+          context?: Json
+          created_at?: string
+          handoff_id?: string | null
+          id?: string
+          kind?: string
+          reply_to?: string | null
+          thread_id: string
+        }
+        Update: {
+          attachments?: Json
+          author?: string
+          author_kind?: string
+          body?: string
+          context?: Json
+          created_at?: string
+          handoff_id?: string | null
+          id?: string
+          kind?: string
+          reply_to?: string | null
+          thread_id?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "agent_hub_messages_handoff_fk"
+            columns: ["handoff_id"]
+            isOneToOne: false
+            referencedRelation: "agent_hub_handoffs"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "agent_hub_messages_reply_to_fkey"
+            columns: ["reply_to"]
+            isOneToOne: false
+            referencedRelation: "agent_hub_messages"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "agent_hub_messages_thread_id_fkey"
+            columns: ["thread_id"]
+            isOneToOne: false
+            referencedRelation: "agent_hub_threads"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
+      agent_hub_sessions: {
+        Row: {
+          agent_key: string
+          external_session_id: string
+          meta: Json
+          thread_id: string
+          updated_at: string
+        }
+        Insert: {
+          agent_key: string
+          external_session_id: string
+          meta?: Json
+          thread_id: string
+          updated_at?: string
+        }
+        Update: {
+          agent_key?: string
+          external_session_id?: string
+          meta?: Json
+          thread_id?: string
+          updated_at?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "agent_hub_sessions_agent_key_fkey"
+            columns: ["agent_key"]
+            isOneToOne: false
+            referencedRelation: "agent_hub_agents"
+            referencedColumns: ["key"]
+          },
+          {
+            foreignKeyName: "agent_hub_sessions_thread_id_fkey"
+            columns: ["thread_id"]
+            isOneToOne: false
+            referencedRelation: "agent_hub_threads"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
+      agent_hub_threads: {
+        Row: {
+          created_at: string
+          created_by: string
+          id: string
+          last_activity_at: string
+          mission_id: string | null
+          primary_agent: string | null
+          project: string | null
+          status: string
+          task_id: string | null
+          title: string
+          updated_at: string
+        }
+        Insert: {
+          created_at?: string
+          created_by: string
+          id?: string
+          last_activity_at?: string
+          mission_id?: string | null
+          primary_agent?: string | null
+          project?: string | null
+          status?: string
+          task_id?: string | null
+          title: string
+          updated_at?: string
+        }
+        Update: {
+          created_at?: string
+          created_by?: string
+          id?: string
+          last_activity_at?: string
+          mission_id?: string | null
+          primary_agent?: string | null
+          project?: string | null
+          status?: string
+          task_id?: string | null
+          title?: string
+          updated_at?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "agent_hub_threads_mission_id_fkey"
+            columns: ["mission_id"]
+            isOneToOne: false
+            referencedRelation: "muse_mission_board"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "agent_hub_threads_mission_id_fkey"
+            columns: ["mission_id"]
+            isOneToOne: false
+            referencedRelation: "muse_missions"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "agent_hub_threads_primary_agent_fkey"
+            columns: ["primary_agent"]
+            isOneToOne: false
+            referencedRelation: "agent_hub_agents"
+            referencedColumns: ["key"]
+          },
+          {
+            foreignKeyName: "agent_hub_threads_task_id_fkey"
+            columns: ["task_id"]
+            isOneToOne: false
+            referencedRelation: "muse_agent_queue"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "agent_hub_threads_task_id_fkey"
+            columns: ["task_id"]
+            isOneToOne: false
+            referencedRelation: "muse_improvement_tasks"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "agent_hub_threads_task_id_fkey"
+            columns: ["task_id"]
+            isOneToOne: false
+            referencedRelation: "muse_verification_queue"
+            referencedColumns: ["task_id"]
+          },
+        ]
+      }
       audit_logs: {
         Row: {
           action: string
