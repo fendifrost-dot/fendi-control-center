@@ -8,7 +8,7 @@ const project = "00000000-0000-4000-8000-000000000002";
 const job = "00000000-0000-4000-8000-000000000003";
 const prefix = "https://qoyxgnkvjukovkrvdaiq.supabase.co/storage/v1/object/sign";
 const url = `${prefix}/prop-refs/${user}/rider.png?token=private`;
-const raw = { model: MODEL, n: 1, prompt: "New scene. Keep <IMAGE_0> as the same person.", resolution: "2k", aspectRatio: "9:16", maxCostUsd: .15, avt_user_id: user, avt_project_id: project, jobRowId: job, references: [{ url, role: "cast", label: "The rider" }] };
+const raw = { model: MODEL, n: 1, prompt: "New scene. Keep <IMAGE_0> as the same person.", resolution: "2k", aspectRatio: "9:16", maxCostUsd: .28, avt_user_id: user, avt_project_id: project, jobRowId: job, references: [{ url, role: "cast", label: "The rider" }] };
 // Header fixture only: these tests exercise transport, not image fidelity/decoding.
 const png = new Uint8Array([137,80,78,71,13,10,26,10,0,0,0,0,1]);
 const data = encode(png);
@@ -21,7 +21,7 @@ describe("unit: Gemini route contract", () => {
     expect(parseInput(raw).model).toBe(MODEL);
     for (const change of [{ model: "latest" }, { n: 2 }, { maxCostUsd: .01 }, { maxCostUsd: NaN }, { maxCostUsd: "1" }, { resolution: "4k" }, { dryRun: "true" }, { jobRowId: undefined }, { prompt: "" }, { aspectRatio: "invented" }]) expect(() => parseInput({ ...raw, ...change })).toThrow();
     expect(() => parseInput({ ...raw, jobRowId: undefined, dryRun: true })).not.toThrow();
-    expect(COST_BOUND_USD).toBeCloseTo(.147456);
+    expect(COST_BOUND_USD).toBeCloseTo(.270336);
   });
   it("allows only the fixed AVT host, owner prefix and project folders", () => {
     expect(referenceUrlAllowed(url, user, project)).toBe(true);
@@ -33,7 +33,7 @@ describe("unit: Gemini route contract", () => {
     expect(() => parseInput({ ...raw, references: [{ ...raw.references[0], url: "https://example.com/a.png" }] })).toThrow("reference_forbidden");
   });
   it("keeps output configuration explicit and validates MIME against bytes", () => {
-    expect(generationConfig(parseInput(raw))).toMatchObject({ maxOutputTokens: 4096, candidateCount: 1, imageConfig: { aspectRatio: "9:16", imageSize: "2K" }, thinkingConfig: { thinkingLevel: "MEDIUM" } });
+    expect(generationConfig(parseInput(raw))).toMatchObject({ maxOutputTokens: 8192, candidateCount: 1, imageConfig: { aspectRatio: "9:16", imageSize: "2K" }, thinkingConfig: { thinkingLevel: "MEDIUM" } });
     expect(generationConfig(parseInput(raw))).not.toHaveProperty("responseFormat");
     expect(decodeImage(data, "image/png")).toBe(png.length);
     for (const n of [0, 1, 2, 3, 24569, 24570, 24571, 50001]) {
