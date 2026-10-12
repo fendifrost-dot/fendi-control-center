@@ -79,3 +79,18 @@ Review explicitly: list-rate bound vs actual bill; truncated output at the bound
 ## Report back
 
 PR/merge revisions; three review outcomes; exact redeployed function names; unauthenticated/dry-run/RLS results; whether key/model access was actually checked; any paid test's input IDs, request/model version, usage, invoice-unknown status and output ID. Do not call this live, funded or photoreal until the corresponding evidence exists.
+
+---
+
+## 12 Oct 2026, second pass: reliability fixes are live
+
+Full evidence is in AVT [`docs/handoffs/GEMINI_RELIABILITY_2026-10-12.md`](https://github.com/fendifrost-dot/ai-video-tool/blob/main/docs/handoffs/GEMINI_RELIABILITY_2026-10-12.md).
+
+| PR | Change | State |
+|---|---|---|
+| #55 | Streamed request body; incremental answer reader keeps only the final image (`thoughtSignature` counted, not kept) | deployed; live: 0 crashes in 6 submissions; peak heap ≤ 56 MB |
+| #56 | Reference cap 14 MiB plus a 20,000,000-byte request guard (Google's inline limit) | deployed; live: 3 references / 13.4 MB OK |
+| #57 | `maxOutputTokens` 8,192; per-request upper bound $0.270336 | deployed; one `MAX_TOKENS` run preceded it; the interim-image cause is a HYPOTHESIS |
+
+**Verify the revision:** a real run's `response_payload_json` carries `requestBodyMode`, `largeFields` and `phases`. `costBasis` mentions `<=8192`.
+Callers must pass `maxCostUsd ≥ 0.28`.
