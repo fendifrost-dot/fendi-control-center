@@ -18,6 +18,7 @@ serve(async (req) => {
   const result = await run(input, key);
   // Never log reference URLs, image bytes, or credentials.
   const { images: _images, ...evidence } = result;
-  await finishLog(log.logId, result.ok ? "succeeded" : "failed", { startedAt: log.startedAt, responseJson: evidence, httpStatus: 200 });
-  return jsonOk({ ...result, requestId: log.requestId });
+  // An audit row left "attempted" after a completed call looks like a lost answer; say when that happened.
+  const auditFinalized = await finishLog(log.logId, result.ok ? "succeeded" : "failed", { startedAt: log.startedAt, responseJson: evidence, httpStatus: 200 });
+  return jsonOk({ ...result, requestId: log.requestId, auditFinalized });
 });

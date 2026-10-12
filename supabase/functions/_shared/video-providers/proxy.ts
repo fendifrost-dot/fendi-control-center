@@ -175,6 +175,7 @@ export async function startLog(params: {
   return { logId, requestId, startedAt };
 }
 
+/** Returns false when the audit row could not be completed, so a caller can say so instead of implying it was. */
 export async function finishLog(
   logId: string | null,
   outcome: "succeeded" | "failed",
@@ -184,11 +185,11 @@ export async function finishLog(
     error?: string;
     startedAt: number;
   },
-) {
-  if (!logId) return;
+): Promise<boolean> {
+  if (!logId) return false;
   try {
     const supabase = getServiceClient();
-    await supabase
+    const { error } = await supabase
       .from("tool_execution_logs")
       .update({
         status: outcome,
@@ -199,8 +200,11 @@ export async function finishLog(
         error: details.error?.slice(0, 5000) ?? null,
       })
       .eq("id", logId);
+    if (error) { console.error("finishLog: tool_execution_logs update rejected", error.message); return false; }
+    return true;
   } catch (e) {
     console.error("finishLog: failed to update tool_execution_logs row", e);
+    return false;
   }
 }
 

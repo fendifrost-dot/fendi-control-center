@@ -1,6 +1,6 @@
 // @vitest-environment node
 import { describe, expect, it, vi } from "vitest";
-import { COST_BOUND_USD, MAX_IMAGE_BYTES, MAX_REFERENCE_BYTES, MAX_REQUEST_BYTES, MODEL, decodeImage, encode, generationConfig, outputImage, parseInput, referenceUrlAllowed, base64Bytes, bodyOf, requestBodyParts, requestContents } from "./contract.ts";
+import { COST_CONDITIONAL_USD, MAX_IMAGE_BYTES, MAX_REFERENCE_BYTES, MAX_REQUEST_BYTES, MIN_IMAGE_BYTES, MODEL, decodeImage, encode, generationConfig, parseInput, referenceUrlAllowed, base64Bytes, bodyOf, requestBodyParts, requestContents } from "./contract.ts";
 import { boundedBytes, run } from "./run.ts";
 
 const user = "00000000-0000-4000-8000-000000000001";
@@ -9,8 +9,9 @@ const job = "00000000-0000-4000-8000-000000000003";
 const prefix = "https://qoyxgnkvjukovkrvdaiq.supabase.co/storage/v1/object/sign";
 const url = `${prefix}/prop-refs/${user}/rider.png?token=private`;
 const raw = { model: MODEL, n: 1, prompt: "New scene. Keep <IMAGE_0> as the same person.", resolution: "2k", aspectRatio: "9:16", maxCostUsd: .28, avt_user_id: user, avt_project_id: project, jobRowId: job, references: [{ url, role: "cast", label: "The rider" }] };
-// Header fixture only: these tests exercise transport, not image fidelity/decoding.
-const png = new Uint8Array([137,80,78,71,13,10,26,10,0,0,0,0,1]);
+// Structural fixture: PNG magic, a body above the minimum image size, and the IEND trailer. Not a decodable picture.
+const png = new Uint8Array(MIN_IMAGE_BYTES + 100); png.set([137,80,78,71,13,10,26,10]); png.set([0x49,0x45,0x4e,0x44,0xae,0x42,0x60,0x82], png.length - 8);
+const fakeJpeg = (n: number) => { const b = new Uint8Array(n); b.set([255,216,255,224,0,16,74,70,73,70,0,1]); b.set([255,217], n - 2); return b; };
 const data = encode(png);
 // Node/Deno-agnostic base64 reference (Buffer is unavailable under Deno's type check).
 const toBase64 = (b: Uint8Array) => { let s = ""; for (let i = 0; i < b.length; i += 0x8000) s += String.fromCharCode(...b.subarray(i, i + 0x8000)); return btoa(s); };
@@ -21,7 +22,7 @@ describe("unit: Gemini route contract", () => {
     expect(parseInput(raw).model).toBe(MODEL);
     for (const change of [{ model: "latest" }, { n: 2 }, { maxCostUsd: .01 }, { maxCostUsd: NaN }, { maxCostUsd: "1" }, { resolution: "4k" }, { dryRun: "true" }, { jobRowId: undefined }, { prompt: "" }, { aspectRatio: "invented" }]) expect(() => parseInput({ ...raw, ...change })).toThrow();
     expect(() => parseInput({ ...raw, jobRowId: undefined, dryRun: true })).not.toThrow();
-    expect(COST_BOUND_USD).toBeCloseTo(.270336);
+    expect(COST_CONDITIONAL_USD).toBeCloseTo(.270336);
   });
   it("allows only the fixed AVT host, owner prefix and project folders", () => {
     expect(referenceUrlAllowed(url, user, project)).toBe(true);
@@ -35,13 +36,22 @@ describe("unit: Gemini route contract", () => {
   it("keeps output configuration explicit and validates MIME against bytes", () => {
     expect(generationConfig(parseInput(raw))).toMatchObject({ maxOutputTokens: 8192, candidateCount: 1, imageConfig: { aspectRatio: "9:16", imageSize: "2K" }, thinkingConfig: { thinkingLevel: "MEDIUM" } });
     expect(generationConfig(parseInput(raw))).not.toHaveProperty("responseFormat");
-    expect(decodeImage(data, "image/png")).toBe(png.length);
+    expect(decodeImage(data, "image/png")).toEqual({ bytes: png.length, trailerOk: true });
     for (const n of [0, 1, 2, 3, 24569, 24570, 24571, 50001]) {
       const b = Uint8Array.from({ length: n }, (_, i) => (i * 7919) % 256);
       expect(encode(b)).toBe(toBase64(b));
     }
-    expect(() => decodeImage(data, "image/jpeg")).toThrow();
-    expect(() => outputImage({ candidates: [{ content: { parts: [{ thought: true, inlineData: { data, mimeType: "image/png" } }] } }] })).toThrow("no_final_image");
+    expect(() => decodeImage(data, "image/jpeg")).toThrow("invalid_image_type");
+  });
+  it("refuses header-only forgeries and reports an unverified trailer instead of losing a paid image", () => {
+    const twelve = new Uint8Array([255,216,255,224,0,16,74,70,73,70,0,1]);
+    expect(() => decodeImage(encode(twelve), "image/jpeg")).toThrow("image_too_small");
+    const headerOnly = new Uint8Array(MIN_IMAGE_BYTES); headerOnly.set(twelve);
+    expect(decodeImage(encode(headerOnly), "image/jpeg")).toEqual({ bytes: MIN_IMAGE_BYTES, trailerOk: false });
+    expect(decodeImage(encode(fakeJpeg(MIN_IMAGE_BYTES)), "image/jpeg")).toEqual({ bytes: MIN_IMAGE_BYTES, trailerOk: true });
+    const webp = new Uint8Array(MIN_IMAGE_BYTES); webp.set([0x52,0x49,0x46,0x46]); new DataView(webp.buffer).setUint32(4, MIN_IMAGE_BYTES - 8, true); webp.set([0x57,0x45,0x42,0x50], 8);
+    expect(decodeImage(encode(webp), "image/webp")).toEqual({ bytes: MIN_IMAGE_BYTES, trailerOk: true });
+    expect(() => decodeImage(encode(png).slice(0, -4) + "!!!!", "image/png")).toThrow("invalid_image_data");
   });
 });
 
@@ -170,7 +180,7 @@ describe("mocked integration: request body acceptance and large answers", () => 
     expect(fetcher.mock.calls.filter(([u]) => String(u).endsWith(":generateContent"))).toHaveLength(0);
   });
   it("an ~11 MB answer with a 7 MB signature yields the image and reports field sizes only", async () => {
-    const jpeg = new Uint8Array(3_000_000); jpeg.set([255, 216, 255, 224]);
+    const jpeg = fakeJpeg(3_000_000);
     const data = encode(jpeg); const signature = "S".repeat(7_100_000);
     const answer = JSON.stringify({ candidates: [{ finishReason: "STOP", content: { parts: [{ inlineData: { mimeType: "image/jpeg", data }, thoughtSignature: signature }] } }], usageMetadata: { promptTokenCount: 1 }, modelVersion: MODEL });
     const fetcher = vi.fn().mockResolvedValueOnce(new Response(png)).mockResolvedValueOnce(Response.json({ totalTokens: 1 })).mockResolvedValueOnce(new Response(answer));
@@ -215,6 +225,19 @@ describe("mocked integration: request body acceptance and large answers", () => 
     // Worst case: every reference byte in base64, a 20,000-unit prompt and 14 labels (200) + roles (40) where each
     // UTF-16 unit escapes to 6 JSON bytes (\uXXXX), plus 4 KB of structure.
     expect(Math.ceil(MAX_REFERENCE_BYTES / 3) * 4 + 20_000 * 6 + 14 * 240 * 6 + 4096).toBeLessThan(MAX_REQUEST_BYTES);
+  });
+  it("a valid image with a non-STOP finish reason is returned and flagged, never discarded", async () => {
+    const answer = () => Response.json({ candidates: [{ finishReason: "MAX_TOKENS", content: { parts: [{ inlineData: { mimeType: "image/png", data } }] } }], usageMetadata: { promptTokenCount: 1 } });
+    const fetcher = vi.fn().mockResolvedValueOnce(new Response(png)).mockResolvedValueOnce(Response.json({ totalTokens: 1 })).mockImplementationOnce(answer);
+    expect(await run(parseInput(raw), "secret", fetcher)).toMatchObject({ ok: true, finishReason: "MAX_TOKENS", finishReasonUnusual: true, imageTrailerOk: true });
+    const plain = vi.fn().mockResolvedValueOnce(new Response(png)).mockResolvedValueOnce(Response.json({ totalTokens: 1 })).mockImplementationOnce(success);
+    expect(await run(parseInput(raw), "secret", plain)).toMatchObject({ ok: true, finishReasonUnusual: true, imageTrailerOk: true }); // fixture carries no finishReason
+  });
+  it("a header-only image from the provider is refused as image_too_small, possibly billed", async () => {
+    const tiny = encode(new Uint8Array([137,80,78,71,13,10,26,10,0,0,0,0,1]));
+    const answer = () => Response.json({ candidates: [{ finishReason: "STOP", content: { parts: [{ inlineData: { mimeType: "image/png", data: tiny } }] } }] });
+    const fetcher = vi.fn().mockResolvedValueOnce(new Response(png)).mockResolvedValueOnce(Response.json({ totalTokens: 1 })).mockImplementationOnce(answer);
+    expect(await run(parseInput(raw), "secret", fetcher)).toMatchObject({ ok: false, errorCode: "image_too_small", submitted: true, possiblyBilled: true });
   });
   it("two references within limits are both sent, in order", async () => {
     const two = parseInput({ ...raw, references: [raw.references[0], { ...raw.references[0], label: "Second" }] });

@@ -1,4 +1,4 @@
-import { COST_BASIS, COST_BOUND_USD, MAX_ANSWER_BYTES, MAX_IMAGE_BYTES, MAX_INPUT_TOKENS, MAX_REFERENCE_BYTES, MAX_REQUEST_BYTES, MODEL, base64Bytes, bodyOf, decodeImage, generationConfig, record, requestBodyParts, sniffMime, type BodyMode, type Input } from "./contract.ts";
+import { COST_BASIS, COST_CONDITIONAL_USD, MAX_ANSWER_BYTES, MAX_IMAGE_BYTES, MAX_INPUT_TOKENS, MAX_REFERENCE_BYTES, MAX_REQUEST_BYTES, MODEL, base64Bytes, bodyOf, decodeImage, generationConfig, record, requestBodyParts, sniffMime, type BodyMode, type Input } from "./contract.ts";
 import { readAnswer, type StreamedAnswer } from "./answerStream.ts";
 
 // v1beta: Google answers 404 "Model is not found ... for api version v1" for this model (live dry-run, 12 Oct 2026).
@@ -81,7 +81,7 @@ async function imageModels(key: string, fetcher: typeof fetch): Promise<string[]
 }
 /** Dependency injection allows contract + mocked HTTP tests without importing Deno or secrets. */
 export async function run(input: Input, key: string, fetcher: typeof fetch = fetch, bodyMode: BodyMode = "stream"): Promise<Record<string, unknown>> {
-  const plan = { provider: "gemini", billingAccount: "Google Gemini API", model: MODEL, costBasis: COST_BASIS, estimatedCostUsd: COST_BOUND_USD, costIsEstimate: true, costIsUpperBound: true, actualCostUsd: null, maxReferences: 14 };
+  const plan = { provider: "gemini", billingAccount: "Google Gemini API", model: MODEL, costBasis: COST_BASIS, estimatedCostUsd: COST_CONDITIONAL_USD, costIsEstimate: true, costIsUpperBound: false, costBoundConditional: true, actualCostUsd: null, maxReferences: 14 };
   if (!key) return { ok: false, ...plan, errorCode: "PROVIDER_KEY_NOT_CONFIGURED", billed: false, ...(input.dryRun ? { dryRun: true, referencesSent: 0 } : {}) };
   if (input.dryRun) {
     // models.get is free metadata: it proves this key can see the model, not that billing will accept a generation.
@@ -157,13 +157,17 @@ export async function run(input: Input, key: string, fetcher: typeof fetch = fet
     usage = payload.usageMetadata ?? null; modelVersion = payload.modelVersion ?? null; finish = finishEvidence(payload); evidence = answerEvidence(answer);
     const final = answer.images.find((i) => !i.thought);
     if (!final) throw new Error("no_final_image");
-    const image = { data: final.data, mimeType: final.mimeType as string, bytes: decodeImage(final.data, final.mimeType) };
+    const checked = decodeImage(final.data, final.mimeType);
+    const image = { data: final.data, mimeType: final.mimeType as string, bytes: checked.bytes };
     track.mark("image_checked");
-    return { ok: true, ...plan, billingStatus: "invoice_unknown", billed: "unknown", possiblyBilled: true, submitted: true, referencesSent, countedInputTokens: counted.totalTokens, usage, modelVersion, ...finish, ...evidence, requestBodyMode: mode, phases: track.phases, images: [image] };
+    // DECISION: a structurally valid final image is returned whatever the finish reason (it was paid for); a finish
+    // other than STOP, or a trailer that does not verify, is flagged so AVT files the still with a note, never silently.
+    const finishReasonUnusual = finish.finishReason !== "STOP";
+    return { ok: true, ...plan, billingStatus: "invoice_unknown", billed: "unknown", possiblyBilled: true, submitted: true, referencesSent, countedInputTokens: counted.totalTokens, usage, modelVersion, ...finish, finishReasonUnusual, imageTrailerOk: checked.trailerOk, ...evidence, requestBodyMode: mode, phases: track.phases, images: [image] };
   } catch (e) {
     // Only our fixed codes escape; a fetch exception can contain a signed URL or key.
     const msg = e instanceof Error ? e.message : "";
-    const code = /^(response_too_large|empty_response|invalid_answer_json|request_build_failed|request_too_large|reference_download_failed|references_too_large|reference_not_supported_image|token_count_http_\d+|input_token_gate|generation_http_\d+|no_final_image|invalid_image_data|invalid_image_type)$/.test(msg) ? msg : "request_failed";
+    const code = /^(response_too_large|empty_response|invalid_answer_json|request_build_failed|request_too_large|reference_download_failed|references_too_large|reference_not_supported_image|token_count_http_\d+|input_token_gate|generation_http_\d+|no_final_image|invalid_image_data|image_too_small|invalid_image_type)$/.test(msg) ? msg : "request_failed";
     return { ok: false, ...plan, errorCode: code, retryable: false, submitted, possiblyBilled: submitted, billed: submitted ? "unknown" : false, usage, modelVersion, ...finish, ...(evidence ?? {}), phases: track.phases, googleError: refused, referencesSent: submitted ? input.references.length : 0 };
   }
 }
