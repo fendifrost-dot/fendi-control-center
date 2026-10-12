@@ -12,6 +12,8 @@ const raw = { model: MODEL, n: 1, prompt: "New scene. Keep <IMAGE_0> as the same
 // Header fixture only: these tests exercise transport, not image fidelity/decoding.
 const png = new Uint8Array([137,80,78,71,13,10,26,10,0,0,0,0,1]);
 const data = encode(png);
+// Node/Deno-agnostic base64 reference (Buffer is unavailable under Deno's type check).
+const toBase64 = (b: Uint8Array) => { let s = ""; for (let i = 0; i < b.length; i += 0x8000) s += String.fromCharCode(...b.subarray(i, i + 0x8000)); return btoa(s); };
 const success = () => Response.json({ candidates: [{ content: { parts: [{ thought: true, inlineData: { mimeType: "image/png", data: "bad" } }, { inlineData: { mimeType: "image/png", data } }] } }], usageMetadata: { promptTokenCount: 120, candidatesTokenCount: 1680 }, modelVersion: "observed-provider-version" });
 
 describe("unit: Gemini route contract", () => {
@@ -36,7 +38,7 @@ describe("unit: Gemini route contract", () => {
     expect(decodeImage(data, "image/png")).toBe(png.length);
     for (const n of [0, 1, 2, 3, 24569, 24570, 24571, 50001]) {
       const b = Uint8Array.from({ length: n }, (_, i) => (i * 7919) % 256);
-      expect(encode(b)).toBe(Buffer.from(b).toString("base64"));
+      expect(encode(b)).toBe(toBase64(b));
     }
     expect(() => decodeImage(data, "image/jpeg")).toThrow();
     expect(() => outputImage({ candidates: [{ content: { parts: [{ thought: true, inlineData: { data, mimeType: "image/png" } }] } }] })).toThrow("no_final_image");
