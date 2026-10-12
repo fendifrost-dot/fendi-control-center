@@ -115,12 +115,14 @@ export async function run(input: Input, key: string, fetcher: typeof fetch = fet
       images.push({ mimeType, b64: base64Bytes(bytes) });
     }
     track.mark("references_loaded");
-    // Serialise once and drop the image copies: worker memory, not Google, was the limit (12 Oct 2026).
     const referencesSent = images.length;
     // Streamed bodies keep the worker's peak flat (DECISION, measured on Deno with real fetch: see handoff).
     // countTokens is free, so it also proves Google accepts a body without a declared length before any spend.
     let mode = bodyMode;
     const encodedLengths = images.map((im) => im.b64.byteLength);
+    const generateParts = requestBodyParts(input, images, `,"generationConfig":${JSON.stringify(generationConfig(input))}}`);
+    // Google refuses inline requests over 20 MB: refuse here, before either call (countTokens sends a subset).
+    if (generateParts.reduce((n, p) => n + p.byteLength, 0) > MAX_REQUEST_BYTES) throw new Error("request_too_large");
     const headers = { "Content-Type": "application/json", "x-goog-api-key": key };
     const countTokens = () => fetcher(`${GOOGLE}:countTokens`, { method: "POST", headers, body: bodyOf(requestBodyParts(input, images, "}"), mode), redirect: "error", signal: timeout(20_000) });
     let count: Response | null = null;
@@ -138,9 +140,6 @@ export async function run(input: Input, key: string, fetcher: typeof fetch = fet
     // The same reference buffers feed every body: if a runtime had consumed them, the paid request would carry
     // empty images without an error. Refuse before spending instead.
     if (images.some((im, i) => im.b64.byteLength !== encodedLengths[i] || im.b64.byteLength === 0)) throw new Error("request_build_failed");
-    const generateParts = requestBodyParts(input, images, `,"generationConfig":${JSON.stringify(generationConfig(input))}}`);
-    // Google refuses inline requests over 20 MB; refuse here, before the paid call, rather than learn it from a 400.
-    if (generateParts.reduce((n, p) => n + p.byteLength, 0) > MAX_REQUEST_BYTES) throw new Error("request_too_large");
     let generateBody: BodyInit | null = bodyOf(generateParts, mode);
     images = [];
     const generationSignal = timeout(110_000);

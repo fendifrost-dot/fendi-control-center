@@ -205,6 +205,12 @@ describe("mocked integration: request body acceptance and large answers", () => 
     expect(await run(two, "secret", fetcher)).toMatchObject({ ok: false, errorCode: "references_too_large", submitted: false, billed: false });
     expect(fetcher).toHaveBeenCalledTimes(2);
   });
+  it("references totalling exactly the cap are accepted", async () => {
+    const sized = (n: number) => { const b = new Uint8Array(n); b.set([137, 80, 78, 71, 13, 10, 26, 10]); return b; };
+    const two = parseInput({ ...raw, references: [raw.references[0], { ...raw.references[0], label: "Second" }] });
+    const fetcher = vi.fn().mockResolvedValueOnce(new Response(sized(8 * 1024 * 1024))).mockResolvedValueOnce(new Response(sized(MAX_REFERENCE_BYTES - 8 * 1024 * 1024))).mockResolvedValueOnce(Response.json({ totalTokens: 2 })).mockImplementationOnce(success);
+    expect(await run(two, "secret", fetcher)).toMatchObject({ ok: true, referencesSent: 2 });
+  });
   it("the reference cap can never produce a body over Google's 20 MB request limit", () => {
     // Worst case: every reference byte in base64, a 20,000-unit prompt and 14 labels (200) + roles (40) where each
     // UTF-16 unit escapes to 6 JSON bytes (\uXXXX), plus 4 KB of structure.
