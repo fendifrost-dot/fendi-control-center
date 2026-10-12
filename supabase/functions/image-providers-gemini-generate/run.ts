@@ -1,4 +1,4 @@
-import { COST_BASIS, COST_BOUND_USD, MAX_ANSWER_BYTES, MAX_IMAGE_BYTES, MAX_INPUT_TOKENS, MAX_REFERENCE_BYTES, MODEL, base64Bytes, bodyOf, decodeImage, generationConfig, record, requestBodyParts, sniffMime, type BodyMode, type Input } from "./contract.ts";
+import { COST_BASIS, COST_BOUND_USD, MAX_ANSWER_BYTES, MAX_IMAGE_BYTES, MAX_INPUT_TOKENS, MAX_REFERENCE_BYTES, MAX_REQUEST_BYTES, MODEL, base64Bytes, bodyOf, decodeImage, generationConfig, record, requestBodyParts, sniffMime, type BodyMode, type Input } from "./contract.ts";
 import { readAnswer, type StreamedAnswer } from "./answerStream.ts";
 
 // v1beta: Google answers 404 "Model is not found ... for api version v1" for this model (live dry-run, 12 Oct 2026).
@@ -115,12 +115,14 @@ export async function run(input: Input, key: string, fetcher: typeof fetch = fet
       images.push({ mimeType, b64: base64Bytes(bytes) });
     }
     track.mark("references_loaded");
-    // Serialise once and drop the image copies: worker memory, not Google, was the limit (12 Oct 2026).
     const referencesSent = images.length;
     // Streamed bodies keep the worker's peak flat (DECISION, measured on Deno with real fetch: see handoff).
     // countTokens is free, so it also proves Google accepts a body without a declared length before any spend.
     let mode = bodyMode;
     const encodedLengths = images.map((im) => im.b64.byteLength);
+    const generateParts = requestBodyParts(input, images, `,"generationConfig":${JSON.stringify(generationConfig(input))}}`);
+    // Google refuses inline requests over 20 MB: refuse here, before either call (countTokens sends a subset).
+    if (generateParts.reduce((n, p) => n + p.byteLength, 0) > MAX_REQUEST_BYTES) throw new Error("request_too_large");
     const headers = { "Content-Type": "application/json", "x-goog-api-key": key };
     const countTokens = () => fetcher(`${GOOGLE}:countTokens`, { method: "POST", headers, body: bodyOf(requestBodyParts(input, images, "}"), mode), redirect: "error", signal: timeout(20_000) });
     let count: Response | null = null;
@@ -138,7 +140,7 @@ export async function run(input: Input, key: string, fetcher: typeof fetch = fet
     // The same reference buffers feed every body: if a runtime had consumed them, the paid request would carry
     // empty images without an error. Refuse before spending instead.
     if (images.some((im, i) => im.b64.byteLength !== encodedLengths[i] || im.b64.byteLength === 0)) throw new Error("request_build_failed");
-    let generateBody: BodyInit | null = bodyOf(requestBodyParts(input, images, `,"generationConfig":${JSON.stringify(generationConfig(input))}}`), mode);
+    let generateBody: BodyInit | null = bodyOf(generateParts, mode);
     images = [];
     const generationSignal = timeout(110_000);
     submitted = true;
@@ -161,7 +163,7 @@ export async function run(input: Input, key: string, fetcher: typeof fetch = fet
   } catch (e) {
     // Only our fixed codes escape; a fetch exception can contain a signed URL or key.
     const msg = e instanceof Error ? e.message : "";
-    const code = /^(response_too_large|empty_response|invalid_answer_json|request_build_failed|reference_download_failed|references_too_large|reference_not_supported_image|token_count_http_\d+|input_token_gate|generation_http_\d+|no_final_image|invalid_image_data|invalid_image_type)$/.test(msg) ? msg : "request_failed";
+    const code = /^(response_too_large|empty_response|invalid_answer_json|request_build_failed|request_too_large|reference_download_failed|references_too_large|reference_not_supported_image|token_count_http_\d+|input_token_gate|generation_http_\d+|no_final_image|invalid_image_data|invalid_image_type)$/.test(msg) ? msg : "request_failed";
     return { ok: false, ...plan, errorCode: code, retryable: false, submitted, possiblyBilled: submitted, billed: submitted ? "unknown" : false, usage, modelVersion, ...finish, ...(evidence ?? {}), phases: track.phases, googleError: refused, referencesSent: submitted ? input.references.length : 0 };
   }
 }

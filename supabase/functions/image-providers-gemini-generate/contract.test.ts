@@ -1,6 +1,6 @@
 // @vitest-environment node
 import { describe, expect, it, vi } from "vitest";
-import { COST_BOUND_USD, MAX_IMAGE_BYTES, MODEL, decodeImage, encode, generationConfig, outputImage, parseInput, referenceUrlAllowed, base64Bytes, bodyOf, requestBodyParts, requestContents } from "./contract.ts";
+import { COST_BOUND_USD, MAX_IMAGE_BYTES, MAX_REFERENCE_BYTES, MAX_REQUEST_BYTES, MODEL, decodeImage, encode, generationConfig, outputImage, parseInput, referenceUrlAllowed, base64Bytes, bodyOf, requestBodyParts, requestContents } from "./contract.ts";
 import { boundedBytes, run } from "./run.ts";
 
 const user = "00000000-0000-4000-8000-000000000001";
@@ -188,6 +188,33 @@ describe("mocked integration: request body acceptance and large answers", () => 
     const fetcher = vi.fn().mockResolvedValueOnce(new Response(png)).mockResolvedValueOnce(Response.json({ totalTokens: 1 })).mockRejectedValueOnce(new DOMException("timed out", "TimeoutError"));
     expect(await run(parseInput(raw), "secret", fetcher)).toMatchObject({ ok: false, errorCode: "request_failed", submitted: true, possiblyBilled: true });
     expect(fetcher).toHaveBeenCalledTimes(3);
+  });
+  it("the identity portrait with two guides (13.4 MB, live 12 Oct) is sent whole; the body stays under Google's 20 MB", async () => {
+    const sized = (n: number) => { const b = new Uint8Array(n); b.set([137, 80, 78, 71, 13, 10, 26, 10]); return b; };
+    const three = parseInput({ ...raw, references: [raw.references[0], { ...raw.references[0], label: "Outfit" }, { ...raw.references[0], label: "Horse" }] });
+    const fetcher = vi.fn().mockResolvedValueOnce(new Response(sized(7_511_334))).mockResolvedValueOnce(new Response(sized(2_841_677))).mockResolvedValueOnce(new Response(sized(3_009_321))).mockResolvedValueOnce(Response.json({ totalTokens: 3 })).mockImplementationOnce(success);
+    expect(await run(three, "secret", fetcher)).toMatchObject({ ok: true, referencesSent: 3 });
+    const sent = new Uint8Array(await new Response(fetcher.mock.calls[4][1].body).arrayBuffer());
+    expect(sent.byteLength).toBeGreaterThan(Math.ceil(13_362_332 / 3) * 4);
+    expect(sent.byteLength).toBeLessThan(MAX_REQUEST_BYTES);
+  });
+  it("references above the cap are refused before anything reaches Google", async () => {
+    const sized = (n: number) => { const b = new Uint8Array(n); b.set([137, 80, 78, 71, 13, 10, 26, 10]); return b; };
+    const two = parseInput({ ...raw, references: [raw.references[0], { ...raw.references[0], label: "Second" }] });
+    const fetcher = vi.fn().mockResolvedValueOnce(new Response(sized(8 * 1024 * 1024))).mockResolvedValueOnce(new Response(sized(MAX_REFERENCE_BYTES - 8 * 1024 * 1024 + 1)));
+    expect(await run(two, "secret", fetcher)).toMatchObject({ ok: false, errorCode: "references_too_large", submitted: false, billed: false });
+    expect(fetcher).toHaveBeenCalledTimes(2);
+  });
+  it("references totalling exactly the cap are accepted", async () => {
+    const sized = (n: number) => { const b = new Uint8Array(n); b.set([137, 80, 78, 71, 13, 10, 26, 10]); return b; };
+    const two = parseInput({ ...raw, references: [raw.references[0], { ...raw.references[0], label: "Second" }] });
+    const fetcher = vi.fn().mockResolvedValueOnce(new Response(sized(8 * 1024 * 1024))).mockResolvedValueOnce(new Response(sized(MAX_REFERENCE_BYTES - 8 * 1024 * 1024))).mockResolvedValueOnce(Response.json({ totalTokens: 2 })).mockImplementationOnce(success);
+    expect(await run(two, "secret", fetcher)).toMatchObject({ ok: true, referencesSent: 2 });
+  });
+  it("the reference cap can never produce a body over Google's 20 MB request limit", () => {
+    // Worst case: every reference byte in base64, a 20,000-unit prompt and 14 labels (200) + roles (40) where each
+    // UTF-16 unit escapes to 6 JSON bytes (\uXXXX), plus 4 KB of structure.
+    expect(Math.ceil(MAX_REFERENCE_BYTES / 3) * 4 + 20_000 * 6 + 14 * 240 * 6 + 4096).toBeLessThan(MAX_REQUEST_BYTES);
   });
   it("two references within limits are both sent, in order", async () => {
     const two = parseInput({ ...raw, references: [raw.references[0], { ...raw.references[0], label: "Second" }] });
