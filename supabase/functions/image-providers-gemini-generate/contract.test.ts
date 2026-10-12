@@ -39,11 +39,24 @@ describe("unit: Gemini route contract", () => {
 });
 
 describe("mocked integration: Google transport, no live provider", () => {
-  it("dry-run makes no network calls or reference uploads", async () => {
-    const fetcher = vi.fn();
+  it("dry-run checks free model metadata only: no references, countTokens or generation", async () => {
+    const fetcher = vi.fn().mockResolvedValueOnce(Response.json({ name: `models/${MODEL}`, version: "2.1", outputTokenLimit: 32768 }));
     const result = await run(parseInput({ ...raw, dryRun: true }), "configured", fetcher);
-    expect(result).toMatchObject({ ok: true, billed: false, referencesSent: 0, actualCostUsd: null, modelAccessVerified: false });
-    expect(fetcher).not.toHaveBeenCalled();
+    expect(result).toMatchObject({ ok: true, billed: false, referencesSent: 0, actualCostUsd: null, modelAccessVerified: true, modelInfo: { version: "2.1" } });
+    expect(fetcher).toHaveBeenCalledTimes(1);
+    expect(fetcher.mock.calls[0][0]).toBe(`https://generativelanguage.googleapis.com/v1/models/${MODEL}`);
+    expect(fetcher.mock.calls[0][1].method).toBeUndefined();
+  });
+  it("dry-run reports Google's exact refusal without the key", async () => {
+    const denial = { error: { code: 403, status: "PERMISSION_DENIED", message: "Billing is not enabled (key=configured)", details: [{ reason: "BILLING_DISABLED", metadata: { consumer: "projects/123" } }] } };
+    const result = await run(parseInput({ ...raw, dryRun: true }), "configured", vi.fn().mockResolvedValueOnce(Response.json(denial, { status: 403 })));
+    expect(result).toMatchObject({ ok: false, billed: false, modelAccessVerified: false, errorCode: "model_access_failed", googleError: { httpStatus: 403, status: "PERMISSION_DENIED", reason: "BILLING_DISABLED", consumer: "projects/123" } });
+    expect(JSON.stringify(result)).not.toContain("configured)");
+  });
+  it("a refused generation carries Google's error and is never retried", async () => {
+    const fetcher = vi.fn().mockResolvedValueOnce(new Response(png)).mockResolvedValueOnce(Response.json({ totalTokens: 1 })).mockResolvedValueOnce(Response.json({ error: { code: 429, status: "RESOURCE_EXHAUSTED", message: "Your prepayment credits are depleted." } }, { status: 429 }));
+    expect(await run(parseInput(raw), "secret", fetcher)).toMatchObject({ ok: false, errorCode: "generation_http_429", googleError: { httpStatus: 429, status: "RESOURCE_EXHAUSTED", message: "Your prepayment credits are depleted." }, possiblyBilled: true });
+    expect(fetcher).toHaveBeenCalledTimes(3);
   });
   it("missing key stops before reference download", async () => {
     const fetcher = vi.fn();
@@ -79,8 +92,8 @@ describe("mocked integration: Google transport, no live provider", () => {
     expect(JSON.stringify(result)).not.toContain("private");
   });
   it("retains usage on a safety refusal/no-image answer and does not retry", async () => {
-    const fetcher = vi.fn().mockResolvedValueOnce(new Response(png)).mockResolvedValueOnce(Response.json({ totalTokens: 1 })).mockResolvedValueOnce(Response.json({ usageMetadata: { promptTokenCount: 1 }, candidates: [] }));
-    expect(await run(parseInput(raw), "secret", fetcher)).toMatchObject({ ok: false, errorCode: "no_final_image", usage: { promptTokenCount: 1 }, possiblyBilled: true });
+    const fetcher = vi.fn().mockResolvedValueOnce(new Response(png)).mockResolvedValueOnce(Response.json({ totalTokens: 1 })).mockResolvedValueOnce(Response.json({ usageMetadata: { promptTokenCount: 1 }, candidates: [{ finishReason: "MAX_TOKENS", content: { parts: [] } }] }));
+    expect(await run(parseInput(raw), "secret", fetcher)).toMatchObject({ ok: false, errorCode: "no_final_image", finishReason: "MAX_TOKENS", usage: { promptTokenCount: 1 }, possiblyBilled: true });
     expect(fetcher).toHaveBeenCalledTimes(3);
   });
   it("enforces streamed byte limits even without Content-Length", async () => {
