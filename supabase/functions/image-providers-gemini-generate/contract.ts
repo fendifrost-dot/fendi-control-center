@@ -85,7 +85,9 @@ export function requestContents(input: Input, images: { mimeType: string; data: 
   ] }];
 }
 export function generationConfig(input: Input) {
-  return { responseModalities: ["IMAGE"], responseFormat: { image: { aspectRatio: input.aspectRatio, imageSize: input.resolution.toUpperCase() } }, thinkingConfig: { thinkingLevel: "Medium", includeThoughts: false }, maxOutputTokens: MAX_OUTPUT_TOKENS, candidateCount: 1 };
+  // v1beta schema (discovery, 12 Oct 2026): responseFormat.image takes enums (ASPECT_RATIO_FOUR_BY_FIVE…) and
+  // rejected "4:5"/"2K" with 400; imageConfig takes these strings. thinkingLevel is the enum MEDIUM.
+  return { responseModalities: ["IMAGE"], imageConfig: { aspectRatio: input.aspectRatio, imageSize: input.resolution.toUpperCase() }, thinkingConfig: { thinkingLevel: "MEDIUM", includeThoughts: false }, maxOutputTokens: MAX_OUTPUT_TOKENS, candidateCount: 1 };
 }
 export function outputImage(payload: unknown): { data: string; mimeType: string; bytes: number } {
   const p = record(payload); const candidates = Array.isArray(p.candidates) ? p.candidates : [];
