@@ -3857,6 +3857,101 @@ export type Database = {
           },
         ]
       }
+      muse_workboard_assignments: {
+        Row: {
+          actor: string | null
+          as_of: string | null
+          created_at: string | null
+          domain_key: string | null
+          domain_name: string | null
+          evidence_ref: string | null
+          id: string | null
+          improvement_id: string | null
+          message: string | null
+          mission_id: string | null
+          task_id: string | null
+          update_type: string | null
+        }
+        Relationships: [
+          {
+            foreignKeyName: "muse_work_updates_domain_key_fkey"
+            columns: ["domain_key"]
+            isOneToOne: false
+            referencedRelation: "muse_domains"
+            referencedColumns: ["key"]
+          },
+          {
+            foreignKeyName: "muse_work_updates_domain_key_fkey"
+            columns: ["domain_key"]
+            isOneToOne: false
+            referencedRelation: "muse_portfolio_map"
+            referencedColumns: ["domain_key"]
+          },
+          {
+            foreignKeyName: "muse_work_updates_improvement_id_fkey"
+            columns: ["improvement_id"]
+            isOneToOne: false
+            referencedRelation: "muse_daily_improvement_board"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "muse_work_updates_improvement_id_fkey"
+            columns: ["improvement_id"]
+            isOneToOne: false
+            referencedRelation: "muse_improvement_ledger"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "muse_work_updates_improvement_id_fkey"
+            columns: ["improvement_id"]
+            isOneToOne: false
+            referencedRelation: "muse_improvement_results"
+            referencedColumns: ["improvement_id"]
+          },
+          {
+            foreignKeyName: "muse_work_updates_improvement_id_fkey"
+            columns: ["improvement_id"]
+            isOneToOne: false
+            referencedRelation: "muse_improvements"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "muse_work_updates_mission_id_fkey"
+            columns: ["mission_id"]
+            isOneToOne: false
+            referencedRelation: "muse_mission_board"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "muse_work_updates_mission_id_fkey"
+            columns: ["mission_id"]
+            isOneToOne: false
+            referencedRelation: "muse_missions"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "muse_work_updates_task_id_fkey"
+            columns: ["task_id"]
+            isOneToOne: false
+            referencedRelation: "muse_agent_queue"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "muse_work_updates_task_id_fkey"
+            columns: ["task_id"]
+            isOneToOne: false
+            referencedRelation: "muse_improvement_tasks"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "muse_work_updates_task_id_fkey"
+            columns: ["task_id"]
+            isOneToOne: false
+            referencedRelation: "muse_verification_queue"
+            referencedColumns: ["task_id"]
+          },
+        ]
+      }
     }
     Functions: {
       claim_outbox_rows: {
