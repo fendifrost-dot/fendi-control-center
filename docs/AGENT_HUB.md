@@ -78,6 +78,11 @@ through the hub once.
 | `ingest` | Fendi or an `agenthub:ingest` token | `source_app`, `body`, `title`, `url`, `to_agent` |
 | `bridge_capabilities`, `bridge_result` | Mac bridge token | |
 
+Signing in is not enough to act as Fendi: the account must be listed in `control_center_owners`
+(non-owners get 403, and every operator table policy checks the same list). Message kinds are
+enforced: agents cannot write DECISION, IMPORT or SYSTEM; answers are stored once, and retrying the
+same answer returns the stored one.
+
 Tokens are rows in `muse_api_tokens` (SHA-256 only). Scope `agenthub` or `workboard:write`,
 and the label must equal the agent's `token_label`.
 
@@ -85,12 +90,25 @@ and the label must equal the agent's `token_label`.
 
 ### 1. Mac bridge (enables Claude Code / Cursor / Codex on your Mac, and iMessage)
 
-The bridge last checked in on **2026-06-09**. On the Mac:
+Two different things run on your Mac — don't confuse them:
+
+- **Grok Bot's local-exec daemon** (`~/.grokbot`, installed by Grok). This is how Grok Bot already
+  starts `claude -p` jobs. It works today, but those jobs do not appear in Control Center.
+- **The Control Center bridge** (`scripts/remote-bridge`). This is what the Agent Hub monitors and uses
+  for *Claude Code (your Mac)*, Cursor, Codex and iMessage. It last ran 3–9 June 2026 (June version)
+  and never executed a command.
+
+Start the current bridge from the clean checkout (not `~/fendi-control-center`, which is a damaged copy).
+You can also ask Grok Bot to run this through its local exec:
 
 ```bash
-cd ~/Projects/fendi-control-center && git pull
+cd ~/Projects/fendi-control-center && git pull --ff-only
 cd scripts/remote-bridge && ./start-mac.sh        # keep it running (tmux or a login item)
 ```
+
+`~/.fendi-remote-bridge.env` from June is reused. The bridge now saves its device id in
+`~/.fendi-bridge/device.json` (one row per Mac), keeps answers in `~/.fendi-bridge/outbox/` until the hub
+accepts them, and never discards work in thread workspaces (`agent-hub/keep/…` branches).
 
 Optional lines in `~/.fendi-remote-bridge.env` (the file is not overwritten):
 
@@ -118,6 +136,15 @@ Paste to each (replace the name):
 > then answer with `{"action":"respond","handoff_id":"<id>","body":"<your answer>"}`.
 > Answer there, not on the workboard. Check the inbox at start of day and whenever you
 > post to the workboard.
+
+Optional extra for Grok Bot, once the Control Center bridge is running (step 1). It replaces direct
+`claude -p` runs so each job and Claude's answer land in one thread you can open on your phone:
+
+> For Claude Code jobs on Fendi's Mac, instead of running `claude -p` yourself, call agent-hub with
+> `{"action":"create_thread","title":"<job>","kind":"WORK","body":"<the full handoff text>",
+> "context":{"repo":"<owner/repo>","commit_sha":"<sha>"}}`, then
+> `{"action":"handoff","thread_id":"<id>","source_message_id":"<message id>","to_agent":"claude-code-mac","purpose":"TASK"}`.
+> Read Claude's answer with `{"action":"thread","thread_id":"<id>"}`.
 
 ### 3. iPhone
 
