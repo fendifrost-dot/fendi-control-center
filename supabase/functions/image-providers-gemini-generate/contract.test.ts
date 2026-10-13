@@ -233,6 +233,26 @@ describe("mocked integration: request body acceptance and large answers", () => 
     const plain = vi.fn().mockResolvedValueOnce(new Response(png)).mockResolvedValueOnce(Response.json({ totalTokens: 1 })).mockImplementationOnce(success);
     expect(await run(parseInput(raw), "secret", plain)).toMatchObject({ ok: true, finishReasonUnusual: true, imageTrailerOk: true }); // fixture carries no finishReason
   });
+  it("the final image is really decoded: a stub decoder's verdict is reported, and a failed decode is still returned (paid) but not usable", async () => {
+    // A PNG with a real IHDR (320x200) so the header yields dimensions; the pixel decoder is injected.
+    const ihdr = new Uint8Array(MIN_IMAGE_BYTES + 100); ihdr.set([137,80,78,71,13,10,26,10,0,0,0,13,0x49,0x48,0x44,0x52,0,0,1,64,0,0,0,200,8,6,0,0,0]); ihdr.set([0x49,0x45,0x4e,0x44,0xae,0x42,0x60,0x82], ihdr.length - 8);
+    const answer = () => Response.json({ candidates: [{ finishReason: "STOP", content: { parts: [{ inlineData: { mimeType: "image/png", data: encode(ihdr) } }] } }] });
+    const good = vi.fn().mockResolvedValueOnce(new Response(png)).mockResolvedValueOnce(Response.json({ totalTokens: 1 })).mockImplementationOnce(answer);
+    expect(await run(parseInput(raw), "secret", good, "stream", async () => ({ width: 320, height: 200 }))).toMatchObject({ ok: true, imageUsable: true, imageDecoded: true, imageWidth: 320, imageHeight: 200, imageDecodeReason: "ok" });
+    const bad = vi.fn().mockResolvedValueOnce(new Response(png)).mockResolvedValueOnce(Response.json({ totalTokens: 1 })).mockImplementationOnce(answer);
+    const r = await run(parseInput(raw), "secret", bad, "stream", async () => { throw new Error("jpg: failed to decode"); });
+    expect(r).toMatchObject({ ok: true, possiblyBilled: true, imageUsable: false, imageDecoded: false, imageDecodeReason: "decode_failed" });
+    expect((r.images as { data: string }[])[0].data).toBe(encode(ihdr)); // the paid bytes are still returned
+    const mismatch = vi.fn().mockResolvedValueOnce(new Response(png)).mockResolvedValueOnce(Response.json({ totalTokens: 1 })).mockImplementationOnce(answer);
+    expect(await run(parseInput(raw), "secret", mismatch, "stream", async () => ({ width: 1, height: 1 }))).toMatchObject({ ok: true, imageUsable: false, imageDecodeReason: "dimension_mismatch" });
+    // Over the decode cap: the decoder is never called, bounded memory holds.
+    const huge = new Uint8Array(MIN_IMAGE_BYTES + 100); huge.set([137,80,78,71,13,10,26,10,0,0,0,13,0x49,0x48,0x44,0x52,0,0,0x75,0x30,0,0,0x75,0x30,8,6,0,0,0]); huge.set([0x49,0x45,0x4e,0x44,0xae,0x42,0x60,0x82], huge.length - 8);
+    const hugeAnswer = () => Response.json({ candidates: [{ finishReason: "STOP", content: { parts: [{ inlineData: { mimeType: "image/png", data: encode(huge) } }] } }] });
+    const cap = vi.fn().mockResolvedValueOnce(new Response(png)).mockResolvedValueOnce(Response.json({ totalTokens: 1 })).mockImplementationOnce(hugeAnswer);
+    const called = vi.fn(async () => ({ width: 30000, height: 30000 }));
+    expect(await run(parseInput(raw), "secret", cap, "stream", called)).toMatchObject({ ok: true, imageUsable: false, imageDecodeReason: "over_decode_cap", imageWidth: 30000 });
+    expect(called).not.toHaveBeenCalled();
+  });
   it("a header-only image from the provider is refused as image_too_small, possibly billed", async () => {
     const tiny = encode(new Uint8Array([137,80,78,71,13,10,26,10,0,0,0,0,1]));
     const answer = () => Response.json({ candidates: [{ finishReason: "STOP", content: { parts: [{ inlineData: { mimeType: "image/png", data: tiny } }] } }] });
