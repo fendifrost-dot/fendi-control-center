@@ -1,6 +1,20 @@
 import { serve } from "https://deno.land/std@0.224.0/http/server.ts";
 import { createClient, type SupabaseClient } from "https://esm.sh/@supabase/supabase-js@2.49.1";
-import { isAction, boundedString, uuid, oneOf, reportDate, reportSections, type WorkboardAction } from "./contract.ts";
+import {
+  isAction,
+  boundedString,
+  uuid,
+  oneOf,
+  reportDate,
+  reportSections,
+  receiptInputFrom,
+  parseIgDmReceipt,
+  hubReceiptRequest,
+  receiptOutcome,
+  redactReceiptSecret,
+  hubControlCenterUrl,
+  type WorkboardAction,
+} from "./contract.ts";
 
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
 const SERVICE_KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
@@ -45,6 +59,9 @@ function iso(value: unknown, name: string): string | null {
 }
 
 async function execute(db: SupabaseClient, action: WorkboardAction, p: Record<string, unknown>, actor: string) {
+  if (action === "record_ig_dm_receipt") {
+    throw new Error("record_ig_dm_receipt is forwarded to FanFuel Hub");
+  }
   if (action === "create_mission") {
     const row = {
       domain_key: boundedString(p.domain_key, "domain_key", 100, true), title: boundedString(p.title, "title", 300, true),
@@ -133,12 +150,48 @@ async function execute(db: SupabaseClient, action: WorkboardAction, p: Record<st
     return await db.from("muse_improvement_tasks").update({ verification_state }).eq("id", id).select("*").single();
   }
   const id = uuid(p.improvement_id, "improvement_id")!;
-  const status = oneOf(p.status, "status", ["PROPOSED","RUNNING","MEASURED","CLOSED"]);
+  const improvementStatus = oneOf(p.status, "status", ["PROPOSED","RUNNING","MEASURED","CLOSED"]);
   const verdict = p.verdict ? oneOf(p.verdict, "verdict", ["PENDING","KEEP","REVISE","REVERSE"]) : undefined;
-  const patch: Record<string, unknown> = { status };
+  const patch: Record<string, unknown> = { status: improvementStatus };
   if (verdict) patch.verdict = verdict;
   if (p.actual_result !== undefined) patch.actual_result = boundedString(p.actual_result, "actual_result");
   return await db.from("muse_improvements").update(patch).eq("id", id).select("*").single();
+}
+
+async function forwardIgDmReceipt(input: unknown): Promise<{ status: number; body: Record<string, unknown>; board: ReturnType<typeof receiptOutcome>["board"] }> {
+  const secret = (Deno.env.get("MUSE_IG_RECEIPT_SECRET") ?? "").trim();
+  const hubUrl = (Deno.env.get("FANFUEL_HUB_URL") ?? "").trim();
+  if (!secret) {
+    return { status: 503, body: { ok: false, action: "record_ig_dm_receipt", error: "MUSE_IG_RECEIPT_SECRET is not configured" }, board: null };
+  }
+  if (!hubUrl) {
+    return { status: 503, body: { ok: false, action: "record_ig_dm_receipt", error: "FANFUEL_HUB_URL is not configured" }, board: null };
+  }
+  try {
+    hubControlCenterUrl(hubUrl);
+  } catch (e) {
+    return {
+      status: 503,
+      body: { ok: false, action: "record_ig_dm_receipt", error: e instanceof Error ? e.message : "FANFUEL_HUB_URL is invalid" },
+      board: null,
+    };
+  }
+  const receipt = parseIgDmReceipt(input);
+  const request = hubReceiptRequest({ hubUrl, secret, receipt });
+  let response: Response;
+  try {
+    response = await fetch(request.url, request.init);
+  } catch {
+    return { status: 502, body: { ok: false, action: "record_ig_dm_receipt", error: "FanFuel Hub request failed" }, board: null };
+  }
+  const text = await response.text();
+  let hubBody: unknown;
+  try {
+    hubBody = JSON.parse(text);
+  } catch {
+    hubBody = { ok: false, error: "hub returned a non-json response", hub_status: response.status };
+  }
+  return receiptOutcome(response.status, redactReceiptSecret(hubBody, secret), receipt, secret);
 }
 
 serve(async (req) => {
@@ -162,9 +215,25 @@ serve(async (req) => {
   let payload: Record<string, unknown>;
   let status = 200;
   try {
-    const result = await execute(db, body.action, (body.payload ?? {}) as Record<string, unknown>, auth.label);
-    if (result.error) throw new Error(result.error.message);
-    payload = { ok: true, action: body.action, data: result.data };
+    if (body.action === "record_ig_dm_receipt") {
+      const outcome = await forwardIgDmReceipt(receiptInputFrom(body));
+      status = outcome.status;
+      payload = outcome.body;
+      if (outcome.board) {
+        const { error: boardError } = await db.from("muse_work_updates").insert({
+          mission_id: outcome.board.mission_id,
+          actor: auth.label,
+          update_type: outcome.board.update_type,
+          message: outcome.board.message,
+          evidence_ref: outcome.board.evidence_ref,
+        });
+        if (boardError) console.error("ig_dm_receipt board notice failed:", boardError.code ?? "write_failed");
+      }
+    } else {
+      const result = await execute(db, body.action, (body.payload ?? {}) as Record<string, unknown>, auth.label);
+      if (result.error) throw new Error(result.error.message);
+      payload = { ok: true, action: body.action, data: result.data };
+    }
   } catch (e) {
     status = 400;
     payload = { ok: false, action: body.action, error: e instanceof Error ? e.message : "write failed" };
