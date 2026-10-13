@@ -10,6 +10,7 @@ import { spawn } from "node:child_process";
 import { existsSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
+import { executeAgentHandoff, imessageRead, imessageSend, probeCapabilities, pruneWorkspaces } from "./agentHandoff.mjs";
 
 const SUPABASE_URL = process.env.SUPABASE_URL?.replace(/\/$/, "");
 const BRIDGE_TOKEN = process.env.REMOTE_BRIDGE_TOKEN;
@@ -17,6 +18,9 @@ const DEVICE_NAME = process.env.REMOTE_BRIDGE_DEVICE_NAME ?? "primary-mac";
 const WORKDIR = process.env.REMOTE_BRIDGE_WORKDIR ?? homedir();
 const POLL_MS = Number(process.env.REMOTE_BRIDGE_POLL_MS ?? 3000);
 const API = `${SUPABASE_URL}/functions/v1/remote-bridge-api`;
+const HUB_API = `${SUPABASE_URL}/functions/v1/agent-hub`;
+const MAX_AGENT_RUNS = Number(process.env.REMOTE_BRIDGE_MAX_AGENT_RUNS ?? 2);
+const CAPS_EVERY_MS = 10 * 60_000;
 
 if (!SUPABASE_URL || !BRIDGE_TOKEN) {
   console.error("Set SUPABASE_URL and REMOTE_BRIDGE_TOKEN");
@@ -25,8 +29,8 @@ if (!SUPABASE_URL || !BRIDGE_TOKEN) {
 
 let deviceId = process.env.REMOTE_BRIDGE_DEVICE_ID ?? null;
 
-async function api(body) {
-  const res = await fetch(API, {
+async function api(body, url = API) {
+  const res = await fetch(url, {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
@@ -86,11 +90,12 @@ async function executeCommand(row) {
       return { message: `Opened ${url}`, exit_code: 0 };
     }
     case "notify": {
-      const msg = String(p.text ?? "").replace(/"/g, '\\"');
+      const msg = String(p.text ?? "");
       if (process.platform === "darwin") {
         await runProcess("/usr/bin/osascript", [
           "-e",
-          `display notification "${msg}" with title "Fendi Control Hub"`,
+          'on run argv\ndisplay notification (item 1 of argv) with title "Fendi Control Hub"\nend run',
+          msg,
         ]);
       }
       return { message: "Notification sent", exit_code: 0 };
@@ -105,17 +110,72 @@ async function executeCommand(row) {
       const prompt = String(p.text ?? "");
       return runProcess(claude, ["-p", prompt], { timeoutMs: 300_000 });
     }
+    case "imessage_send":
+      return imessageSend(p);
+    case "imessage_read":
+      return imessageRead(p);
+    case "capabilities": {
+      const caps = await reportCapabilities();
+      return { message: "Capabilities reported", exit_code: 0, stdout: JSON.stringify(caps, null, 2) };
+    }
     default:
       return { exit_code: 1, stderr: `Unknown command_type: ${command_type}` };
   }
 }
 
+let lastCapsAt = 0;
+async function reportCapabilities() {
+  const caps = await probeCapabilities(WORKDIR);
+  if (deviceId) {
+    try {
+      await api({ action: "bridge_capabilities", device_id: deviceId, capabilities: caps }, HUB_API);
+    } catch (e) {
+      console.error("[bridge] capability report failed (is agent-hub deployed?):", e instanceof Error ? e.message : e);
+    }
+  }
+  lastCapsAt = Date.now();
+  return caps;
+}
+
+/** Agent handoffs can take many minutes; run them alongside the poll loop. */
+const agentRuns = new Set();
+async function runAgentHandoff(cmd) {
+  const p = cmd.payload ?? {};
+  console.log(`[bridge] agent handoff ${p.handoff_id} -> ${p.cli} (${p.purpose})`);
+  const res = await executeAgentHandoff(p, WORKDIR);
+  try {
+    await api({
+      action: "bridge_result", handoff_id: p.handoff_id, ok: res.ok, body: res.body, error: res.error,
+      session_id: res.session_id ?? null, meta: res.meta ?? {},
+    }, HUB_API);
+  } catch (e) {
+    console.error(`[bridge] could not post result for ${p.handoff_id}:`, e instanceof Error ? e.message : e);
+  }
+  await api({
+    action: "complete", command_id: cmd.id, ok: res.ok,
+    result: { exit_code: res.ok ? 0 : 1, message: res.ok ? `Answered handoff ${p.handoff_id}` : undefined, session_id: res.session_id ?? null },
+    error: res.ok ? undefined : res.error,
+  });
+  console.log(`[bridge] agent handoff ${p.handoff_id} ${res.ok ? "answered" : "failed"}`);
+}
+
 async function loop() {
   const reg = await api({ action: deviceId ? "heartbeat" : "register", device_name: DEVICE_NAME, device_id: deviceId });
   deviceId = reg.device_id ?? deviceId;
+  if (Date.now() - lastCapsAt > CAPS_EVERY_MS) {
+    await reportCapabilities();
+    void pruneWorkspaces(WORKDIR);
+  }
 
+  // Leave queue rows unclaimed while agent slots are full, so nothing waits behind a long run.
+  if (agentRuns.size >= MAX_AGENT_RUNS) return;
   const poll = await api({ action: "poll", device_id: deviceId, limit: 5 });
   for (const cmd of poll.commands ?? []) {
+    if (cmd.command_type === "agent_handoff") {
+      const job = runAgentHandoff(cmd).catch((e) => console.error("[bridge] agent handoff crashed", e)).finally(() => agentRuns.delete(job));
+      agentRuns.add(job);
+      continue;
+    }
     console.log(`[bridge] run ${cmd.id} ${cmd.command_type}`);
     try {
       const result = await executeCommand(cmd);

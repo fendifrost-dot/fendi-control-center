@@ -40,3 +40,13 @@ tmux new -s fendi-bridge
 
 Full guide: `docs/REMOTE_CONTROL_HUB.md`  
 Deploy handoff: `docs/CLAUDE_HANDOFF_REMOTE_CONTROL_HUB.md`
+
+## Agent Hub (Oct 2026)
+
+The bridge also runs **Agent Hub handoffs** (`agent_handoff`): Claude Code, Cursor or Codex
+reviews or works on the exact commit in a per-thread worktree under `~/.fendi-bridge/threads`,
+resumes the same CLI session on follow-ups, and posts the answer back to the thread.
+Claude runs with `ANTHROPIC_API_KEY` removed so it always uses your Max login.
+It also handles `imessage_send`, `imessage_read` and reports what this Mac can do.
+Setup and permissions: `docs/AGENT_HUB.md` → "Setup still needed on your side".
+Test: `node --test scripts/remote-bridge/agentHandoff.test.mjs`.
