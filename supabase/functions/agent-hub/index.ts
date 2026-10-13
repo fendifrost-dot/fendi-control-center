@@ -189,15 +189,29 @@ function background(p: Promise<unknown>) {
 async function recordResponse(db: SupabaseClient, handoff: Record<string, any>, input: {
   body: string; kind?: MessageKind; context?: Record<string, unknown>; attachments?: Attachment[]; session_id?: string | null; meta?: Record<string, unknown>;
 }) {
-  if (["RESPONDED", "CANCELLED"].includes(handoff.status)) throw new InputError(`handoff already ${handoff.status}`);
-  const msg = await insertMessage(db, {
-    thread_id: handoff.thread_id, author: handoff.to_agent, author_kind: "agent",
-    kind: input.kind ?? responseKindFor(handoff.purpose as Purpose), body: input.body,
-    reply_to: handoff.source_message_id, handoff_id: handoff.id, context: input.context, attachments: input.attachments,
-  });
+  // Claim the handoff atomically: the conditional update succeeds for exactly one caller, so two
+  // concurrent answers cannot both be recorded (review finding 1, thread 87e35184).
   const now = new Date().toISOString();
+  const { data: claimed, error: claimErr } = await db.from("agent_hub_handoffs")
+    .update({ status: "RESPONDED", responded_at: now, error: null })
+    .eq("id", handoff.id).not("status", "in", "(RESPONDED,CANCELLED)")
+    .select("id").maybeSingle();
+  if (claimErr) throw new Error(`claim handoff: ${claimErr.message}`);
+  if (!claimed) throw new InputError("handoff already answered or cancelled");
+  let msg: Record<string, any>;
+  try {
+    msg = await insertMessage(db, {
+      thread_id: handoff.thread_id, author: handoff.to_agent, author_kind: "agent",
+      kind: input.kind ?? responseKindFor(handoff.purpose as Purpose), body: input.body,
+      reply_to: handoff.source_message_id, handoff_id: handoff.id, context: input.context, attachments: input.attachments,
+    });
+  } catch (e) {
+    // Release the claim so the answer can be retried.
+    await db.from("agent_hub_handoffs").update({ status: handoff.status, responded_at: null }).eq("id", handoff.id);
+    throw e;
+  }
   await db.from("agent_hub_handoffs").update({
-    status: "RESPONDED", response_message_id: msg.id, responded_at: now, error: null,
+    response_message_id: msg.id,
     delivery: { ...(handoff.delivery ?? {}), ...(input.meta ?? {}) },
   }).eq("id", handoff.id);
   await db.from("agent_hub_agents").update({ last_verified_at: now, last_seen_at: now }).eq("key", handoff.to_agent);
@@ -538,6 +552,8 @@ async function handle(db: SupabaseClient, actor: Actor, action: string, p: Recor
     case "respond": {
       const id = uuid(p.handoff_id, "handoff_id")!;
       const h = await must(db.from("agent_hub_handoffs").select("*").eq("id", id).maybeSingle(), "handoff") as Record<string, any>;
+      // Only an agent token answers handoffs, and only its own (key comes from the token label, never the request).
+      if (actor.type !== "agent") throw new InputError("respond is for agent tokens");
       if (actor.key !== h.to_agent) throw new InputError(`this handoff is addressed to ${h.to_agent}`);
       const msg = await recordResponse(db, h, {
         body: str(p.body, "body", LIMITS.body, true)!, kind: p.kind ? oneOf(p.kind, "kind", MESSAGE_KINDS) : undefined,
