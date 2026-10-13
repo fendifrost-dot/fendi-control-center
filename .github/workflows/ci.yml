@@ -49,4 +49,4 @@ jobs:
         with:
           node-version: 22
       - name: Mac bridge tests (workspace preservation, handoff runs, result outbox)
-        run: node --test scripts/remote-bridge/
+        run: node --test scripts/remote-bridge/*.test.mjs
