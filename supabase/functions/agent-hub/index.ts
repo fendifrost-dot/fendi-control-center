@@ -13,7 +13,7 @@
 import { serve } from "https://deno.land/std@0.224.0/http/server.ts";
 import { createClient, type SupabaseClient } from "https://esm.sh/@supabase/supabase-js@2.49.1";
 import {
-  attachments, buildPacket, effectiveAvailability, InputError, isAction, LIMITS, MESSAGE_KINDS, oneOf,
+  authoredKind, attachments, buildPacket, effectiveAvailability, InputError, isAction, LIMITS, MESSAGE_KINDS, oneOf,
   PURPOSES, renderPacket, responseKindFor, str, uuid, workContext,
   type AgentRow, type Attachment, type MessageKind, type Packet, type PacketMessage, type Purpose,
 } from "./contract.ts";
@@ -47,7 +47,9 @@ async function sha256Hex(input: string): Promise<string> {
   return Array.from(new Uint8Array(d)).map((b) => b.toString(16).padStart(2, "0")).join("");
 }
 
-async function authenticate(req: Request, db: SupabaseClient): Promise<Actor | { error: string }> {
+type AuthFailure = { error: string; status?: 401 | 403 };
+
+async function authenticate(req: Request, db: SupabaseClient): Promise<Actor | AuthFailure> {
   const bridge = req.headers.get("x-remote-bridge-token");
   if (bridge) {
     if (BRIDGE_TOKEN && bridge === BRIDGE_TOKEN) return { type: "bridge", key: "mac-bridge", via: "bridge-token" };
@@ -63,8 +65,13 @@ async function authenticate(req: Request, db: SupabaseClient): Promise<Actor | {
     if (!ANON_KEY) return { error: "anon key not configured" };
     const userClient = createClient(SUPABASE_URL, ANON_KEY, { global: { headers: { Authorization: `Bearer ${token}` } } });
     const { data } = await userClient.auth.getUser();
-    if (data.user) return { type: "human", key: "fendi", ingestOnly: false, via: `session:${data.user.email ?? data.user.id}` };
-    return { error: "invalid session" };
+    if (!data.user) return { error: "invalid session" };
+    // Signing in is not enough: only accounts listed in control_center_owners act as Fendi.
+    const { data: owner, error: ownerErr } = await db.from("control_center_owners")
+      .select("user_id").eq("user_id", data.user.id).maybeSingle();
+    if (ownerErr) return { error: `owner check failed: ${ownerErr.message}`, status: 403 };
+    if (!owner) return { error: "this account is not a Control Center owner", status: 403 };
+    return { type: "human", key: "fendi", ingestOnly: false, via: `session:${data.user.email ?? data.user.id}` };
   }
 
   const { data: t } = await db.from("muse_api_tokens")
@@ -186,54 +193,47 @@ function background(p: Promise<unknown>) {
 // Responding (shared by inbox agents, bridge results and model calls)
 // ---------------------------------------------------------------------------
 
+/**
+ * Store an answer. One database transaction writes the message, links it to the handoff,
+ * marks the handoff answered, updates the thread and the session (review finding 3).
+ * Retrying the same answer after an interrupted call returns the stored message
+ * (`duplicate: true`); a different second answer is refused.
+ */
 async function recordResponse(db: SupabaseClient, handoff: Record<string, any>, input: {
   body: string; kind?: MessageKind; context?: Record<string, unknown>; attachments?: Attachment[]; session_id?: string | null; meta?: Record<string, unknown>;
-}) {
-  // Claim the handoff atomically: the conditional update succeeds for exactly one caller, so two
-  // concurrent answers cannot both be recorded (review finding 1, thread 87e35184).
-  const now = new Date().toISOString();
-  const { data: claimed, error: claimErr } = await db.from("agent_hub_handoffs")
-    .update({ status: "RESPONDED", responded_at: now, error: null })
-    .eq("id", handoff.id).not("status", "in", "(RESPONDED,CANCELLED)")
-    .select("id").maybeSingle();
-  if (claimErr) throw new Error(`claim handoff: ${claimErr.message}`);
-  if (!claimed) throw new InputError("handoff already answered or cancelled");
-  let msg: Record<string, any>;
-  try {
-    msg = await insertMessage(db, {
-      thread_id: handoff.thread_id, author: handoff.to_agent, author_kind: "agent",
-      kind: input.kind ?? responseKindFor(handoff.purpose as Purpose), body: input.body,
-      reply_to: handoff.source_message_id, handoff_id: handoff.id, context: input.context, attachments: input.attachments,
-    });
-  } catch (e) {
-    // Release the claim so the answer can be retried.
-    await db.from("agent_hub_handoffs").update({ status: handoff.status, responded_at: null }).eq("id", handoff.id);
-    throw e;
+}): Promise<{ message: Record<string, any>; duplicate: boolean }> {
+  const { data, error } = await db.rpc("agent_hub_record_response", {
+    p_handoff_id: handoff.id,
+    p_kind: input.kind ?? responseKindFor(handoff.purpose as Purpose),
+    p_body: input.body,
+    p_context: input.context ?? {},
+    p_attachments: input.attachments ?? [],
+    p_delivery: input.meta ?? {},
+    p_session_id: input.session_id ?? null,
+  });
+  if (error) {
+    if (error.code === "23505") throw new InputError("handoff already answered with a different answer");
+    if (error.code === "22023") throw new InputError("handoff was cancelled");
+    if (error.code === "P0002") throw new InputError("handoff not found");
+    throw new Error(`record response: ${error.message}`);
   }
-  await db.from("agent_hub_handoffs").update({
-    response_message_id: msg.id,
-    delivery: { ...(handoff.delivery ?? {}), ...(input.meta ?? {}) },
-  }).eq("id", handoff.id);
-  await db.from("agent_hub_agents").update({ last_verified_at: now, last_seen_at: now }).eq("key", handoff.to_agent);
-  if (input.session_id) {
-    await db.from("agent_hub_sessions").upsert({
-      thread_id: handoff.thread_id, agent_key: handoff.to_agent, external_session_id: input.session_id, updated_at: now,
-      meta: input.meta ?? {},
-    });
+  const result = data as { outcome: "recorded" | "duplicate"; message: Record<string, any> };
+  const duplicate = result.outcome === "duplicate";
+  if (!duplicate) {
+    const { data: thread } = await db.from("agent_hub_threads").select("title").eq("id", handoff.thread_id).maybeSingle();
+    await notifyFendi(`${handoff.to_agent} answered (${result.message.kind}) on "${thread?.title ?? "thread"}"\n${input.body.slice(0, 280)}${input.body.length > 280 ? "…" : ""}\n${APP_URL}/agents/t/${handoff.thread_id}`);
   }
-  await refreshThreadStatus(db, handoff.thread_id);
-  const { data: thread } = await db.from("agent_hub_threads").select("title").eq("id", handoff.thread_id).maybeSingle();
-  await notifyFendi(`${handoff.to_agent} answered (${msg.kind}) on "${thread?.title ?? "thread"}"\n${input.body.slice(0, 280)}${input.body.length > 280 ? "…" : ""}\n${APP_URL}/agents/t/${handoff.thread_id}`);
-  return msg;
+  return { message: result.message, duplicate };
 }
 
-async function failHandoff(db: SupabaseClient, handoff: Record<string, any>, error: string) {
-  await db.from("agent_hub_handoffs").update({ status: "FAILED", error: error.slice(0, 2000) }).eq("id", handoff.id);
-  await insertMessage(db, {
-    thread_id: handoff.thread_id, author: "agent-hub", author_kind: "system", kind: "SYSTEM",
-    body: `Handoff to ${handoff.to_agent} failed: ${error.slice(0, 1000)}`, handoff_id: handoff.id, reply_to: handoff.source_message_id,
-  });
-  await refreshThreadStatus(db, handoff.thread_id);
+/** Fail a handoff only if it is still open; status line written in the same transaction. */
+async function failHandoff(db: SupabaseClient, handoff: Record<string, any>, error: string): Promise<boolean> {
+  const { data, error: rpcErr } = await db.rpc("agent_hub_fail_handoff", { p_handoff_id: handoff.id, p_error: error });
+  if (rpcErr) {
+    console.error("agent-hub: could not mark handoff failed", handoff.id, rpcErr.message);
+    return false;
+  }
+  return data === true;
 }
 
 // ---------------------------------------------------------------------------
@@ -290,8 +290,11 @@ async function runModelCall(db: SupabaseClient, handoff: Record<string, any>, ag
 async function deliver(db: SupabaseClient, handoff: Record<string, any>, agent: Record<string, any>, packet: Packet) {
   const packetText = renderPacket(packet);
   if (agent.transport === "edge_model_call") {
-    background(runModelCall(db, handoff, agent, packetText));
-    return { transport: "edge_model_call", model: agent.model };
+    const delivery = { transport: "edge_model_call", model: agent.model };
+    // Persist the transport first so an interrupted call can be found and closed out later.
+    await db.from("agent_hub_handoffs").update({ delivery, delivered_at: new Date().toISOString() }).eq("id", handoff.id);
+    background(runModelCall(db, { ...handoff, delivery }, agent, packetText));
+    return delivery;
   }
   if (agent.transport === "mac_bridge") {
     const { data: session } = await db.from("agent_hub_sessions").select("external_session_id")
@@ -363,7 +366,7 @@ async function createHandoff(db: SupabaseClient, actor: Actor, input: {
   });
   await db.from("agent_hub_handoffs").update({ context: packet }).eq("id", handoff.id);
   await insertMessage(db, {
-    thread_id: thread.id, author: actor.key, author_kind: actor.type === "human" ? "human" : "system", kind: "SYSTEM",
+    thread_id: thread.id, author: "agent-hub", author_kind: "system", kind: "SYSTEM", context: { requested_by: actor.key },
     body: `${input.purpose.charAt(0) + input.purpose.slice(1).toLowerCase()} sent to ${agent.display_name}${source ? ` (${source.author === "fendi" ? "your" : `${await displayName(db, source.author)}'s`} ${String(source.kind).toLowerCase()})` : ""}.${input.instructions ? ` Instructions: ${input.instructions}` : ""}`,
     handoff_id: handoff.id, reply_to: source?.id ?? null,
   });
@@ -378,6 +381,25 @@ async function createHandoff(db: SupabaseClient, actor: Actor, input: {
   }
   const effective = (await agentsWithState(db)).find((a) => a.key === agent.key)?.effective;
   return { handoff_id: handoff.id, to_agent: agent.key, delivery, receiver_state: effective };
+}
+
+const MODEL_CALL_STALE_MS = 10 * 60_000;
+
+/**
+ * Close out handoffs whose worker can no longer answer:
+ * - model calls still IN_PROGRESS long after the edge worker's limit (worker was killed),
+ * - bridge handoffs whose queue row failed or expired.
+ * All go through failHandoff, which never overwrites a stored answer, so a late answer still lands.
+ */
+async function sweepStaleHandoffs(db: SupabaseClient, threadId?: string) {
+  let stale = db.from("agent_hub_handoffs").select("*").in("status", ["QUEUED", "IN_PROGRESS"])
+    .eq("delivery->>transport", "edge_model_call").lt("updated_at", new Date(Date.now() - MODEL_CALL_STALE_MS).toISOString());
+  if (threadId) stale = stale.eq("thread_id", threadId);
+  const { data: staleRows } = await stale.limit(50);
+  for (const h of staleRows ?? []) {
+    await failHandoff(db, h, "The model call was interrupted before an answer was stored. Retry to send it again.");
+  }
+  await sweepBridgeHandoffs(db, threadId);
 }
 
 /** Mark bridge handoffs failed when their queue row failed or expired. */
@@ -460,7 +482,7 @@ async function handle(db: SupabaseClient, actor: Actor, action: string, p: Recor
     }
     case "thread": {
       const id = uuid(p.thread_id, "thread_id")!;
-      await sweepBridgeHandoffs(db, id);
+      await sweepStaleHandoffs(db, id);
       const thread = await must(db.from("agent_hub_threads").select("*").eq("id", id).maybeSingle(), "thread");
       const { data: messages } = await db.from("agent_hub_messages").select("*").eq("thread_id", id).order("created_at");
       const { data: handoffs } = await db.from("agent_hub_handoffs").select("*").eq("thread_id", id).order("created_at");
@@ -478,7 +500,7 @@ async function handle(db: SupabaseClient, actor: Actor, action: string, p: Recor
       if (body) {
         message = await insertMessage(db, {
           thread_id: thread.id, author: actor.key, author_kind: actor.type === "human" ? "human" : "agent",
-          kind: oneOf(p.kind, "kind", MESSAGE_KINDS, actor.type === "human" ? "MESSAGE" : "WORK"), body,
+          kind: authoredKind(actor.type, p.kind, actor.type === "human" ? "MESSAGE" : "WORK"), body,
           context: workContext(p.context), attachments: attachments(p.attachments),
         });
       }
@@ -486,8 +508,7 @@ async function handle(db: SupabaseClient, actor: Actor, action: string, p: Recor
     }
     case "post": {
       const thread_id = uuid(p.thread_id, "thread_id")!;
-      const kind = oneOf(p.kind, "kind", MESSAGE_KINDS, "MESSAGE");
-      if (kind === "DECISION" || kind === "SYSTEM") throw new InputError(`use the ${kind === "DECISION" ? "decide" : "system"} path for ${kind}`);
+      const kind = authoredKind(actor.type, p.kind, "MESSAGE");
       const msg = await insertMessage(db, {
         thread_id, author: actor.key, author_kind: actor.type === "human" ? "human" : "agent", kind,
         body: str(p.body, "body", LIMITS.body, true)!, reply_to: uuid(p.reply_to, "reply_to", false),
@@ -556,11 +577,11 @@ async function handle(db: SupabaseClient, actor: Actor, action: string, p: Recor
       if (actor.type !== "agent") throw new InputError("respond is for agent tokens");
       if (actor.key !== h.to_agent) throw new InputError(`this handoff is addressed to ${h.to_agent}`);
       const msg = await recordResponse(db, h, {
-        body: str(p.body, "body", LIMITS.body, true)!, kind: p.kind ? oneOf(p.kind, "kind", MESSAGE_KINDS) : undefined,
+        body: str(p.body, "body", LIMITS.body, true)!, kind: authoredKind("agent", p.kind, responseKindFor(h.purpose as Purpose)),
         context: workContext(p.context), attachments: attachments(p.attachments), session_id: str(p.session_id, "session_id", 300),
         meta: { responded_via: actor.via },
       });
-      return { message: msg };
+      return { message: msg.message, duplicate: msg.duplicate };
     }
     case "decide": {
       requireHuman(actor);
@@ -584,7 +605,10 @@ async function handle(db: SupabaseClient, actor: Actor, action: string, p: Recor
       requireHuman(actor);
       const id = uuid(p.handoff_id, "handoff_id")!;
       const h = await must(db.from("agent_hub_handoffs").select("*").eq("id", id).maybeSingle(), "handoff") as Record<string, any>;
-      await db.from("agent_hub_handoffs").update({ status: "CANCELLED" }).eq("id", id);
+      // Never overwrite an answer that has already been stored.
+      const { data: cancelled } = await db.from("agent_hub_handoffs").update({ status: "CANCELLED" })
+        .eq("id", id).in("status", ["QUEUED", "DELIVERED", "IN_PROGRESS", "FAILED"]).select("id").maybeSingle();
+      if (!cancelled) throw new InputError(`handoff is already ${h.status}`);
       if (h.delivery?.bridge_command_id) {
         await db.from("remote_command_queue").update({ status: "cancelled" }).eq("id", h.delivery.bridge_command_id).eq("status", "queued");
       }
@@ -640,13 +664,16 @@ async function handle(db: SupabaseClient, actor: Actor, action: string, p: Recor
       const id = uuid(p.handoff_id, "handoff_id")!;
       const h = await must(db.from("agent_hub_handoffs").select("*").eq("id", id).maybeSingle(), "handoff") as Record<string, any>;
       if (h.delivery?.transport !== "mac_bridge") throw new InputError("handoff was not delivered through the bridge");
-      if (p.ok === false) { await failHandoff(db, h, str(p.error, "error", 4000) ?? "bridge run failed"); return { ok: true }; }
+      if (p.ok === false) {
+        const failed = await failHandoff(db, h, str(p.error, "error", 4000) ?? "bridge run failed");
+        return { ok: true, failed };
+      }
       const msg = await recordResponse(db, h, {
         body: str(p.body, "body", LIMITS.body, true)!, session_id: str(p.session_id, "session_id", 300),
         context: workContext(p.context), attachments: attachments(p.attachments),
         meta: { responded_via: "mac-bridge", run: (p.meta && typeof p.meta === "object") ? p.meta : {} },
       });
-      return { ok: true, message_id: msg.id };
+      return { ok: true, message_id: msg.message.id, duplicate: msg.duplicate };
     }
     case "imessage_send":
     case "imessage_read": {
@@ -675,7 +702,10 @@ serve(async (req) => {
   if (!isAction(action)) return json({ error: "unknown_action", action }, 400);
 
   const actor = await authenticate(req, db);
-  if ("error" in actor) return json({ error: "unauthorized", message: actor.error }, 401);
+  if ("error" in actor) {
+    const status = actor.status ?? 401;
+    return json({ error: status === 403 ? "forbidden" : "unauthorized", message: actor.error }, status);
+  }
   try {
     const result = await handle(db, actor, action, body);
     return json({ ok: true, ...result as object });
