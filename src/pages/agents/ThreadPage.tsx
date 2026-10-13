@@ -316,7 +316,7 @@ export default function ThreadPage() {
                       original <ExternalLink className="h-3 w-3" />
                     </a>
                   )}
-                  {m.context.files?.map((f) => <span key={f} className="rounded bg-muted px-1.5 py-0.5 font-mono">{f}</span>)}
+                  {m.context.files?.map((f) => <span key={f} title={f} className="max-w-full truncate rounded bg-muted px-1.5 py-0.5 font-mono" dir="rtl">{f}</span>)}
                 </div>
               )}
 
