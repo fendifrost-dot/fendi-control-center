@@ -76,3 +76,26 @@ Deno.test("packet carries the exact revision, the full source and a shortened hi
   assertMatch(md, /Check the auth path\./);
   assertEquals(p.respond_with.kind, "REVIEW");
 });
+
+// Review finding 2: reserved kinds cannot be authored through any write path.
+import { authoredKind } from "./contract.ts";
+
+Deno.test("agents cannot author DECISION, SYSTEM or IMPORT", () => {
+  for (const k of ["DECISION", "SYSTEM", "IMPORT"]) {
+    assertThrows(() => authoredKind("agent", k, "WORK"), InputError, k);
+  }
+  assertEquals(authoredKind("agent", "REVIEW", "WORK"), "REVIEW");
+  assertEquals(authoredKind("agent", undefined, "REVISION"), "REVISION");
+});
+
+Deno.test("Fendi posts cannot forge SYSTEM, and DECISION/IMPORT only come from decide/ingest", () => {
+  for (const k of ["DECISION", "SYSTEM", "IMPORT", "REVIEW"]) {
+    assertThrows(() => authoredKind("human", k, "MESSAGE"), InputError);
+  }
+  assertEquals(authoredKind("human", "WORK", "MESSAGE"), "WORK");
+});
+
+Deno.test("unknown kinds are rejected", () => {
+  assertThrows(() => authoredKind("agent", "APPROVAL", "WORK"), InputError);
+  assertThrows(() => authoredKind("agent", 7, "WORK"), InputError);
+});

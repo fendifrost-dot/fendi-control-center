@@ -48,7 +48,12 @@ async function authEnqueue(req: Request, body: Record<string, unknown>): Promise
         global: { headers: { Authorization: auth } },
       });
       const { data } = await userClient.auth.getUser();
-      if (data.user) return true;
+      if (!data.user) return false;
+      // Queued commands run on the owner's Mac: a signed-in account must also be a listed owner.
+      const service = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
+      const { data: owner } = await service.from("control_center_owners")
+        .select("user_id").eq("user_id", data.user.id).maybeSingle();
+      return Boolean(owner);
     }
   }
   return false;
@@ -56,15 +61,21 @@ async function authEnqueue(req: Request, body: Record<string, unknown>): Promise
 
 async function ensureDefaultDevice(
   supabase: SupabaseClient<any, "public", any>,
+  deviceName?: string | null,
 ): Promise<string> {
-  const name = Deno.env.get("REMOTE_BRIDGE_DEVICE_NAME") ?? "primary-mac";
+  // Look up by the name the Mac reports (falling back to the configured default), and take the
+  // most recently seen active row. The old lookup used only the server default and .maybeSingle(),
+  // so a Mac reporting a different name registered a new row on every restart (two "fendi-macbook"
+  // rows from 3 Jun 2026), and once two rows existed the lookup errored and inserted again.
+  const name = deviceName?.trim() || Deno.env.get("REMOTE_BRIDGE_DEVICE_NAME") || "primary-mac";
   const { data: existing } = await supabase
     .from("remote_bridge_devices")
     .select("id")
     .eq("device_name", name)
     .eq("status", "active")
-    .maybeSingle();
-  if (existing?.id) return existing.id as string;
+    .order("last_seen_at", { ascending: false, nullsFirst: false })
+    .limit(1);
+  if (existing?.[0]?.id) return existing[0].id as string;
 
   const { data: created, error } = await supabase
     .from("remote_bridge_devices")
@@ -136,14 +147,10 @@ serve(async (req) => {
       if (block) return json({ error: block }, 400);
     }
 
-    let device_id: string | null = body.device_id ? String(body.device_id) : null;
-    if (!device_id) {
-      try {
-        device_id = await ensureDefaultDevice(supabase);
-      } catch (e) {
-        return json({ error: String(e) }, 500);
-      }
-    }
+    // No device named: leave device_id null so whichever bridge is running claims it
+    // (claim_remote_command_rows accepts NULL). Assigning the server-default device here
+    // filed commands under a name the running Mac never polled for.
+    const device_id: string | null = body.device_id ? String(body.device_id) : null;
 
     const { data: row, error } = await supabase
       .from("remote_command_queue")
@@ -168,7 +175,11 @@ serve(async (req) => {
   if (action === "register" || action === "heartbeat") {
     const deviceName = String(body.device_name ?? Deno.env.get("REMOTE_BRIDGE_DEVICE_NAME") ?? "primary-mac");
     let deviceId = body.device_id ? String(body.device_id) : null;
-    if (!deviceId) deviceId = await ensureDefaultDevice(supabase);
+    if (deviceId) {
+      const { data: known } = await supabase.from("remote_bridge_devices").select("id").eq("id", deviceId).eq("status", "active").maybeSingle();
+      if (!known) deviceId = null;
+    }
+    if (!deviceId) deviceId = await ensureDefaultDevice(supabase, deviceName);
     await supabase
       .from("remote_bridge_devices")
       .update({ last_seen_at: new Date().toISOString(), device_name: deviceName })
@@ -177,7 +188,7 @@ serve(async (req) => {
   }
 
   if (action === "poll") {
-    const deviceId = body.device_id ? String(body.device_id) : await ensureDefaultDevice(supabase);
+    const deviceId = body.device_id ? String(body.device_id) : await ensureDefaultDevice(supabase, body.device_name ? String(body.device_name) : null);
     const limit = Math.min(Number(body.limit ?? 5), 10);
     const now = new Date().toISOString();
 

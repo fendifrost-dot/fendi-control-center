@@ -7,10 +7,11 @@
  */
 
 import { spawn } from "node:child_process";
-import { existsSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
-import { executeAgentHandoff, imessageRead, imessageSend, probeCapabilities, pruneWorkspaces } from "./agentHandoff.mjs";
+import { BRIDGE_HOME, executeAgentHandoff, imessageRead, imessageSend, probeCapabilities, pruneWorkspaces } from "./agentHandoff.mjs";
+import { deliverSaved, flushOutbox, saveResult } from "./resultOutbox.mjs";
 
 const SUPABASE_URL = process.env.SUPABASE_URL?.replace(/\/$/, "");
 const BRIDGE_TOKEN = process.env.REMOTE_BRIDGE_TOKEN;
@@ -27,7 +28,20 @@ if (!SUPABASE_URL || !BRIDGE_TOKEN) {
   process.exit(1);
 }
 
-let deviceId = process.env.REMOTE_BRIDGE_DEVICE_ID ?? null;
+// Keep the device id across restarts so the hub sees one Mac, not a new row per restart.
+const DEVICE_FILE = join(BRIDGE_HOME, "device.json");
+function loadDeviceId() {
+  try { return JSON.parse(readFileSync(DEVICE_FILE, "utf8")).device_id ?? null; } catch { return null; }
+}
+function saveDeviceId(id) {
+  try {
+    mkdirSync(BRIDGE_HOME, { recursive: true });
+    writeFileSync(DEVICE_FILE, JSON.stringify({ device_id: id, device_name: DEVICE_NAME, saved_at: new Date().toISOString() }));
+  } catch (e) {
+    console.error("[bridge] could not save device id:", e instanceof Error ? e.message : e);
+  }
+}
+let deviceId = process.env.REMOTE_BRIDGE_DEVICE_ID ?? loadDeviceId();
 
 async function api(body, url = API) {
   const res = await fetch(url, {
@@ -39,7 +53,11 @@ async function api(body, url = API) {
     body: JSON.stringify(body),
   });
   const data = await res.json().catch(() => ({}));
-  if (!res.ok) throw new Error(data.error ?? `HTTP ${res.status}`);
+  if (!res.ok) {
+    const err = new Error(data.message ?? data.error ?? `HTTP ${res.status}`);
+    err.status = res.status;
+    throw err;
+  }
   return data;
 }
 
@@ -143,28 +161,34 @@ async function runAgentHandoff(cmd) {
   const p = cmd.payload ?? {};
   console.log(`[bridge] agent handoff ${p.handoff_id} -> ${p.cli} (${p.purpose})`);
   const res = await executeAgentHandoff(p, WORKDIR);
-  try {
-    await api({
-      action: "bridge_result", handoff_id: p.handoff_id, ok: res.ok, body: res.body, error: res.error,
-      session_id: res.session_id ?? null, meta: res.meta ?? {},
-    }, HUB_API);
-  } catch (e) {
-    console.error(`[bridge] could not post result for ${p.handoff_id}:`, e instanceof Error ? e.message : e);
-  }
+  // Save the answer to disk first; then post it. If posting fails it is re-sent on later loops.
+  const file = saveResult(BRIDGE_HOME, p.handoff_id, {
+    ok: res.ok, body: res.body, error: res.error, session_id: res.session_id ?? null, meta: res.meta ?? {},
+  });
+  const delivery = await deliverSaved(BRIDGE_HOME, p.handoff_id, (b) => api(b, HUB_API));
+  if (delivery !== "delivered") console.error(`[bridge] result for ${p.handoff_id} ${delivery}; kept at ${file}`);
   await api({
     action: "complete", command_id: cmd.id, ok: res.ok,
-    result: { exit_code: res.ok ? 0 : 1, message: res.ok ? `Answered handoff ${p.handoff_id}` : undefined, session_id: res.session_id ?? null },
+    result: {
+      exit_code: res.ok ? 0 : 1,
+      message: delivery === "delivered" ? `Answered handoff ${p.handoff_id}` : `Answer saved on the Mac (${delivery}); will be re-sent`,
+      session_id: res.session_id ?? null,
+    },
     error: res.ok ? undefined : res.error,
   });
-  console.log(`[bridge] agent handoff ${p.handoff_id} ${res.ok ? "answered" : "failed"}`);
+  console.log(`[bridge] agent handoff ${p.handoff_id} ${res.ok ? "answered" : "failed"} (${delivery})`);
 }
 
 async function loop() {
   const reg = await api({ action: deviceId ? "heartbeat" : "register", device_name: DEVICE_NAME, device_id: deviceId });
+  if (reg.device_id && reg.device_id !== deviceId) saveDeviceId(reg.device_id);
   deviceId = reg.device_id ?? deviceId;
+  await flushOutbox(BRIDGE_HOME, (b) => api(b, HUB_API)).catch((e) => console.error("[bridge] outbox flush:", e));
   if (Date.now() - lastCapsAt > CAPS_EVERY_MS) {
     await reportCapabilities();
-    void pruneWorkspaces(WORKDIR);
+    pruneWorkspaces(WORKDIR)
+      .then((r) => { if (r.removed.length || r.kept.length) console.log(`[bridge] workspaces: removed ${r.removed.length}, kept ${r.kept.length}`, r.kept.slice(0, 5)); })
+      .catch((e) => console.error("[bridge] prune:", e));
   }
 
   // Leave queue rows unclaimed while agent slots are full, so nothing waits behind a long run.

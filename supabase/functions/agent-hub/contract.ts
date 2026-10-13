@@ -8,6 +8,37 @@ export const MESSAGE_KINDS = [
 ] as const;
 export type MessageKind = (typeof MESSAGE_KINDS)[number];
 
+/**
+ * Who may author which message kind (review finding 2).
+ * - SYSTEM: written only by the hub itself (handoff lines, failures).
+ * - DECISION: only Fendi, only through `decide`.
+ * - IMPORT: only Fendi, only through `ingest`.
+ * Agents may post work and conversation; Fendi may post work, messages and feedback.
+ */
+export const AGENT_AUTHORED_KINDS = ["MESSAGE", "WORK", "REVIEW", "REVISION", "FEEDBACK"] as const;
+export const OWNER_AUTHORED_KINDS = ["MESSAGE", "WORK", "FEEDBACK"] as const;
+export const RESERVED_KINDS = ["SYSTEM", "DECISION", "IMPORT"] as const;
+
+export function authoredKind(
+  actorType: "human" | "agent" | "bridge",
+  requested: unknown,
+  fallback: MessageKind,
+): MessageKind {
+  const allowed: readonly string[] = actorType === "human" ? OWNER_AUTHORED_KINDS : AGENT_AUTHORED_KINDS;
+  const kind = requested === undefined || requested === null || requested === "" ? fallback : requested;
+  if (typeof kind !== "string" || !(MESSAGE_KINDS as readonly string[]).includes(kind)) {
+    throw new InputError(`kind must be one of ${allowed.join(", ")}`);
+  }
+  if (!allowed.includes(kind)) {
+    const why = kind === "SYSTEM" ? "is written only by Control Center itself"
+      : kind === "DECISION" ? "is recorded only by Fendi through decide"
+      : kind === "IMPORT" ? "is recorded only by Fendi through ingest"
+      : `is not allowed for ${actorType === "human" ? "Fendi" : "agents"}`;
+    throw new InputError(`kind ${kind} ${why}`);
+  }
+  return kind as MessageKind;
+}
+
 export const ACTIONS = [
   "health", "agents", "threads", "thread", "create_thread", "post", "handoff", "return_to_origin",
   "inbox", "respond", "decide", "set_thread_status", "cancel_handoff", "retry_handoff", "ingest",
