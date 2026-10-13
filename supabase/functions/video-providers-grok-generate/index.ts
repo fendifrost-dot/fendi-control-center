@@ -90,7 +90,8 @@ serve(async (req) => {
     resolution,
   };
   if (mode === "image_to_video" && parsed.referenceImageUrl) {
-    xaiBody.image = parsed.referenceImageUrl;
+    // xAI's ImageUrl struct: a bare string is a 422 ("image: invalid type: string"), seen live 2026-10-13.
+    xaiBody.image = { url: parsed.referenceImageUrl };
   }
 
   const result = await withRetry(async () => {
