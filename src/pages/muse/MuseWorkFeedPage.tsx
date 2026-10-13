@@ -10,6 +10,7 @@ import {
   workFeedFilterProblem,
   type WorkFeedFilterInput,
 } from "@/lib/muse/boardFilters";
+import { igDmReceiptHubStatus } from "@/lib/muse/igDmReceipt";
 import { useMuseWorkFeed } from "@/lib/muse/workboardClient";
 import { formatAge } from "@/lib/muse/museFormat";
 
@@ -79,12 +80,17 @@ export default function MuseWorkFeedPage() {
       )}
 
       <div className="space-y-3">
-        {rows.map((row) => (
-          <Card key={row.id}>
+        {rows.map((row) => {
+          const hubStatus = igDmReceiptHubStatus(row.message);
+          return (
+          <Card key={row.id} className={hubStatus ? "border-destructive/50" : undefined}>
             <CardHeader className="pb-3">
               <div className="flex flex-wrap items-start justify-between gap-2">
                 <CardTitle className="text-base">{row.actor ?? "unknown actor"}</CardTitle>
                 <div className="flex flex-wrap gap-1.5">
+                  {hubStatus && (
+                    <Badge variant="destructive" className="font-mono text-[10px]">Hub {hubStatus}</Badge>
+                  )}
                   <Badge variant="secondary" className="font-mono text-[10px]">{row.update_type ?? "NOTE"}</Badge>
                   {row.domain_key && <Badge variant="outline" className="font-mono text-[10px]">{row.domain_key}</Badge>}
                   <span className="text-xs text-muted-foreground">{formatAge(row.created_at)}</span>
@@ -101,7 +107,8 @@ export default function MuseWorkFeedPage() {
               </div>
             </CardContent>
           </Card>
-        ))}
+          );
+        })}
       </div>
     </div>
   );

@@ -35,6 +35,48 @@ vi.mock("@/lib/muse/workboardClient", () => {
       created_at: "2026-10-08T12:00:00.000Z",
       as_of: "2026-10-08T12:00:00.000Z",
     },
+    {
+      id: "ig-403",
+      actor: "enki",
+      update_type: "BLOCKER",
+      domain_key: null,
+      domain_name: null,
+      task_id: null,
+      improvement_id: null,
+      mission_id: "6f14b53d-4c16-49ec-a475-a1bf94229499",
+      message: "IG_DM_RECEIPT_REFUSED\nhub_status: 403\nhandoff_record_id: 6f14b53d-4c16-49ec-a475-a1bf94229499\nreference: ig-dm-thread-8841\nerror: muse_ig_receipt may only call mark_manual_ig_dm_submitted",
+      evidence_ref: "6f14b53d-4c16-49ec-a475-a1bf94229499",
+      created_at: "2026-10-13T15:05:00.000Z",
+      as_of: "2026-10-13T15:05:00.000Z",
+    },
+    {
+      id: "ig-409",
+      actor: "enki",
+      update_type: "STATUS",
+      domain_key: null,
+      domain_name: null,
+      task_id: null,
+      improvement_id: null,
+      mission_id: "6f14b53d-4c16-49ec-a475-a1bf94229499",
+      message: "IG_DM_RECEIPT_REFUSED\nhub_status: 409\nhandoff_record_id: 6f14b53d-4c16-49ec-a475-a1bf94229499\nreference: ig-dm-thread-8841\ncode: conflict\nerror: record state changed before submit stamp",
+      evidence_ref: "6f14b53d-4c16-49ec-a475-a1bf94229499",
+      created_at: "2026-10-13T15:06:00.000Z",
+      as_of: "2026-10-13T15:06:00.000Z",
+    },
+    {
+      id: "not-a-receipt",
+      actor: "enki",
+      update_type: "NOTE",
+      domain_key: null,
+      domain_name: null,
+      task_id: null,
+      improvement_id: null,
+      mission_id: null,
+      message: "Retry returned 403 from somewhere else",
+      evidence_ref: null,
+      created_at: "2026-10-13T15:07:00.000Z",
+      as_of: "2026-10-13T15:07:00.000Z",
+    },
   ];
   return {
     useMuseWorkFeed: (filters: { task_id?: string; improvement_id?: string }) => ({
@@ -53,6 +95,9 @@ describe("work feed page", () => {
     render(<MuseWorkFeedPage />);
     expect(screen.getByText("Save verified on the task.")).toBeInTheDocument();
     expect(screen.getByText("Acknowledgement of the improvement.")).toBeInTheDocument();
+    expect(screen.getByText("Hub 403")).toBeInTheDocument();
+    expect(screen.getByText("Hub 409")).toBeInTheDocument();
+    expect(screen.getAllByText("Hub 403")).toHaveLength(1);
 
     fireEvent.change(screen.getByLabelText("Filter by task id"), { target: { value: TASK } });
 
