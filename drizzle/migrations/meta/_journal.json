@@ -1,0 +1,13 @@
+{
+  "version": "7",
+  "dialect": "postgresql",
+  "entries": [
+    {
+      "idx": 0,
+      "version": "7",
+      "when": 1791906057761,
+      "tag": "0000_muse_ig_dm_receipt_action",
+      "breakpoints": true
+    }
+  ]
+}
