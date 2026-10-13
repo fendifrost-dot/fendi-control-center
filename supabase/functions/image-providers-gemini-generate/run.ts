@@ -1,5 +1,6 @@
 import { COST_BASIS, COST_CONDITIONAL_USD, MAX_ANSWER_BYTES, MAX_IMAGE_BYTES, MAX_INPUT_TOKENS, MAX_REFERENCE_BYTES, MAX_REQUEST_BYTES, MODEL, base64Bytes, bodyOf, decodeImage, generationConfig, record, requestBodyParts, sniffMime, type BodyMode, type Input } from "./contract.ts";
 import { readAnswer, type StreamedAnswer } from "./answerStream.ts";
+import { defaultPixelDecoder, verifyImage, type PixelDecoder } from "./imageDecode.ts";
 
 // v1beta: Google answers 404 "Model is not found ... for api version v1" for this model (live dry-run, 12 Oct 2026).
 const API = "https://generativelanguage.googleapis.com/v1beta";
@@ -80,7 +81,20 @@ async function imageModels(key: string, fetcher: typeof fetch): Promise<string[]
   } catch { return null; }
 }
 /** Dependency injection allows contract + mocked HTTP tests without importing Deno or secrets. */
-export async function run(input: Input, key: string, fetcher: typeof fetch = fetch, bodyMode: BodyMode = "stream"): Promise<Record<string, unknown>> {
+/**
+ * base64 -> bytes without the transient blow-up of `Uint8Array.from(atob(s), mapFn)` (measured +256 MB at 8 MB of
+ * image, review 13 Oct): a plain indexed loop costs ~+17 MB, `Uint8Array.fromBase64` ~+16 MB where the runtime has it.
+ */
+export function base64ToBytes(b64: string): Uint8Array {
+  // deno-lint-ignore no-explicit-any
+  const native = (Uint8Array as any).fromBase64 as ((s: string) => Uint8Array) | undefined;
+  if (typeof native === "function") return native.call(Uint8Array, b64);
+  const bin = atob(b64); const out = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
+  return out;
+}
+
+export async function run(input: Input, key: string, fetcher: typeof fetch = fetch, bodyMode: BodyMode = "stream", pixelDecoder: PixelDecoder = defaultPixelDecoder): Promise<Record<string, unknown>> {
   const plan = { provider: "gemini", billingAccount: "Google Gemini API", model: MODEL, costBasis: COST_BASIS, estimatedCostUsd: COST_CONDITIONAL_USD, costIsEstimate: true, costIsUpperBound: false, costBoundConditional: true, actualCostUsd: null, maxReferences: 14 };
   if (!key) return { ok: false, ...plan, errorCode: "PROVIDER_KEY_NOT_CONFIGURED", billed: false, ...(input.dryRun ? { dryRun: true, referencesSent: 0 } : {}) };
   if (input.dryRun) {
@@ -160,10 +174,15 @@ export async function run(input: Input, key: string, fetcher: typeof fetch = fet
     const checked = decodeImage(final.data, final.mimeType);
     const image = { data: final.data, mimeType: final.mimeType as string, bytes: checked.bytes };
     track.mark("image_checked");
-    // DECISION: a structurally valid final image is returned whatever the finish reason (it was paid for); a finish
-    // other than STOP, or a trailer that does not verify, is flagged so AVT files the still with a note, never silently.
+    // Real decode, bounded (imageDecode.ts): the bytes go back to the caller either way because they may have been
+    // paid for; `imageUsable` says whether they decoded to a picture whose size matches the header. RECEIVED AND
+    // STORED is not DECODED AND USABLE, and the caller must file the first with a visible mark.
+    const verdict = await verifyImage(base64ToBytes(final.data), pixelDecoder);
+    track.mark("image_verified");
+    // DECISION: a final image is returned whatever the finish reason (it was paid for); a finish other than STOP, a
+    // trailer that does not verify, or a failed decode is flagged so AVT files the still with a note, never silently.
     const finishReasonUnusual = finish.finishReason !== "STOP";
-    return { ok: true, ...plan, billingStatus: "invoice_unknown", billed: "unknown", possiblyBilled: true, submitted: true, referencesSent, countedInputTokens: counted.totalTokens, usage, modelVersion, ...finish, finishReasonUnusual, imageTrailerOk: checked.trailerOk, ...evidence, requestBodyMode: mode, phases: track.phases, images: [image] };
+    return { ok: true, ...plan, billingStatus: "invoice_unknown", billed: "unknown", possiblyBilled: true, submitted: true, referencesSent, countedInputTokens: counted.totalTokens, usage, modelVersion, ...finish, finishReasonUnusual, imageTrailerOk: checked.trailerOk, imageUsable: verdict.usable, imageDecoded: verdict.decoded, imageWidth: verdict.width, imageHeight: verdict.height, imageDecodeReason: verdict.reason, imageDecodeError: verdict.error ?? null, imageDecodeMs: verdict.ms, ...evidence, requestBodyMode: mode, phases: track.phases, images: [image] };
   } catch (e) {
     // Only our fixed codes escape; a fetch exception can contain a signed URL or key.
     const msg = e instanceof Error ? e.message : "";
