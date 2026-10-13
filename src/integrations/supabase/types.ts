@@ -553,6 +553,27 @@ export type Database = {
         }
         Relationships: []
       }
+      control_center_owners: {
+        Row: {
+          added_at: string
+          email: string
+          note: string | null
+          user_id: string
+        }
+        Insert: {
+          added_at?: string
+          email: string
+          note?: string | null
+          user_id: string
+        }
+        Update: {
+          added_at?: string
+          email?: string
+          note?: string | null
+          user_id?: string
+        }
+        Relationships: []
+      }
       credit_analyses: {
         Row: {
           analysis: Json
@@ -4303,6 +4324,22 @@ export type Database = {
       }
     }
     Functions: {
+      agent_hub_fail_handoff: {
+        Args: { p_error: string; p_handoff_id: string }
+        Returns: boolean
+      }
+      agent_hub_record_response: {
+        Args: {
+          p_attachments?: Json
+          p_body: string
+          p_context?: Json
+          p_delivery?: Json
+          p_handoff_id: string
+          p_kind: string
+          p_session_id?: string
+        }
+        Returns: Json
+      }
       claim_outbox_rows: {
         Args: { p_chat_id: string; p_limit: number; p_now: string }
         Returns: {
@@ -4346,6 +4383,11 @@ export type Database = {
         Args: { p_client_id: string }
         Returns: undefined
       }
+      delete_client_and_related_data_impl: {
+        Args: { p_client_id: string }
+        Returns: undefined
+      }
+      is_control_center_owner: { Args: never; Returns: boolean }
       list_workflows: {
         Args: never
         Returns: {
