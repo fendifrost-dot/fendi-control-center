@@ -81,6 +81,19 @@ async function imageModels(key: string, fetcher: typeof fetch): Promise<string[]
   } catch { return null; }
 }
 /** Dependency injection allows contract + mocked HTTP tests without importing Deno or secrets. */
+/**
+ * base64 -> bytes without the transient blow-up of `Uint8Array.from(atob(s), mapFn)` (measured +256 MB at 8 MB of
+ * image, review 13 Oct): a plain indexed loop costs ~+17 MB, `Uint8Array.fromBase64` ~+16 MB where the runtime has it.
+ */
+export function base64ToBytes(b64: string): Uint8Array {
+  // deno-lint-ignore no-explicit-any
+  const native = (Uint8Array as any).fromBase64 as ((s: string) => Uint8Array) | undefined;
+  if (typeof native === "function") return native.call(Uint8Array, b64);
+  const bin = atob(b64); const out = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
+  return out;
+}
+
 export async function run(input: Input, key: string, fetcher: typeof fetch = fetch, bodyMode: BodyMode = "stream", pixelDecoder: PixelDecoder = defaultPixelDecoder): Promise<Record<string, unknown>> {
   const plan = { provider: "gemini", billingAccount: "Google Gemini API", model: MODEL, costBasis: COST_BASIS, estimatedCostUsd: COST_CONDITIONAL_USD, costIsEstimate: true, costIsUpperBound: false, costBoundConditional: true, actualCostUsd: null, maxReferences: 14 };
   if (!key) return { ok: false, ...plan, errorCode: "PROVIDER_KEY_NOT_CONFIGURED", billed: false, ...(input.dryRun ? { dryRun: true, referencesSent: 0 } : {}) };
@@ -164,8 +177,8 @@ export async function run(input: Input, key: string, fetcher: typeof fetch = fet
     // Real decode, bounded (imageDecode.ts): the bytes go back to the caller either way because they may have been
     // paid for; `imageUsable` says whether they decoded to a picture whose size matches the header. RECEIVED AND
     // STORED is not DECODED AND USABLE, and the caller must file the first with a visible mark.
-    const verdict = await verifyImage(Uint8Array.from(atob(final.data), (c) => c.charCodeAt(0)), pixelDecoder);
-    track.mark("image_decoded");
+    const verdict = await verifyImage(base64ToBytes(final.data), pixelDecoder);
+    track.mark("image_verified");
     // DECISION: a final image is returned whatever the finish reason (it was paid for); a finish other than STOP, a
     // trailer that does not verify, or a failed decode is flagged so AVT files the still with a note, never silently.
     const finishReasonUnusual = finish.finishReason !== "STOP";

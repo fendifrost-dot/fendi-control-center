@@ -1,5 +1,6 @@
 // @vitest-environment node
 import { describe, expect, it, vi } from "vitest";
+import { base64ToBytes } from "./run.ts";
 import { COST_CONDITIONAL_USD, MAX_IMAGE_BYTES, MAX_REFERENCE_BYTES, MAX_REQUEST_BYTES, MIN_IMAGE_BYTES, MODEL, decodeImage, encode, generationConfig, parseInput, referenceUrlAllowed, base64Bytes, bodyOf, requestBodyParts, requestContents } from "./contract.ts";
 import { boundedBytes, run } from "./run.ts";
 
@@ -252,6 +253,11 @@ describe("mocked integration: request body acceptance and large answers", () => 
     const called = vi.fn(async () => ({ width: 30000, height: 30000 }));
     expect(await run(parseInput(raw), "secret", cap, "stream", called)).toMatchObject({ ok: true, imageUsable: false, imageDecodeReason: "over_decode_cap", imageWidth: 30000 });
     expect(called).not.toHaveBeenCalled();
+  });
+  it("base64ToBytes round-trips and never uses the mapFn form", () => {
+    const bytes = new Uint8Array(70_000); for (let i = 0; i < bytes.length; i++) bytes[i] = (i * 31) & 0xff;
+    expect(base64ToBytes(encode(bytes))).toEqual(bytes);
+    expect(base64ToBytes("")).toEqual(new Uint8Array(0));
   });
   it("a header-only image from the provider is refused as image_too_small, possibly billed", async () => {
     const tiny = encode(new Uint8Array([137,80,78,71,13,10,26,10,0,0,0,0,1]));

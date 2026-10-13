@@ -8,25 +8,31 @@
 // whatever this says: they may have been paid for. The caller distinguishes "received and stored" from "decoded and
 // usable" by `usable`.
 
-export const MAX_DECODE_PIXELS = 9_000_000; // ~2.1x a 2K result; ≈ +100 MB RSS worst case at 4 bytes a pixel
+// Measured on Deno 2.9.7 / imagescript 1.3.0 (independent review, 13 Oct): a 1856x2304 result costs +94-96 MB RSS to
+// decode, a 2990x2990 one +134 MB (JPEG) to +200 MB (16-bit PNG). Budget ~22 bytes a pixel, not 4. A 2K result is
+// 4.3 MP; 5 MP keeps a worst case near +110 MB on top of the retained base64 and the byte copy.
+export const MAX_DECODE_PIXELS = 5_000_000;
 
+// `usable` means: decodes with the decoder this worker ships, to the size the header declares. It does NOT prove the
+// picture is complete (a JPEG with fewer scanlines than its header decodes padded; trailing junk after EOI is ignored;
+// an APNG decodes as its first frame). Those are quality questions for the reviewer, not integrity failures.
 export type DecodeVerdict = {
   usable: boolean;
   decoded: boolean;
   width: number | null;
   height: number | null;
-  reason: "ok" | "no_dimensions" | "over_decode_cap" | "decode_failed" | "dimension_mismatch" | "zero_dimension";
+  reason: "ok" | "no_dimensions" | "over_decode_cap" | "decode_failed" | "dimension_mismatch" | "zero_dimension" | "unsupported_format" | "unsupported_bit_depth";
   error?: string;
   ms: number;
 };
 
 /** Width/height from the first bytes of a PNG, JPEG or WebP without decoding; null when the header is not one of those. */
-export function headerDimensions(b: Uint8Array): { width: number; height: number; kind: "png" | "jpeg" | "webp" } | null {
+export function headerDimensions(b: Uint8Array): { width: number; height: number; kind: "png" | "jpeg" | "webp"; bitDepth?: number } | null {
   const u32 = (i: number) => ((b[i] << 24) | (b[i + 1] << 16) | (b[i + 2] << 8) | b[i + 3]) >>> 0;
   const u16 = (i: number) => (b[i] << 8) | b[i + 1];
   const u24le = (i: number) => b[i] | (b[i + 1] << 8) | (b[i + 2] << 16);
   if (b.length >= 24 && b[0] === 0x89 && b[1] === 0x50 && b[2] === 0x4e && b[3] === 0x47 && String.fromCharCode(b[12], b[13], b[14], b[15]) === "IHDR") {
-    return { width: u32(16), height: u32(20), kind: "png" };
+    return { width: u32(16), height: u32(20), kind: "png", bitDepth: b[24] };
   }
   if (b.length >= 4 && b[0] === 0xff && b[1] === 0xd8) {
     let i = 2;
@@ -69,6 +75,10 @@ export async function verifyImage(bytes: Uint8Array, decoder: PixelDecoder = def
   if (!dims) return { usable: false, decoded: false, width: null, height: null, reason: "no_dimensions", ms: ms() };
   if (dims.width === 0 || dims.height === 0) return { usable: false, decoded: false, width: dims.width, height: dims.height, reason: "zero_dimension", ms: ms() };
   if (dims.width * dims.height > MAX_DECODE_PIXELS) return { usable: false, decoded: false, width: dims.width, height: dims.height, reason: "over_decode_cap", ms: ms() };
+  // imagescript 1.3.0 has no WebP decoder (review, 13 Oct): say so instead of reporting a decode failure.
+  if (dims.kind === "webp") return { usable: false, decoded: false, width: dims.width, height: dims.height, reason: "unsupported_format", error: "webp: no decoder in this worker", ms: ms() };
+  // 16-bit PNG decodes to twice the memory for the same pixel count (+200 MB measured at 9 MP); not worth the worker.
+  if (dims.kind === "png" && (dims.bitDepth ?? 8) > 8) return { usable: false, decoded: false, width: dims.width, height: dims.height, reason: "unsupported_bit_depth", error: `png bit depth ${dims.bitDepth}`, ms: ms() };
   try {
     const got = await decoder(bytes);
     if (got.width !== dims.width || got.height !== dims.height) return { usable: false, decoded: true, width: got.width, height: got.height, reason: "dimension_mismatch", error: `header ${dims.width}x${dims.height}`, ms: ms() };

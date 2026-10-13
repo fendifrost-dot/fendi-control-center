@@ -33,3 +33,12 @@ Deno.test("headerDimensions reads PNG, JPEG and WebP and rejects other bytes", (
   const webp = new Uint8Array(32); webp.set([0x52, 0x49, 0x46, 0x46, 0, 0, 0, 0, 0x57, 0x45, 0x42, 0x50, 0x56, 0x50, 0x38, 0x58, 10, 0, 0, 0, 0, 0, 0, 0, 0x3f, 0x07, 0, 0xff, 0x08, 0]);
   assertEquals(headerDimensions(webp), { width: 0x0740, height: 0x08ff + 1, kind: "webp" });
 });
+
+Deno.test("WebP is reported unsupported (no decoder here), 16-bit PNG is refused before decode", async () => {
+  const webp = new Uint8Array(4096); webp.set([0x52, 0x49, 0x46, 0x46, 0, 0, 0, 0, 0x57, 0x45, 0x42, 0x50, 0x56, 0x50, 0x38, 0x58, 10, 0, 0, 0, 0, 0, 0, 0, 0x3f, 0x01, 0, 0x3f, 0x01, 0]);
+  let called = false; const v = await verifyImage(webp, async () => { called = true; return { width: 320, height: 320 }; });
+  assertEquals([v.usable, v.reason, called], [false, "unsupported_format", false]);
+  const png16 = new Uint8Array(4096); png16.set([137, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 13, 73, 72, 68, 82, 0, 0, 1, 0, 0, 0, 1, 0, 16, 6, 0, 0, 0]);
+  const v2 = await verifyImage(png16, async () => { called = true; return { width: 256, height: 256 }; });
+  assertEquals([v2.usable, v2.reason, called], [false, "unsupported_bit_depth", false]);
+});
