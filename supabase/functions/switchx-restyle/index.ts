@@ -711,9 +711,12 @@ serve(async (req) => {
       }
       if (!submit.ok || !q?.status_url || !q?.response_url) {
         // Log the raw Fal submit failure to edge logs (Authorization header is
-        // never logged; input may carry signed URLs/paths, which we keep).
+        // never logged). The input's signed links (a caller's private video or
+        // image, readable for an hour) are redacted: the log is not a place to
+        // keep a key to someone's file.
+        const redacted = JSON.stringify(input, (k, v) => (/_url$/.test(k) && typeof v === "string" ? "<redacted>" : v));
         console.error(
-          `[switchx-restyle fal-run] submit_failed http=${submit.status} model=${model} body=${rawText.slice(0, 1500)} input=${JSON.stringify(input).slice(0, 800)}`,
+          `[switchx-restyle fal-run] submit_failed http=${submit.status} model=${model} body=${rawText.slice(0, 1500)} input=${redacted.slice(0, 800)}`,
         );
         return json(502, {
           error: "fal_submit_failed",
