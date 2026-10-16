@@ -670,6 +670,14 @@ serve(async (req) => {
       "decart/lucy-edit/dev",
       "decart/lucy-edit/pro",
       "decart/lucy-restyle",
+      // AVT composite lane (matte-video-proxy): a per-frame alpha matte of the
+      // performer from a dressed take, so the browser can lay him over a plate.
+      // VEED returns the matte as a separate H.264 alpha video next to the RGB
+      // (output_codec "h264") — $0.0225 per 30 frames with refined edges. Bria
+      // and BEN are the fallbacks the same proxy may be pointed at.
+      "veed/video-background-removal",
+      "bria/video/background-removal/v3",
+      "fal-ai/ben/v2/video",
     ]);
     const model = (body as any).model;
     const input = (body as any).input;
