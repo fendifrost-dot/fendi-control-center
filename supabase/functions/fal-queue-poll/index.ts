@@ -32,6 +32,21 @@ function constantTimeEqual(a: string, b: string): boolean {
 // Prefix so the raw Fal detail is greppable in Supabase edge logs.
 const LOG = "[fal-queue-poll]";
 
+const FAL_QUEUE_HOST = "queue.fal.run";
+/** `/<model-id>/requests/<request-id>` optionally `/status`. Mirrors AVT _shared/falQueueUrl.ts. */
+const FAL_QUEUE_PATH = /^\/[A-Za-z0-9._-]+(?:\/[A-Za-z0-9._-]+)*\/requests\/[A-Za-z0-9._-]+(?:\/status)?\/?$/;
+function isFalQueueUrl(value: unknown): value is string {
+  if (typeof value !== "string" || value.length > 2048) return false;
+  let u: URL;
+  try {
+    u = new URL(value);
+  } catch {
+    return false;
+  }
+  if (u.protocol !== "https:" || u.hostname !== FAL_QUEUE_HOST || u.port !== "" || u.username || u.password) return false;
+  return FAL_QUEUE_PATH.test(u.pathname);
+}
+
 // Fal's queue status payload carries a `logs` array whose entries hold the REAL
 // failure (traceback, "CUDA out of memory", ffmpeg stderr, output-validation
 // error) — far more specific than the generic `detail` on the response body.
@@ -99,6 +114,11 @@ serve(async (req) => {
   const responseUrl = body.response_url ?? "";
   if (!statusUrl || !responseUrl) {
     return json(400, { error: "missing_status_or_response_url" });
+  }
+  // The key rides the Authorization header of these fetches: the links must be Fal's own queue links (https,
+  // queue.fal.run, a request's status or response path), never a server of the caller's choosing.
+  if (!isFalQueueUrl(statusUrl) || !isFalQueueUrl(responseUrl)) {
+    return json(400, { error: "invalid_queue_url" });
   }
 
   try {
