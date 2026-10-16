@@ -16,9 +16,11 @@ import {
   MusePageHeader,
   VerificationBadge,
 } from "@/components/muse/MuseBits";
+import { igDmReceiptHubStatus } from "@/lib/muse/igDmReceipt";
 import type { MuseBriefRow } from "@/lib/muse/types";
 
 function BriefItem({ row }: { row: MuseBriefRow }) {
+  const hubStatus = igDmReceiptHubStatus(row.detail);
   return (
     <li className="rounded-md border border-border/70 px-3 py-2.5">
       <div className="flex flex-wrap items-start justify-between gap-2">
@@ -37,6 +39,9 @@ function BriefItem({ row }: { row: MuseBriefRow }) {
           )}
         </div>
         <div className="flex shrink-0 flex-wrap items-center gap-1.5">
+          {hubStatus && (
+            <Badge variant="destructive" className="font-mono text-[10px]">Hub {hubStatus}</Badge>
+          )}
           <ClassificationBadge value={row.classification} />
           <DataStatusBadge status={row.data_status} />
         </div>

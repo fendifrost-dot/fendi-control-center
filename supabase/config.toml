@@ -157,5 +157,11 @@ verify_jwt = false
 [functions.muse-executive]
 verify_jwt = false
 
+# Muse workboard writer. Same bearer-token auth. record_ig_dm_receipt reads
+# MUSE_IG_RECEIPT_SECRET here and posts it to FanFuel Hub. The browser never
+# receives that header or the secret.
+[functions.muse-workboard]
+verify_jwt = false
+
 [functions.agent-hub]
 verify_jwt = false
