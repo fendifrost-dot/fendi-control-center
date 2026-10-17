@@ -77,6 +77,8 @@ serve(async (req) => {
   try {
     let upstream: Record<string, unknown> = {};
     let httpStatus = 0;
+    /** Fal (and Pika on Fal): the request's response, where its output lives once the queue says COMPLETED. */
+    let falResponseUrl: string | null = null;
 
     if (provider === "runway") {
       const resp = await fetch(`${RUNWAY_BASE_URL}/tasks/${encodeURIComponent(id)}`, {
@@ -106,6 +108,7 @@ serve(async (req) => {
       // Fal status URLs use the BASE model id (e.g. fal-ai/pika/v2.2) — strip the
       // text-to-video / image-to-video method suffix that the generate URL uses.
       const modelPath = stripFalMethodSuffix(rawModelPath);
+      falResponseUrl = `${FAL_BASE_URL}/${modelPath}/requests/${encodeURIComponent(id)}`;
       const resp = await fetch(`${FAL_BASE_URL}/${modelPath}/requests/${encodeURIComponent(id)}/status`, {
         headers: { Authorization: `Key ${apiKey}` },
       });
@@ -115,6 +118,7 @@ serve(async (req) => {
     } else if (provider === "fal") {
       const rawFalModelPath = url.searchParams.get("modelPath") ?? "fal-ai/mochi-v1";
       const modelPath = stripFalMethodSuffix(rawFalModelPath);
+      falResponseUrl = `${FAL_BASE_URL}/${modelPath}/requests/${encodeURIComponent(id)}`;
       const resp = await fetch(`${FAL_BASE_URL}/${modelPath}/requests/${encodeURIComponent(id)}/status`, {
         headers: { Authorization: `Key ${apiKey}` },
       });
@@ -214,6 +218,21 @@ serve(async (req) => {
         const out = upstream.response as Record<string, unknown> | undefined;
         const video = (out?.video as Record<string, unknown> | undefined) ?? undefined;
         resultUrl = (video?.url as string) ?? (out?.video_url as string) ?? null;
+        // Fal's queue status answer carries no output: read it from the request's response, as job-result does. Without
+        // the link a caller that waits for one (AVT provider-jobs-tick) sees a finished job as running for ever.
+        if (!resultUrl && falResponseUrl) {
+          try {
+            const r = await fetch(falResponseUrl, { headers: { Authorization: `Key ${apiKey}` } });
+            if (r.ok) {
+              const body = (await r.json().catch(() => ({}))) as Record<string, unknown>;
+              const v = body.video as Record<string, unknown> | undefined;
+              const clips = body.clips as Array<Record<string, unknown>> | undefined;
+              resultUrl = (v?.url as string) ?? (body.video_url as string) ?? (body.output_url as string) ?? (clips?.[0]?.url as string) ?? null;
+            }
+          } catch {
+            /* the status stands; the caller asks again */
+          }
+        }
       }
     } else if (provider === "grok") {
       // xAI semantics: pending | done | failed | expired
