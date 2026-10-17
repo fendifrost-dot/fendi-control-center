@@ -122,6 +122,9 @@ serve(async (req) => {
   const extra = body as Record<string, unknown>;
 
   const mode = parsed.mode ?? (parsed.referenceVideoUrl ? "video_to_video" : parsed.referenceImageUrl ? "image_to_video" : "text_to_video");
+  // reference audio (Seedance 2.5 reference, `audio_urls`: up to 10, free as references): AVT's continuous takes send the
+  // slice of his vocals the take plays over, so the performance is made to the song instead of repainted after
+  const refAudios: string[] = Array.isArray(extra.referenceAudioUrls) ? (extra.referenceAudioUrls as unknown[]).filter(isHttpUrl) : [];
   const refVideos: string[] = Array.isArray(extra.referenceVideoUrls) ? (extra.referenceVideoUrls as unknown[]).filter(isHttpUrl) : parsed.referenceVideoUrl && isHttpUrl(parsed.referenceVideoUrl) ? [parsed.referenceVideoUrl] : [];
   const requested = (parsed.modelVariant ?? (mode === "video_to_video" ? DEFAULT_V2V : mode === "image_to_video" ? DEFAULT_I2V : DEFAULT_T2V)).toLowerCase();
   const spec = MODELS[requested];
@@ -141,6 +144,7 @@ serve(async (req) => {
   if (spec.mode === "reference_to_video") {
     if (refImages.length + refVideos.length < 1) return jsonError("INVALID_INPUT", `${requested} needs at least one reference (referenceImageUrls and/or referenceVideoUrls).`, 400, false);
     if (refImages.length > (spec.maxImages ?? 30) || refVideos.length > (spec.maxVideos ?? 10)) return jsonError("INVALID_INPUT", `${requested} accepts at most ${spec.maxImages ?? 30} images and ${spec.maxVideos ?? 10} videos.`, 400, false);
+    if (refAudios.length > 10) return jsonError("INVALID_INPUT", `${requested} accepts at most 10 audio references.`, 400, false);
     resolution = String(extra.resolution ?? DEFAULT_V2V_RESOLUTION);
     if (spec.resolutions && !(resolution in spec.resolutions)) return jsonError("INVALID_INPUT", `resolution must be one of ${Object.keys(spec.resolutions).join(", ")}.`, 400, false);
     if (parsed.aspectRatio && spec.aspects && !spec.aspects.includes(parsed.aspectRatio)) return jsonError("INVALID_INPUT", `aspectRatio must be one of ${spec.aspects.join(", ")}.`, 400, false);
@@ -158,7 +162,7 @@ serve(async (req) => {
   const input: Record<string, unknown> = spec.mode === "video_to_video"
     ? { prompt: parsed.promptText, video_url: parsed.referenceVideoUrl, image_urls: refImages, resolution }
     : spec.mode === "reference_to_video"
-    ? { prompt: parsed.promptText, duration, resolution, aspect_ratio: parsed.aspectRatio ?? "16:9", generate_audio: extra.generate_audio === true, ...(refImages.length ? { image_urls: refImages } : {}), ...(refVideos.length ? { video_urls: refVideos } : {}) }
+    ? { prompt: parsed.promptText, duration, resolution, aspect_ratio: parsed.aspectRatio ?? "16:9", generate_audio: extra.generate_audio === true, ...(refImages.length ? { image_urls: refImages } : {}), ...(refVideos.length ? { video_urls: refVideos } : {}), ...(refAudios.length ? { audio_urls: refAudios } : {}) }
     : spec.mode === "image_edit"
     ? { prompt: parsed.promptText, image_urls: refImages, resolution, aspect_ratio: parsed.aspectRatio ?? spec.aspects?.[0] ?? "1:1" }
     : { prompt: parsed.promptText, duration };
