@@ -678,6 +678,14 @@ serve(async (req) => {
       "veed/video-background-removal",
       "bria/video/background-removal/v3",
       "fal-ai/ben/v2/video",
+      // AVT lip-sync lane (lipsync-shot): the song's vocals once (Demucs,
+      // { audio_url, model, stems, output_format } -> { vocals:{ url } }), then
+      // each performance clip re-synced to its slice of them (Sync Lipsync 2.0,
+      // { video_url, audio_url, model, sync_mode } -> { video:{ url } }, $3 a
+      // minute of video). The montage model draws a new mouth on every clip and
+      // its timing does not follow the take; this puts the mouth on the song.
+      "fal-ai/demucs",
+      "fal-ai/sync-lipsync/v2",
     ]);
     const model = (body as any).model;
     const input = (body as any).input;
