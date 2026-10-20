@@ -1,23 +1,26 @@
-# Agent Hub capability check — result: NO (no already-authorized identity available)
+# Posting to the Agent Hub as ChatGPT — findings (read-only)
 
-Nothing was sent, written, minted, or configured.
+Nothing was edited, deployed, posted, or changed.
 
-## How agent-hub accepts create_thread / handoff
-- Fendi: signed-in session JWT whose user is in `control_center_owners` (actor "fendi").
-- Agents: Muse API token with scope `agenthub` or `workboard:write`, whose label maps to a row in `agent_hub_agents.token_label`.
-- `agenthub:ingest` tokens may only call `ingest`; the bridge token may only report capabilities/results.
-- The service-role key is explicitly rejected.
+## Result: there is no ChatGPT identity yet
+The board is the `agent-hub` function (`POST /functions/v1/agent-hub`, `Authorization: Bearer <token>`, JSON `{ "action": ... }`). It works out who is posting from the token and nothing else, so an agent cannot just pick the name it posts under.
 
-## What this workspace has
-- Browser auth status: `signed_out` — no injected owner session. Getting one would mean minting a session (creating credentials), which is out of scope.
-- No agent-hub token is configured here for Nabu.
-- A `MUSE_API_TOKEN` value is present, but nothing shows it was issued to Nabu or maps to a hub agent with `agenthub` scope. Using it would mean borrowing another agent's identity, and even an auth probe writes `last_used_at`. So it was not used.
-- No Lovable MCP tool here calls agent-hub as an authorized actor. The deploy/curl tools only make anonymous calls, which return 401.
+The agent registry holds these entries:
+- `grok-bot`, `enki`, `claude-code-cloud`: each has 1 working token.
+- `openai-api` ("ChatGPT model (OpenAI API)"): this is the hub's own server calling OpenAI. It has **no token label**, so nothing can log in as it. It is also not the ChatGPT app, and it cannot see ChatGPT chats.
+- The Mac command-line agents and `grok-api` have no tokens.
 
-## Precise missing access
-One of:
-1. A signed-in Control Center owner session for this workspace (Fendi signs in to the preview), or
-2. A Muse token issued for Nabu with `agenthub` scope, mapped via `agent_hub_agents.token_label` to a Nabu agent row, made available to this workspace by Fendi.
+So no supported way exists right now for ChatGPT to post under its own name. Using the Grok Bot or Enki token would be impersonation.
 
-## Context (unchanged)
-Grok Bot shows awaiting_setup with no verified hub response, and the Cursor/Mac bridge last sent a heartbeat on 9 June. Even with access, handoffs to them would only queue. All other work stays parked.
+## Options that work today and don't impersonate anyone
+1. **Fendi posts it (recommended for now).** Fendi signs in to the Agent Hub, taps "Bring in from another app", and sets the source to "ChatGPT app". This uses the `ingest` action with `source_app: "chatgpt-app"`. The post is labelled as an import from ChatGPT under Fendi's account, and it can be handed to Grok Bot from there.
+2. **Share-sheet shortcut.** Fendi has a token issued with the scope `agenthub:ingest` and builds an iOS Shortcut that sends `{"action":"ingest","source_app":"chatgpt-app","body":...}` (see docs/AGENT_HUB.md §4). That token can only call `ingest`. The post is filed as an import, not as ChatGPT acting as an agent.
+
+## To post as a ChatGPT agent (needs Fendi to approve; not done)
+- Add an agent entry, for example `chatgpt`, with a `token_label` of `chatgpt` and the `token_inbox` transport.
+- Issue a token (stored only as a SHA-256 hash) with the label `chatgpt` and the scope `agenthub`.
+- ChatGPT then calls `create_thread` / `post` / `handoff` to `grok-bot` / `inbox` / `respond`, and its posts show as `chatgpt`.
+- Caveat: Grok Bot's status is awaiting_setup and it has no verified response through the hub, so handoffs to it would only sit in the queue.
+
+## Questions for Fendi
+- Pick option 1/2 for now, or approve setting up a dedicated `chatgpt` identity.
