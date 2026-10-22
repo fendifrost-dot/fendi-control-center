@@ -1,12 +1,18 @@
 /**
  * Muse workboard alerts.
  *
- * The board row is the source of truth. Push is a best-effort wake for
- * subscribers that have a webhook. Pull is the catch-up for everyone else,
- * including a Grok Bot whose routine panel shows a bearer key but no URL.
+ * The board row is the source of truth. Grok hears a post by pulling it:
+ * a schedule routine calls GET muse-alerts. No webhook URL is required.
+ * Desktop 0.75.0 still shows only the routine's on/off toggle, so a URL
+ * copied from that panel is not part of the setup. Webhook delivery stays
+ * available for a host that already has an https endpoint.
  *
- * This module does not send email. A trigger → inbox → wake chain was
- * rejected: too many hops, and a missed mail is a missed assignment.
+ * Mail to a Grok address is not a wake. New mail does not start a routine
+ * on its own, spam drops the body, and a send still waits for a person to
+ * press Send. This module does not call Resend.
+ *
+ * Claude's cloud session cannot be woken. A board assignment tagged for
+ * Claude is also copied into the agent-hub inbox Claude already checks.
  */
 
 export const ALERT_ROLES = ["audit", "coding", "testing", "execution"] as const;
@@ -29,6 +35,8 @@ export interface AlertEvent {
   actor: string;
   addressed_agent: string | null;
   addressed_role: AlertRole | null;
+  /** Names pulled from @mentions, "ASSIGNED TO", and assignment "For" lines. */
+  targets: string[];
   kind: string;
   message: string;
   mission_id: string | null;
@@ -45,7 +53,35 @@ export interface AlertSubscriber {
   aliases: string[];
   delivery: AlertDelivery;
   enabled: boolean;
+  /** Open-queue pulls start after this instant, so a new subscriber does not replay the archive. */
+  created_at?: string;
 }
+
+/** Seeded roster. The migration inserts the same keys, roles, and aliases. */
+export const BOARD_ROSTER: Array<{ agent_key: string; roles: AlertRole[]; aliases: string[] }> = [
+  { agent_key: "grok-bot", roles: ["testing"], aliases: ["Grok Bot", "Grok"] },
+  { agent_key: "claude-code", roles: ["coding"], aliases: ["Claude", "Cursor", "claude-code", "claude-code-cloud"] },
+  { agent_key: "chatgpt", roles: ["audit"], aliases: ["ChatGPT"] },
+  { agent_key: "enki", roles: ["execution"], aliases: ["Enki", "Muse"] },
+];
+
+export const CLAUDE_INBOX_AGENT = "claude-code-cloud";
+
+const TAG_NAMES: string[] = (() => {
+  const raw = [
+    ...BOARD_ROSTER.flatMap((agent) => agent.aliases),
+    ...BOARD_ROSTER.map((agent) => agent.agent_key),
+  ];
+  const seen = new Set<string>();
+  const unique: string[] = [];
+  for (const name of raw) {
+    const key = name.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    unique.push(name);
+  }
+  return unique.sort((a, b) => b.length - a.length);
+})();
 
 export interface AlertCursor {
   at: string;
@@ -92,13 +128,85 @@ export function sameAgent(
  */
 export function eventAddresses(
   subscriber: AlertSubscriber,
-  event: Pick<AlertEvent, "actor" | "addressed_agent" | "addressed_role">,
+  event: Pick<AlertEvent, "actor" | "addressed_agent" | "addressed_role" | "targets">,
 ): boolean {
   if (!subscriber.enabled) return false;
   if (sameAgent(subscriber, event.actor)) return false;
   const byAgent = Boolean(event.addressed_agent) && sameAgent(subscriber, event.addressed_agent as string);
   const byRole = Boolean(event.addressed_role) && subscriber.roles.includes(event.addressed_role as AlertRole);
-  return byAgent || byRole;
+  const byTag = (event.targets ?? []).some((tag) => sameAgent(subscriber, tag));
+  return byAgent || byRole || byTag;
+}
+
+/**
+ * True when this board post or task should land in Claude's agent-hub inbox.
+ * Claude's cloud session already polls that inbox. It has no webhook to call.
+ */
+export function codingInboxWanted(event: AlertEvent, subscribers: AlertSubscriber[]): boolean {
+  if (event.source_table !== "muse_work_updates" && event.source_table !== "muse_improvement_tasks") return false;
+  const coding = subscribers.filter((row) => row.enabled && row.roles.includes("coding"));
+  return coding.some((row) => eventAddresses(row, event));
+}
+
+function matchTagAt(text: string, index: number): string | null {
+  const rest = text.slice(index);
+  for (const name of TAG_NAMES) {
+    if (rest.length < name.length) continue;
+    if (rest.slice(0, name.length).toLowerCase() !== name.toLowerCase()) continue;
+    const next = rest[name.length] ?? "";
+    if (next && /[A-Za-z0-9_]/.test(next)) continue;
+    return name;
+  }
+  return null;
+}
+
+function remember(found: string[], seen: Set<string>, name: string | null) {
+  if (!name) return;
+  const key = name.toLowerCase();
+  if (seen.has(key)) return;
+  seen.add(key);
+  found.push(name);
+}
+
+/**
+ * Names the board already uses. Instagram @handles are ignored because they
+ * are not agent aliases. A bare "Claude" in a sentence is not a tag.
+ * "For …" is only read on ASSIGNMENT rows, which is how the packs address Enki.
+ */
+export function extractBoardTags(message: string, kind: string): string[] {
+  const found: string[] = [];
+  const seen = new Set<string>();
+  for (let i = 0; i < message.length; i++) {
+    if (message[i] !== "@") continue;
+    remember(found, seen, matchTagAt(message, i + 1));
+  }
+  const lead = /(?:assigned\s+to|reply\s+to)\s*:?\s+/gi;
+  for (const hit of message.matchAll(lead)) {
+    const at = (hit.index ?? 0) + hit[0].length;
+    let cursor = at;
+    while (cursor < message.length && /[\s*]/.test(message[cursor])) cursor++;
+    remember(found, seen, matchTagAt(message, cursor));
+  }
+  if (kind === "ASSIGNMENT") {
+    const forLine = /\bfor\s+([^\n:]{1,80})/gi;
+    for (const hit of message.matchAll(forLine)) {
+      const segment = hit[1] ?? "";
+      for (const piece of segment.split("/")) {
+        const cleaned = piece.replace(/[*_`]/g, "").trim();
+        let cursor = 0;
+        while (cursor < cleaned.length && /[\s*]/.test(cleaned[cursor])) cursor++;
+        remember(found, seen, matchTagAt(cleaned, cursor));
+      }
+    }
+    const shouted = /(?:^|\n)\s*([A-Za-z][A-Za-z0-9 ._-]{0,40})\s*:/g;
+    for (const hit of message.matchAll(shouted)) {
+      const label = (hit[1] ?? "").trim();
+      remember(found, seen, matchTagAt(label, 0) === label || matchTagAt(label, 0)?.toLowerCase() === label.toLowerCase()
+        ? matchTagAt(label, 0)
+        : null);
+    }
+  }
+  return found;
 }
 
 export function addressedAgent(value: unknown): string | null {
@@ -152,6 +260,7 @@ function eventBase(row: Record<string, unknown>, source: AlertSource, actor: str
     actor,
     addressed_agent: null,
     addressed_role: null,
+    targets: [],
     kind: "NOTE",
     message: message.slice(0, 8000),
     mission_id: textOrNull(row.mission_id),
@@ -162,53 +271,63 @@ function eventBase(row: Record<string, unknown>, source: AlertSource, actor: str
   };
 }
 
+function addressedEvent(
+  event: AlertEvent | null,
+  agent: string | null,
+  role: AlertRole | null,
+  kind: string,
+): AlertEvent | null {
+  if (!event) return null;
+  event.addressed_agent = agent;
+  event.addressed_role = role;
+  event.kind = kind;
+  event.targets = extractBoardTags(event.message, event.kind);
+  if (!agent && !role && event.targets.length === 0) return null;
+  return event;
+}
+
 export function eventFromAction(action: string, row: unknown, actor: string): AlertEvent | null {
   if (!row || typeof row !== "object" || Array.isArray(row)) return null;
   const record = row as Record<string, unknown>;
   if (action === "append_update") {
-    const agent = textOrNull(record.addressed_agent);
-    const role = roleOrNull(record.addressed_role);
-    if (!agent && !role) return null;
     const message = textOrNull(record.message);
     if (!message) return null;
-    const event = eventBase(record, "muse_work_updates", actor, message);
-    if (!event) return null;
-    event.addressed_agent = agent;
-    event.addressed_role = role;
-    event.kind = textOrNull(record.update_type) ?? "NOTE";
-    return event;
+    return addressedEvent(
+      eventBase(record, "muse_work_updates", actor, message),
+      textOrNull(record.addressed_agent),
+      roleOrNull(record.addressed_role),
+      textOrNull(record.update_type) ?? "NOTE",
+    );
   }
   if (action === "record_daily_report") {
-    const agent = textOrNull(record.addressed_agent);
-    const role = roleOrNull(record.addressed_role);
-    if (!agent && !role) return null;
     const message = textOrNull(record.message);
     if (!message) return null;
-    const event = eventBase(record, "muse_daily_reports", actor, message);
+    const event = addressedEvent(
+      eventBase(record, "muse_daily_reports", actor, message),
+      textOrNull(record.addressed_agent),
+      roleOrNull(record.addressed_role),
+      textOrNull(record.cadence) ?? "END_OF_DAY",
+    );
     if (!event) return null;
-    event.addressed_agent = agent;
-    event.addressed_role = role;
-    event.kind = textOrNull(record.cadence) ?? "END_OF_DAY";
     event.mission_id = null;
     event.improvement_id = null;
     event.task_id = null;
     return event;
   }
   if (action === "create_task") {
-    const executor = textOrNull(record.executor);
-    const role = roleOrNull(record.addressed_role);
-    if (!executor && !role) return null;
     const message = [record.title, record.objective, record.instructions]
       .map(textOrNull)
       .filter((part): part is string => Boolean(part))
       .join("\n\n");
     if (!message) return null;
     const assigner = textOrNull(record.assigning_agent) ?? actor;
-    const event = eventBase(record, "muse_improvement_tasks", assigner, message);
+    const event = addressedEvent(
+      eventBase(record, "muse_improvement_tasks", assigner, message),
+      textOrNull(record.executor),
+      roleOrNull(record.addressed_role),
+      "TASK",
+    );
     if (!event) return null;
-    event.addressed_agent = executor;
-    event.addressed_role = role;
-    event.kind = "TASK";
     event.task_id = event.source_id;
     event.evidence_ref = textOrNull(record.source_ref);
     return event;
@@ -232,6 +351,7 @@ export function alertBody(event: AlertEvent, outboxId: string | null): Record<st
     actor: event.actor,
     addressed_agent: event.addressed_agent,
     addressed_role: event.addressed_role,
+    targets: event.targets,
     kind: event.kind,
     message: event.message,
     mission_id: event.mission_id,
@@ -689,6 +809,8 @@ export function errorMessage(code: string): string {
     since_required: "since is required",
     since_rejected: "since must be YYYY-MM-DDTHH:MM:SSZ",
     since_id_rejected: "since_id must be a UUID",
+    ack_rejected: "ack needs source_table and source_id",
+    ack_empty: "ack needs at least one item",
     seal_key_missing: "MUSE_ALERT_SEAL_KEY is not configured",
     seal_key_invalid: "MUSE_ALERT_SEAL_KEY is not a 32-byte base64 key",
     subscriber_not_found: "no subscriber with that agent_key",
@@ -707,6 +829,38 @@ export interface AlertStore {
   finish(id: string, decision: DeliveryDecision): Promise<void>;
   logDelivery(entry: { outbox_id: string; attempt: number; http_status: number | null; error_code: string | null }): Promise<void>;
   listEvents(cursor: AlertCursor, limit: number): Promise<AlertEvent[]>;
+  listAcked(subscriberId: string): Promise<string[]>;
+  ack(subscriberId: string, items: AckItem[]): Promise<{ acked: number; already: number }>;
+}
+
+export interface AckItem {
+  source_table: AlertSource;
+  source_id: string;
+}
+
+export function parseAck(payload: unknown): AckItem[] {
+  if (!payload || typeof payload !== "object" || Array.isArray(payload)) throw new Error("ack_rejected");
+  const raw = payload as Record<string, unknown>;
+  const rows = Array.isArray(raw.items) ? raw.items : [raw];
+  if (rows.length === 0 || rows.length > 50) throw new Error(rows.length === 0 ? "ack_empty" : "ack_rejected");
+  const out: AckItem[] = [];
+  const seen = new Set<string>();
+  for (const row of rows) {
+    if (!row || typeof row !== "object" || Array.isArray(row)) throw new Error("ack_rejected");
+    const item = row as Record<string, unknown>;
+    const source = item.source_table;
+    const sourceId = typeof item.source_id === "string" ? item.source_id.trim() : "";
+    if (source !== "muse_work_updates" && source !== "muse_improvement_tasks" && source !== "muse_daily_reports") {
+      throw new Error("ack_rejected");
+    }
+    if (!UUID.test(sourceId)) throw new Error("ack_rejected");
+    const key = `${source}:${sourceId}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push({ source_table: source, source_id: sourceId });
+  }
+  if (out.length === 0) throw new Error("ack_empty");
+  return out;
 }
 
 export interface ClaimedAlert {
@@ -867,6 +1021,45 @@ export async function pullAlerts(opts: {
   return {
     data: page.map((event) => alertBody(event, null)),
     next_cursor: last ? { at: last.created_at, id: last.source_id } : opts.cursor,
+  };
+}
+
+function openFloor(subscriber: AlertSubscriber): string {
+  if (subscriber.created_at && !Number.isNaN(Date.parse(subscriber.created_at))) {
+    return new Date(subscriber.created_at).toISOString();
+  }
+  return new Date().toISOString();
+}
+
+/** Posts for this subscriber since they were registered, skipping ones they already acked. */
+export async function pullOpen(opts: {
+  store: AlertStore;
+  subscriber: AlertSubscriber;
+  limit: number;
+}): Promise<{ data: Record<string, unknown>[]; next_cursor: AlertCursor; floor: string }> {
+  const floor = openFloor(opts.subscriber);
+  const acked = new Set(await opts.store.listAcked(opts.subscriber.id));
+  const collected: AlertEvent[] = [];
+  let scan: AlertCursor = { at: floor, id: null };
+  for (let page = 0; page < PULL_SCAN_LIMIT && collected.length < opts.limit; page++) {
+    const batch = await opts.store.listEvents(scan, PULL_PAGE);
+    const fresh = batch.filter((row) => isAfterCursor(row, scan)).sort(compareEventOrder);
+    if (fresh.length === 0) break;
+    for (const row of fresh) {
+      const key = `${row.source_table}:${row.source_id}`;
+      if (eventAddresses(opts.subscriber, row) && !acked.has(key)) collected.push(row);
+      if (collected.length >= opts.limit) break;
+    }
+    const last = fresh[fresh.length - 1];
+    scan = { at: last.created_at, id: last.source_id };
+    if (collected.length >= opts.limit || batch.length < PULL_PAGE) break;
+  }
+  const page = collected.slice(0, opts.limit);
+  const last = page[page.length - 1];
+  return {
+    data: page.map((event) => alertBody(event, null)),
+    next_cursor: last ? { at: last.created_at, id: last.source_id } : { at: floor, id: null },
+    floor,
   };
 }
 

@@ -9,8 +9,10 @@ import {
   deliverClaimed,
   dispatchDue,
   errorMessage,
+  codingInboxWanted,
   eventAddresses,
   eventFromAction,
+  extractBoardTags,
   fanoutAndDeliver,
   importSealKey,
   isAfterCursor,
@@ -20,9 +22,11 @@ import {
   parseCursor,
   parseRegister,
   parseUpdate,
+  parseAck,
   planFanout,
   postWebhook,
   pullAlerts,
+  pullOpen,
   readSealKey,
   sameAgent,
   sealText,
@@ -58,6 +62,7 @@ function event(partial: Partial<AlertEvent> = {}): AlertEvent {
     actor: "claude",
     addressed_agent: "grok-bot",
     addressed_role: "testing",
+    targets: [],
     kind: "STATUS",
     message: "Please verify the cut.",
     mission_id: "66666666-6666-4666-8666-666666666666",
@@ -300,6 +305,8 @@ function memoryStore(subscribers: AlertSubscriber[], events: AlertEvent[]) {
     listEvents: (cursor) => Promise.resolve(
       events.filter((row) => Date.parse(row.created_at) >= Date.parse(cursor.at)),
     ),
+    listAcked: () => Promise.resolve([]),
+    ack: () => Promise.resolve({ acked: 0, already: 0 }),
   };
   return { store, outbox, finished };
 }
@@ -397,6 +404,95 @@ Deno.test("a same-millisecond cursor does not repeat or skip", () => {
   assertEquals(isAfterCursor(second, cursor), true);
   assertEquals(isAfterCursor(third, cursor), true);
   assertEquals(isAfterCursor(second, { at: first.created_at, id: null }), false);
+});
+
+function roster(): AlertSubscriber[] {
+  return [
+    subscriber({ id: GROK, agent_key: "grok-bot", roles: ["testing"], aliases: ["Grok Bot", "Grok"], created_at: "2026-10-22T00:00:00.000Z" }),
+    subscriber({ id: CLAUDE, agent_key: "claude-code", roles: ["coding"], aliases: ["Claude", "Cursor", "claude-code", "claude-code-cloud"], created_at: "2026-10-22T00:00:00.000Z" }),
+    subscriber({ id: CHATGPT, agent_key: "chatgpt", roles: ["audit"], aliases: ["ChatGPT"], created_at: "2026-10-22T00:00:00.000Z" }),
+    subscriber({ id: ENKI, agent_key: "enki", roles: ["execution"], aliases: ["Enki", "Muse"], created_at: "2026-10-22T00:00:00.000Z" }),
+  ];
+}
+
+Deno.test("board tags name agents and ignore instagram handles and prose", () => {
+  assertEquals(extractBoardTags("@Grok Bot @Enki — pack", "NOTE"), ["Grok Bot", "Enki"]);
+  assertEquals(extractBoardTags("ASSIGNED TO CURSOR — Build FendiFrost.com", "ASSIGNMENT"), ["Cursor"]);
+  assertEquals(extractBoardTags("For Enki / Muse: send the drafts from @fendi_frost", "ASSIGNMENT"), ["Enki", "Muse"]);
+  assertEquals(extractBoardTags("For **Muse / Enki** (Control Center). Source:", "NOTE"), []);
+  assertEquals(extractBoardTags("after Claude fixes its side. @leifmagnuspettersen @_gabrieltheodoro", "NOTE"), []);
+  assertEquals(extractBoardTags("[NO PACK TODAY] no Instagram curators", "NOTE"), []);
+  const cursor = eventFromAction("append_update", {
+    id: POST,
+    created_at: "2026-10-21T18:39:02.164Z",
+    message: "ASSIGNED TO CURSOR — Build FendiFrost.com music sales and streaming platform.",
+    update_type: "ASSIGNMENT",
+    mission_id: "66666666-6666-4666-8666-666666666666",
+  }, "ChatGPT");
+  assertEquals(cursor?.targets, ["Cursor"]);
+  assertEquals(cursor?.addressed_agent, null);
+  const agents = roster();
+  assertEquals(codingInboxWanted(cursor!, agents), true);
+  assertEquals(eventAddresses(agents[1], cursor!), true);
+  assertEquals(eventAddresses(agents[0], cursor!), false);
+  const own = eventFromAction("append_update", {
+    id: POST,
+    created_at: "2026-10-22T16:18:20.274Z",
+    message: "[FENDI DIRECTIVE] @Grok Bot @Enki\n\nClaude finds the curators.",
+    update_type: "ASSIGNMENT",
+  }, "claude-code");
+  assertEquals(codingInboxWanted(own!, agents), false);
+  assertEquals(eventAddresses(agents[0], own!), true);
+  assertEquals(eventAddresses(agents[3], own!), true);
+  const pack = eventFromAction("append_update", {
+    id: POST,
+    created_at: "2026-10-14T14:42:01.317Z",
+    message: "[ASSIGNMENT] Muse IG playlist pack.\n\nFor Enki / Muse: send 22 Instagram DMs from @fendi_frost.",
+    update_type: "ASSIGNMENT",
+  }, "grok-bot");
+  assertEquals(codingInboxWanted(pack!, agents), false);
+  assertEquals(eventAddresses(agents[3], pack!), true);
+  assertEquals(eventFromAction("append_update", {
+    id: POST,
+    created_at: "2026-10-22T12:00:00.000Z",
+    message: "filed the receipt",
+    update_type: "NOTE",
+  }, "enki"), null);
+});
+
+Deno.test("the open queue hides acked posts and the caller's own posts", async () => {
+  const agents = roster();
+  const grok = agents[0];
+  const acked = new Set<string>();
+  const posted = event({
+    actor: "claude-code",
+    addressed_agent: null,
+    addressed_role: null,
+    targets: ["Grok Bot"],
+    message: "@Grok Bot check the cut",
+    created_at: "2026-10-22T12:00:00.000Z",
+  });
+  const own = event({
+    source_id: "88888888-8888-4888-8888-888888888888",
+    actor: "grok-bot",
+    addressed_agent: null,
+    addressed_role: "testing",
+    targets: [],
+    created_at: "2026-10-22T12:05:00.000Z",
+  });
+  const { store } = memoryStore([grok], [posted, own]);
+  store.listAcked = () => Promise.resolve([...acked]);
+  store.ack = (_id, items) => {
+    for (const item of items) acked.add(`${item.source_table}:${item.source_id}`);
+    return Promise.resolve({ acked: items.length, already: 0 });
+  };
+  const first = await pullOpen({ store, subscriber: grok, limit: 20 });
+  assertEquals(first.data.map((row) => row.message), ["@Grok Bot check the cut"]);
+  const parsed = parseAck({ source_table: "muse_work_updates", source_id: POST });
+  await store.ack(grok.id, parsed);
+  const second = await pullOpen({ store, subscriber: grok, limit: 20 });
+  assertEquals(second.data, []);
+  assertEquals(first.floor, "2026-10-22T00:00:00.000Z");
 });
 
 Deno.test("canonical json ignores key order so idempotency does not store the secret", () => {

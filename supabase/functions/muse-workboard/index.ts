@@ -261,6 +261,9 @@ serve(async (req) => {
   if (status === 200 && payload.ok === true) {
     const event = eventFromAction(body.action, (payload as { data?: unknown }).data, auth.label);
     if (event) {
+      const store = createMuseAlertStore(db);
+      let summary = { matched: 0, pull: 0, enqueued: 0, delivered: 0, pending: 0, failed: 0 };
+      let inbox: { handoff_id: string; created: boolean } | null = null;
       try {
         let sealKey = null;
         try {
@@ -268,14 +271,24 @@ serve(async (req) => {
         } catch {
           console.error("muse_alert_seal_key_invalid");
         }
-        const summary = await fanoutAndDeliver({
-          store: createMuseAlertStore(db),
-          event,
-          sealKey,
-        });
-        if (summary.matched > 0) payload = { ...payload, alerts: summary };
+        summary = await fanoutAndDeliver({ store, event, sealKey });
       } catch {
         console.error("muse_alert_fanout_failed");
+      }
+      try {
+        inbox = await store.openCodingInbox(event);
+      } catch {
+        console.error("muse_alert_inbox_failed");
+      }
+      if (summary.matched > 0 || inbox) {
+        payload = {
+          ...payload,
+          alerts: {
+            ...summary,
+            inbox_handoff_id: inbox?.handoff_id ?? null,
+            inbox_created: inbox?.created ?? false,
+          },
+        };
       }
     }
   }

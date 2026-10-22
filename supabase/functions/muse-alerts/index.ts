@@ -1,10 +1,13 @@
 /**
  * muse-alerts — wake agents when a workboard post is addressed to them.
  *
- * GET  ?since=  pull posts addressed to the caller (scope: read)
- * GET  ?subscribers=1  list registry metadata (scope: alerts:admin)
+ * GET                         open queue for the caller: unacked posts since they were registered (scope: read)
+ * GET  ?since=               same posts after an explicit cursor, including ones already acked (scope: read)
+ * GET  ?subscribers=1        list registry metadata (scope: alerts:admin)
+ * POST ack                   mark open-queue posts done (scope: read). No idempotency key.
  * POST register_subscriber | update_subscriber | disable_subscriber (alerts:admin)
  * POST dispatch (alerts:admin or alerts:dispatch)
+ * POST route_inbox           copy tagged board assignments into Claude's inbox (alerts:admin)
  *
  * Webhook URLs and bearers are sealed before they are written. Responses
  * contain the host and a 4-character hint, never the URL or the key.
@@ -17,11 +20,13 @@ import {
   dispatchDue,
   errorMessage,
   keyHint,
+  parseAck,
   parseAgentKey,
   parseCursor,
   parseRegister,
   parseUpdate,
   pullAlerts,
+  pullOpen,
   readSealKey,
   sealText,
   sha256Hex,
@@ -254,21 +259,28 @@ serve(async (req) => {
     if (!hasScope(auth.scopes, "read")) {
       return json({ ok: false, error: "unauthorized", message: "token lacks read scope" }, 401);
     }
-    let cursor;
-    try {
-      cursor = parseCursor(url.searchParams.get("since"), url.searchParams.get("since_id"));
-    } catch (e) {
-      const code = e instanceof Error ? e.message : "since_rejected";
-      const mapped = httpFor(code);
-      return json(mapped.body, mapped.status);
-    }
-    const requested = Number(url.searchParams.get("limit") ?? "50");
-    const limit = Number.isFinite(requested) ? Math.min(Math.max(1, Math.trunc(requested)), 100) : 50;
+    const requested = Number(url.searchParams.get("limit") ?? "20");
+    const limit = Number.isFinite(requested) ? Math.min(Math.max(1, Math.trunc(requested)), 50) : 20;
     try {
       const subscriber = subscriberFromToken(auth.label, await store.findByAgent(auth.label));
+      if (!url.searchParams.has("since")) {
+        const page = await pullOpen({ store, subscriber, limit });
+        return json({
+          ok: true,
+          mode: "open",
+          agent_key: subscriber.agent_key,
+          delivery: subscriber.delivery,
+          floor: page.floor,
+          next_cursor: page.next_cursor,
+          row_count: page.data.length,
+          data: page.data,
+        });
+      }
+      const cursor = parseCursor(url.searchParams.get("since"), url.searchParams.get("since_id"));
       const page = await pullAlerts({ store, subscriber, cursor, limit });
       return json({
         ok: true,
+        mode: "cursor",
         agent_key: subscriber.agent_key,
         delivery: subscriber.delivery,
         since: cursor,
@@ -285,8 +297,6 @@ serve(async (req) => {
 
   if (req.method !== "POST") return json({ ok: false, error: "method_not_allowed" }, 405);
 
-  const requestKey = (req.headers.get("idempotency-key") ?? "").trim();
-  if (!/^[A-Za-z0-9_.:-]{8,120}$/.test(requestKey)) return json({ ok: false, error: "invalid_idempotency_key" }, 400);
   let body: Record<string, unknown>;
   try {
     body = await req.json();
@@ -294,11 +304,35 @@ serve(async (req) => {
     return json({ ok: false, error: "invalid_json" }, 400);
   }
   const action = body.action;
+
+  if (action === "ack") {
+    if (!hasScope(auth.scopes, "read")) {
+      return json({ ok: false, error: "unauthorized", message: "token lacks read scope" }, 401);
+    }
+    try {
+      const subscriber = await store.findByAgent(auth.label);
+      if (!subscriber) {
+        return json({ ok: false, error: "subscriber_not_found", message: errorMessage("subscriber_not_found") }, 404);
+      }
+      const items = parseAck(body.payload ?? {});
+      const result = await store.ack(subscriber.id, items);
+      return json({ ok: true, action: "ack", agent_key: subscriber.agent_key, ...result });
+    } catch (e) {
+      const code = e instanceof Error && /^[a-z0-9_]+$/.test(e.message) ? e.message : "";
+      if (!code) console.error("muse_alerts_ack_failed");
+      const mapped = httpFor(code || "ack_rejected");
+      return json(mapped.body, mapped.status);
+    }
+  }
+
+  const requestKey = (req.headers.get("idempotency-key") ?? "").trim();
+  if (!/^[A-Za-z0-9_.:-]{8,120}$/.test(requestKey)) return json({ ok: false, error: "invalid_idempotency_key" }, 400);
   if (
     action !== "register_subscriber" &&
     action !== "update_subscriber" &&
     action !== "disable_subscriber" &&
-    action !== "dispatch"
+    action !== "dispatch" &&
+    action !== "route_inbox"
   ) {
     return json({ ok: false, error: "unknown_action" }, 400);
   }
@@ -333,7 +367,10 @@ serve(async (req) => {
     if (action === "register_subscriber") responseBody = await register(store, payload);
     else if (action === "update_subscriber") responseBody = await update(store, payload);
     else if (action === "disable_subscriber") responseBody = await disable(store, payload);
-    else {
+    else if (action === "route_inbox") {
+      const result = await store.routeCodingInbox();
+      responseBody = { ok: true, action, ...result };
+    } else {
       const requested = typeof payload.limit === "number" ? payload.limit : 20;
       const limit = Math.min(Math.max(1, Math.trunc(requested)), 20);
       const key = await sealKey();
