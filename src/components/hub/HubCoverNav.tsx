@@ -82,7 +82,7 @@ export function HubCoverNav() {
                   <SheetClose asChild key={def.id}>
                     <Link
                       to={href}
-                      className="block text-left outline-none focus-visible:ring-2 focus-visible:ring-green-500/50"
+                      className="block text-left outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-green-500/50"
                     >
                       <ToolRow def={def} />
                     </Link>
@@ -97,7 +97,7 @@ export function HubCoverNav() {
                       href={href}
                       target="_blank"
                       rel="noopener noreferrer"
-                      className="block outline-none focus-visible:ring-2 focus-visible:ring-green-500/50"
+                      className="block outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-green-500/50"
                     >
                       <ToolRow def={def} />
                     </a>
