@@ -37,10 +37,16 @@ export default function RemoteControlPage() {
   const [sending, setSending] = useState(false);
 
   const refresh = useCallback(async () => {
-    const { data: h } = await supabase.functions.invoke("remote-bridge-api", {
-      body: { action: "health" },
-    });
-    setHealth((h as BridgeHealth) ?? null);
+    try {
+      const { data: h } = await supabase.functions.invoke("remote-bridge-api", {
+        body: { action: "health" },
+      });
+      setHealth((h as BridgeHealth) ?? null);
+    } catch {
+      // Bridge status is advisory; a failed call (offline bridge, expired
+      // session) must not leave an unhandled rejection on the 8s interval.
+      setHealth(null);
+    }
 
     const { data: rows } = await supabase
       .from("remote_command_queue")
