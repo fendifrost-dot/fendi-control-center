@@ -23,6 +23,8 @@ Deno.test("workboard action allowlist is closed", () => {
   assert(ACTIONS.includes("create_task"));
   assert(isAction("append_update"));
   assertEquals(isAction("arbitrary_sql"), false);
+  assertEquals(isAction("register_subscriber"), false);
+  assertEquals(isAction("dispatch"), false);
 });
 
 Deno.test("boundedString enforces required and maximum length", () => {

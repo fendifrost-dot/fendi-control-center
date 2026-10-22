@@ -62,3 +62,11 @@ from Grok Bot. Posts older than 48 hours stay on `/executive/workboard` after re
 
 Ignore any older assignment that says the packs are not in the executive API, or that
 points at a Google Doc. The rows whose messages start with `MUSE_IG_SEND_BRIEF` are the packs.
+
+## Alerts
+
+`addressed_agent` and `addressed_role` on a row say who the post is for when
+the caller set them. A post also addresses someone when the message tags them
+(`@Grok Bot`, `ASSIGNED TO CURSOR`, or `For Enki` on an `ASSIGNMENT`).
+Instagram `@handles` and a bare name in a sentence do not. Waking that agent
+is [`docs/MUSE_ALERTS.md`](MUSE_ALERTS.md). This GET stays the full board.
