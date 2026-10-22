@@ -1070,6 +1070,222 @@ export type Database = {
         }
         Relationships: []
       }
+      muse_alert_acks: {
+        Row: {
+          acked_at: string
+          source_id: string
+          source_table: string
+          subscriber_id: string
+        }
+        Insert: {
+          acked_at?: string
+          source_id: string
+          source_table: string
+          subscriber_id: string
+        }
+        Update: {
+          acked_at?: string
+          source_id?: string
+          source_table?: string
+          subscriber_id?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "muse_alert_acks_subscriber_id_fkey"
+            columns: ["subscriber_id"]
+            isOneToOne: false
+            referencedRelation: "muse_alert_subscribers"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
+      muse_alert_deliveries: {
+        Row: {
+          attempt: number
+          created_at: string
+          error_code: string | null
+          http_status: number | null
+          id: string
+          outbox_id: string
+        }
+        Insert: {
+          attempt: number
+          created_at?: string
+          error_code?: string | null
+          http_status?: number | null
+          id?: string
+          outbox_id: string
+        }
+        Update: {
+          attempt?: number
+          created_at?: string
+          error_code?: string | null
+          http_status?: number | null
+          id?: string
+          outbox_id?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "muse_alert_deliveries_outbox_id_fkey"
+            columns: ["outbox_id"]
+            isOneToOne: false
+            referencedRelation: "muse_alert_outbox"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
+      muse_alert_outbox: {
+        Row: {
+          actor: string
+          addressed_agent: string | null
+          addressed_role: string | null
+          agent_key: string
+          attempts: number
+          claimed_at: string | null
+          created_at: string
+          dedupe_key: string
+          delivered_at: string | null
+          id: string
+          kind: string
+          last_error: string | null
+          last_http_status: number | null
+          next_attempt_at: string
+          payload: Json
+          source_id: string
+          source_table: string
+          status: string
+          subscriber_id: string
+        }
+        Insert: {
+          actor: string
+          addressed_agent?: string | null
+          addressed_role?: string | null
+          agent_key: string
+          attempts?: number
+          claimed_at?: string | null
+          created_at?: string
+          dedupe_key: string
+          delivered_at?: string | null
+          id?: string
+          kind: string
+          last_error?: string | null
+          last_http_status?: number | null
+          next_attempt_at?: string
+          payload: Json
+          source_id: string
+          source_table: string
+          status?: string
+          subscriber_id: string
+        }
+        Update: {
+          actor?: string
+          addressed_agent?: string | null
+          addressed_role?: string | null
+          agent_key?: string
+          attempts?: number
+          claimed_at?: string | null
+          created_at?: string
+          dedupe_key?: string
+          delivered_at?: string | null
+          id?: string
+          kind?: string
+          last_error?: string | null
+          last_http_status?: number | null
+          next_attempt_at?: string
+          payload?: Json
+          source_id?: string
+          source_table?: string
+          status?: string
+          subscriber_id?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "muse_alert_outbox_subscriber_id_fkey"
+            columns: ["subscriber_id"]
+            isOneToOne: false
+            referencedRelation: "muse_alert_subscribers"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
+      muse_alert_requests: {
+        Row: {
+          action: string
+          created_at: string
+          http_status: number
+          id: string
+          payload_sha256: string
+          request_key: string
+          response: Json
+          token_label: string
+        }
+        Insert: {
+          action: string
+          created_at?: string
+          http_status: number
+          id?: string
+          payload_sha256: string
+          request_key: string
+          response?: Json
+          token_label: string
+        }
+        Update: {
+          action?: string
+          created_at?: string
+          http_status?: number
+          id?: string
+          payload_sha256?: string
+          request_key?: string
+          response?: Json
+          token_label?: string
+        }
+        Relationships: []
+      }
+      muse_alert_subscribers: {
+        Row: {
+          agent_key: string
+          aliases: string[]
+          created_at: string
+          delivery: string
+          enabled: boolean
+          id: string
+          roles: string[]
+          updated_at: string
+          webhook_host: string | null
+          webhook_key_hint: string | null
+          webhook_key_sealed: string | null
+          webhook_url_sealed: string | null
+        }
+        Insert: {
+          agent_key: string
+          aliases?: string[]
+          created_at?: string
+          delivery: string
+          enabled?: boolean
+          id?: string
+          roles?: string[]
+          updated_at?: string
+          webhook_host?: string | null
+          webhook_key_hint?: string | null
+          webhook_key_sealed?: string | null
+          webhook_url_sealed?: string | null
+        }
+        Update: {
+          agent_key?: string
+          aliases?: string[]
+          created_at?: string
+          delivery?: string
+          enabled?: boolean
+          id?: string
+          roles?: string[]
+          updated_at?: string
+          webhook_host?: string | null
+          webhook_key_hint?: string | null
+          webhook_key_sealed?: string | null
+          webhook_url_sealed?: string | null
+        }
+        Relationships: []
+      }
       muse_api_tokens: {
         Row: {
           created_at: string
@@ -1109,6 +1325,8 @@ export type Database = {
       muse_daily_reports: {
         Row: {
           actor: string
+          addressed_agent: string | null
+          addressed_role: string | null
           cadence: string
           created_at: string
           evidence_ref: string | null
@@ -1119,6 +1337,8 @@ export type Database = {
         }
         Insert: {
           actor: string
+          addressed_agent?: string | null
+          addressed_role?: string | null
           cadence: string
           created_at?: string
           evidence_ref?: string | null
@@ -1129,6 +1349,8 @@ export type Database = {
         }
         Update: {
           actor?: string
+          addressed_agent?: string | null
+          addressed_role?: string | null
           cadence?: string
           created_at?: string
           evidence_ref?: string | null
@@ -1356,6 +1578,7 @@ export type Database = {
       }
       muse_improvement_tasks: {
         Row: {
+          addressed_role: string | null
           assigning_agent: string
           blocker: string | null
           claimed_completed_at: string | null
@@ -1378,6 +1601,7 @@ export type Database = {
           verification_state: string
         }
         Insert: {
+          addressed_role?: string | null
           assigning_agent?: string
           blocker?: string | null
           claimed_completed_at?: string | null
@@ -1400,6 +1624,7 @@ export type Database = {
           verification_state?: string
         }
         Update: {
+          addressed_role?: string | null
           assigning_agent?: string
           blocker?: string | null
           claimed_completed_at?: string | null
@@ -2113,6 +2338,8 @@ export type Database = {
       muse_work_updates: {
         Row: {
           actor: string
+          addressed_agent: string | null
+          addressed_role: string | null
           created_at: string
           domain_key: string | null
           evidence_ref: string | null
@@ -2125,6 +2352,8 @@ export type Database = {
         }
         Insert: {
           actor: string
+          addressed_agent?: string | null
+          addressed_role?: string | null
           created_at?: string
           domain_key?: string | null
           evidence_ref?: string | null
@@ -2137,6 +2366,8 @@ export type Database = {
         }
         Update: {
           actor?: string
+          addressed_agent?: string | null
+          addressed_role?: string | null
           created_at?: string
           domain_key?: string | null
           evidence_ref?: string | null
@@ -3397,6 +3628,7 @@ export type Database = {
       }
       muse_agent_queue: {
         Row: {
+          addressed_role: string | null
           as_of: string | null
           assigning_agent: string | null
           blocker: string | null
@@ -3466,6 +3698,24 @@ export type Database = {
             referencedColumns: ["id"]
           },
         ]
+      }
+      muse_alert_events: {
+        Row: {
+          actor: string | null
+          addressed_agent: string | null
+          addressed_role: string | null
+          created_at: string | null
+          domain_key: string | null
+          evidence_ref: string | null
+          improvement_id: string | null
+          kind: string | null
+          message: string | null
+          mission_id: string | null
+          source_id: string | null
+          source_table: string | null
+          task_id: string | null
+        }
+        Relationships: []
       }
       muse_daily_improvement_board: {
         Row: {
@@ -3545,6 +3795,8 @@ export type Database = {
       muse_daily_report_board: {
         Row: {
           actor: string | null
+          addressed_agent: string | null
+          addressed_role: string | null
           as_of: string | null
           cadence: string | null
           created_at: string | null
@@ -3556,6 +3808,8 @@ export type Database = {
         }
         Insert: {
           actor?: string | null
+          addressed_agent?: string | null
+          addressed_role?: string | null
           as_of?: never
           cadence?: string | null
           created_at?: string | null
@@ -3567,6 +3821,8 @@ export type Database = {
         }
         Update: {
           actor?: string | null
+          addressed_agent?: string | null
+          addressed_role?: string | null
           as_of?: never
           cadence?: string | null
           created_at?: string | null
@@ -4135,6 +4391,8 @@ export type Database = {
       muse_work_feed: {
         Row: {
           actor: string | null
+          addressed_agent: string | null
+          addressed_role: string | null
           as_of: string | null
           created_at: string | null
           domain_key: string | null
@@ -4230,6 +4488,8 @@ export type Database = {
       muse_workboard_assignments: {
         Row: {
           actor: string | null
+          addressed_agent: string | null
+          addressed_role: string | null
           as_of: string | null
           created_at: string | null
           domain_key: string | null
@@ -4413,6 +4673,37 @@ export type Database = {
           type: string
         }[]
       }
+      muse_alert_claim: {
+        Args: { p_ids?: string[]; p_limit: number }
+        Returns: {
+          actor: string
+          addressed_agent: string | null
+          addressed_role: string | null
+          agent_key: string
+          attempts: number
+          claimed_at: string | null
+          created_at: string
+          dedupe_key: string
+          delivered_at: string | null
+          id: string
+          kind: string
+          last_error: string | null
+          last_http_status: number | null
+          next_attempt_at: string
+          payload: Json
+          source_id: string
+          source_table: string
+          status: string
+          subscriber_id: string
+        }[]
+        SetofOptions: {
+          from: "*"
+          to: "muse_alert_outbox"
+          isOneToOne: false
+          isSetofReturn: true
+        }
+      }
+      muse_alert_route_coding_inbox: { Args: never; Returns: number }
     }
     Enums: {
       [_ in never]: never
