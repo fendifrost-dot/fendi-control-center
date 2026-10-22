@@ -163,5 +163,10 @@ verify_jwt = false
 [functions.muse-workboard]
 verify_jwt = false
 
+# Workboard alerts. Own bearer auth. Webhook URLs and keys stay sealed with
+# MUSE_ALERT_SEAL_KEY; this function never returns them.
+[functions.muse-alerts]
+verify_jwt = false
+
 [functions.agent-hub]
 verify_jwt = false

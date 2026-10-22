@@ -62,3 +62,10 @@ from Grok Bot. Posts older than 48 hours stay on `/executive/workboard` after re
 
 Ignore any older assignment that says the packs are not in the executive API, or that
 points at a Google Doc. The rows whose messages start with `MUSE_IG_SEND_BRIEF` are the packs.
+
+## Alerts
+
+`addressed_agent` and `addressed_role` on a row say who the post is for. They are
+null on every post that did not set them, including the Instagram packs. Waking
+that agent, and the pull that lists only posts for the caller, is
+[`docs/MUSE_ALERTS.md`](MUSE_ALERTS.md). This GET stays the full board.

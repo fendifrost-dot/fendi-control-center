@@ -15,6 +15,16 @@ import {
   hubControlCenterUrl,
   type WorkboardAction,
 } from "./contract.ts";
+import { createMuseAlertStore } from "../_shared/museAlertStore.ts";
+import {
+  addressPatch,
+  addressedAgent,
+  addressedRole,
+  errorMessage,
+  eventFromAction,
+  fanoutAndDeliver,
+  readSealKey,
+} from "../_shared/museAlerts.ts";
 
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
 const SERVICE_KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
@@ -101,6 +111,7 @@ async function execute(db: SupabaseClient, action: WorkboardAction, p: Record<st
       expected_artifact: boundedString(p.expected_artifact, "expected_artifact"), definition_of_done: boundedString(p.definition_of_done, "definition_of_done"),
       priority: oneOf(p.priority, "priority", ["P0","P1","P2","P3"], "P2"), state: "ASSIGNED", verification_state: "CLAIMED",
       due_at: iso(p.due_at, "due_at"), source_ref: boundedString(p.source_ref, "source_ref"),
+      ...addressPatch(null, addressedRole(p.addressed_role)),
     };
     return await db.from("muse_improvement_tasks").insert(row).select("*").single();
   }
@@ -110,6 +121,7 @@ async function execute(db: SupabaseClient, action: WorkboardAction, p: Record<st
       improvement_id: uuid(p.improvement_id, "improvement_id", false), task_id: uuid(p.task_id, "task_id", false), actor,
       update_type: oneOf(p.update_type, "update_type", ["NOTE","ASSIGNMENT","STATUS","BLOCKER","EVIDENCE","DECISION","MEASUREMENT"], "NOTE"),
       message: boundedString(p.message, "message", 8000, true), evidence_ref: boundedString(p.evidence_ref, "evidence_ref"),
+      ...addressPatch(addressedAgent(p.addressed_agent), addressedRole(p.addressed_role)),
     };
     if (!row.mission_id && !row.improvement_id && !row.task_id) throw new Error("one parent id is required");
     return await db.from("muse_work_updates").insert(row).select("*").single();
@@ -122,6 +134,7 @@ async function execute(db: SupabaseClient, action: WorkboardAction, p: Record<st
       message: boundedString(p.message, "message", 8000, true),
       sections: reportSections(p.sections),
       evidence_ref: boundedString(p.evidence_ref, "evidence_ref"),
+      ...addressPatch(addressedAgent(p.addressed_agent), addressedRole(p.addressed_role)),
     };
     return await db.from("muse_daily_reports").insert(row).select("*").single();
   }
@@ -236,7 +249,35 @@ serve(async (req) => {
     }
   } catch (e) {
     status = 400;
-    payload = { ok: false, action: body.action, error: e instanceof Error ? e.message : "write failed" };
+    const message = e instanceof Error ? e.message : "write failed";
+    const alertMessage = errorMessage(message);
+    payload = {
+      ok: false,
+      action: body.action,
+      error: alertMessage === "request rejected" && message !== "request rejected" ? message : alertMessage,
+    };
+  }
+
+  if (status === 200 && payload.ok === true) {
+    const event = eventFromAction(body.action, (payload as { data?: unknown }).data, auth.label);
+    if (event) {
+      try {
+        let sealKey = null;
+        try {
+          sealKey = await readSealKey(Deno.env.get("MUSE_ALERT_SEAL_KEY"));
+        } catch {
+          console.error("muse_alert_seal_key_invalid");
+        }
+        const summary = await fanoutAndDeliver({
+          store: createMuseAlertStore(db),
+          event,
+          sealKey,
+        });
+        if (summary.matched > 0) payload = { ...payload, alerts: summary };
+      } catch {
+        console.error("muse_alert_fanout_failed");
+      }
+    }
   }
 
   await db.from("muse_workboard_requests").insert({ token_label: auth.label, request_key: requestKey, action: body.action, http_status: status, response: payload });
