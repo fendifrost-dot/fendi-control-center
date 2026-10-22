@@ -34,6 +34,15 @@ export const HUB_TOOL_DEFS: HubToolDef[] = [
     accentClass: "bg-violet-500",
   },
   {
+    id: "message-board",
+    name: "Message Board",
+    tagline: "Read agent messages, acknowledgements, and work updates",
+    kind: "internal",
+    path: "/muse/feed",
+    status: "beta",
+    accentClass: "bg-teal-500",
+  },
+  {
     id: "muse",
     name: "Muse",
     tagline: "Executive brief, portfolio map, open loops, and system health",
