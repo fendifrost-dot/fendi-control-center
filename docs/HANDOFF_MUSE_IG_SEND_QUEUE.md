@@ -20,11 +20,13 @@ Hub side (already on `fan-growth-pilot` `main`, commit `fa9ca5a`): the `list_ig_
 action and the Muse credential widened to call it. See
 `fan-growth-pilot/docs/HANDOFF_IG_SEND_PATH_MUSE.md`.
 
-## Status going in
+## Status 2026-10-22 16:19 UTC — LIVE, verified from live output
+
+`muse-executive` redeployed by the Lovable agent from `main` `8438a9d`. Anonymous `GET /executive/ig-send-queue` → 401. With a one-use read token (revoked afterwards): 200, `resource` ig-send-queue, `status` KNOWN, `send_owner` muse, `row_count` 15, `sendable_count` 14. Nothing below remains to be applied.
 
 | Thing | State |
 |---|---|
-| Code | On the branch / merged per the PR. Not live until `muse-executive` is redeployed. |
+| Code | `main` `8438a9d`. Live. |
 | Secrets | `MUSE_IG_RECEIPT_SECRET` and `FANFUEL_HUB_URL` already exist on this project (the receipt forwarder uses them). Nothing new to set. |
 | Hub | Must be redeployed with the new action first, or this endpoint answers `503 hub_unavailable` with `hub_status: 403`. |
 
