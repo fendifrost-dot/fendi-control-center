@@ -275,3 +275,95 @@ export function rollUpStatus(rows: Record<string, unknown>[]): {
   const confidence: Confidence = status === "KNOWN" ? "HIGH" : status === "NEEDS_VERIFICATION" ? "MEDIUM" : "LOW";
   return { status, confidence, human_verification_required: needsHuman || status !== "KNOWN" };
 }
+
+// ---------------------------------------------------------------------------
+// Live pass-through: the approved Instagram send queue on FanFuel Hub.
+//   Claude composes the DM in the Hub -> Grok approves -> Muse sends -> Muse
+//   records the receipt. The Hub is the system of record for drafts and
+//   approvals, so this resource is read live from control-center-api and is
+//   never copied into a muse_ view. The Muse secret stays server-side.
+// ---------------------------------------------------------------------------
+export const IG_SEND_QUEUE_RESOURCE = "ig-send-queue";
+export const IG_SEND_QUEUE_HUB_ACTION = "list_ig_dm_send_queue";
+
+export function hubSendQueueUrl(hubUrl: string): string {
+  const base = hubUrl.trim().replace(/\/+$/, "");
+  if (!/^https:\/\//i.test(base)) throw new Error("FANFUEL_HUB_URL must be https");
+  return `${base}/functions/v1/control-center-api`;
+}
+
+export function hubSendQueueRequest(opts: { hubUrl: string; secret: string; limit?: number }): {
+  url: string;
+  init: { method: "POST"; headers: Record<string, string>; body: string; redirect: "error" };
+} {
+  const secret = opts.secret.trim();
+  if (!secret) throw new Error("MUSE_IG_RECEIPT_SECRET is not configured");
+  const limit = Math.min(Math.max(Math.trunc(Number(opts.limit) || 100), 1), 250);
+  return {
+    url: hubSendQueueUrl(opts.hubUrl),
+    init: {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "x-muse-ig-receipt-secret": secret },
+      body: JSON.stringify({ action: IG_SEND_QUEUE_HUB_ACTION, limit }),
+      redirect: "error",
+    },
+  };
+}
+
+function scrubSecret(value: unknown, secret: string): unknown {
+  if (!secret) return value;
+  const text = JSON.stringify(value ?? null);
+  if (!text.includes(secret)) return value;
+  return JSON.parse(text.split(secret).join("[redacted]"));
+}
+
+/** Wrap the Hub answer in the executive envelope; a non-200 Hub reply is a 503 here, never a fake queue. */
+export function igSendQueueEnvelope(
+  hubStatus: number,
+  hubBody: unknown,
+  secret: string,
+): { status: number; body: Record<string, unknown>; note?: string } {
+  const body = scrubSecret(hubBody, secret) as Record<string, unknown> | null;
+  const generatedAt = new Date().toISOString();
+  if (hubStatus !== 200 || !body || body.ok !== true || !Array.isArray(body.rows)) {
+    const reason = body && typeof body.error === "string" ? body.error : `hub returned ${hubStatus}`;
+    return {
+      status: 503,
+      note: `hub ${hubStatus}: ${reason}`.slice(0, 300),
+      body: {
+        error: "hub_unavailable",
+        resource: IG_SEND_QUEUE_RESOURCE,
+        hub_status: hubStatus,
+        message: reason,
+        hint: hubStatus === 403
+          ? "The Hub refused the Muse credential for list_ig_dm_send_queue. control-center-api may not be redeployed with that action, or MUSE_IG_RECEIPT_SECRET differs between projects."
+          : "FanFuel Hub did not answer with a send queue. Nothing was sent.",
+      },
+    };
+  }
+  const rows = body.rows as Record<string, unknown>[];
+  const envelope: ExecutiveEnvelope<Record<string, unknown>> & Record<string, unknown> = {
+    resource: IG_SEND_QUEUE_RESOURCE,
+    generated_at: generatedAt,
+    data_timestamp: generatedAt,
+    authoritative_source: "FanFuel Hub control-center-api list_ig_dm_send_queue (live read; the Hub owns drafts and approvals)",
+    freshness_minutes: 0,
+    confidence: "HIGH",
+    status: "KNOWN",
+    human_verification_required: false,
+    evidence: ["hub:control-center-api list_ig_dm_send_queue", "project:vsemrziqxrrfcquxfnwd"],
+    row_count: rows.length,
+    data: rows,
+    send_owner: body.send_owner ?? "muse",
+    receipt_action: body.receipt_action ?? "mark_manual_ig_dm_submitted",
+    path: body.path ?? [],
+    sendable_count: body.sendable_count ?? rows.filter((r) => r.sendable === true).length,
+    total_count: body.total_count ?? rows.length,
+    notes: [
+      "Send each row with sendable=true: dm_body to ig_handle, exactly as written. Then record the receipt with muse-workboard record_ig_dm_receipt using handoff_record_id.",
+      "A row with blockers is not yours to fix: skip it and say why on the board. Never hand-send, never edit the copy, never send a row twice.",
+    ],
+  };
+  if (rows.length === 0) envelope.notes = ["No approved, unsent Instagram DMs. This means Grok has approved nothing that is still unsent, not that the lane is broken.", ...(envelope.notes ?? [])];
+  return { status: 200, body: envelope };
+}
