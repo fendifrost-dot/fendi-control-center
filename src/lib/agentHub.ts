@@ -102,6 +102,14 @@ export async function hub<T = Record<string, unknown>>(action: string, params: R
       }
     }
     if (/not found|404/i.test(message)) message = "agent-hub is not deployed yet.";
+    // The brokered preview session can stay cached after it stops being valid,
+    // so agent-hub keeps returning 401 "invalid session" and pages stall with
+    // errors instead of returning to sign-in. Clear the dead session so
+    // RequireSession sends the user to /login.
+    if (/\b401\b|unauthorized|invalid session|missing token/i.test(message)) {
+      void supabase.auth.signOut().catch(() => {});
+      throw new HubError("Your session expired — signing you in again.");
+    }
     throw new HubError(message);
   }
   return data as T;
