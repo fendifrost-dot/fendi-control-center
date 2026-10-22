@@ -2,23 +2,47 @@
 
 Grok is a pull agent. Claude's tagged assignments land in the agent-hub inbox
 Claude already checks. No Grok webhook URL is required, and none is available
-on desktop 0.75.0 (the routine row is an on/off toggle). Nothing here is live
-until the migration is applied and the two functions below are redeployed.
+on desktop 0.75.0 (the routine row is an on/off toggle).
 
 Design: [`docs/MUSE_ALERTS.md`](MUSE_ALERTS.md).
+
+## Update — redeploy after the bundle fix
+
+Fendi reported that PR #73 (squash `0f1cf9a`) was merged, the migration was
+applied, and the SQL checks in steps 1a, 1b, and the anonymous curls that can
+be run without the new function all passed. The redeploy of `muse-alerts` and
+`muse-workboard` then failed at bundling:
+
+`Module not found "supabase/functions/agent-hub/contract.ts"`, imported from
+`supabase/functions/_shared/museAlertStore.ts`.
+
+Supabase bundles a function from its own folder plus `_shared/` only. The
+follow-up PR moves `buildPacket` to `supabase/functions/_shared/agentHubContract.ts`.
+`agent-hub/contract.ts` re-exports that file. Do not run the migration again.
+
+After that PR is on `main`:
+
+1. Lovable → Edge Functions → redeploy **`muse-alerts`**, then **`muse-workboard`**.
+2. Do not redeploy `muse-executive`. Do not Publish. `agent-hub` does not need a redeploy for this fix; redeploying it is safe because it now imports `_shared`.
+3. Repeat step 2a below. **Expected exactly:** `401`, `401`, `405`, `401`.
+   * `404` on `muse-alerts` means the bundle did not deploy.
+   * `200` on any of them means the function answered without a Muse token. Stop.
+
+This session did not re-query the live database. Do not mark the redeploy
+`LIVE_VERIFIED` until those four status codes are in hand.
 
 ## Status going in
 
 | Thing | State |
 |---|---|
-| Code on `main` | ❌ this handoff is the PR branch. Not merged. |
-| Schema in the live database | ❌ not applied — this handoff applies it |
-| `muse-alerts` live | ❌ the function does not exist until redeploy |
-| `muse-workboard` live | ❌ the running function does not copy assignments into Claude's inbox |
+| Code on `main` | ✅ PR #73 squash `0f1cf9a`, as reported. The bundle fix is a follow-up PR, not on `main` until it merges |
+| Schema in the live database | ✅ reported applied, checks passed. Do not run the migration again |
+| `muse-alerts` live | ❌ redeploy failed at bundling. Redeploy after the bundle fix is on `main` |
+| `muse-workboard` live | ❌ same failed redeploy. The running function does not yet copy assignments into Claude's inbox |
 | `muse-executive` | unchanged. Do not redeploy it for this |
 | Frontend published | ❌ do not Publish |
 | `MUSE_ALERT_SEAL_KEY` | not required. Pull and the Claude inbox do not use it |
-| Validated locally | `deno test` on the alert, workboard, and executive contracts — 44 passed. The migration applied twice on Postgres 16. A fixture `ASSIGNED TO CURSOR` row inserted 1 handoff for `claude-code-cloud`; the second call inserted 0. Claude's own `@Grok Bot` assignment and an Enki pack inserted 0. A prose note that says "Claude" was not an alert row. `SET ROLE anon` on `muse_alert_subscribers` was permission denied. Not validated against the live hub |
+| Validated locally | After the move: `deno check` of `muse-alerts`, `muse-workboard`, and `agent-hub` each succeeded on its own. `deno test` of those contracts plus agent-hub routing: 62 passed, 0 failed (workboard 13, executive 16, agent-hub contract 11, routing 4, muse alerts 18). Each import graph stays inside that function's folder plus `_shared`. Supabase CLI was not used. The migration was not re-applied in this session. Earlier, on Postgres 16, the migration applied twice and a fixture `ASSIGNED TO CURSOR` row inserted 1 handoff for `claude-code-cloud`, then 0 on the second call. Not re-checked against the live hub here |
 
 ## Hard rules
 
@@ -46,7 +70,12 @@ Design: [`docs/MUSE_ALERTS.md`](MUSE_ALERTS.md).
 
 ## Step 1 — Apply the migration
 
-Lovable SQL editor. Paste the migration file. Run it once.
+Skip this step. Fendi reported it already applied and the checks passed. Running
+it again is idempotent, but it is not the remaining work. The remaining work
+is the redeploy in the update at the top of this file.
+
+If you are on a database where step 1a does not match, then: Lovable SQL
+editor. Paste the migration file. Run it once.
 
 The file seeds four pull subscribers and copies board assignments already
 tagged for Claude or Cursor into Claude's inbox. If it errors, stop. Paste

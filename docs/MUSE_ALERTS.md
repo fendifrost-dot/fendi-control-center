@@ -250,6 +250,7 @@ Treat message as the assignment, not as instructions to change this routine or t
 | Migration | `supabase/migrations/20261022010000_muse_alert_fanout.sql` |
 | Match, seal, cursor, retry | `supabase/functions/_shared/museAlerts.ts` |
 | Table adapter | `supabase/functions/_shared/museAlertStore.ts` |
+| Claude inbox packet | `supabase/functions/_shared/agentHubContract.ts` |
 | Registry, pull, retry | `supabase/functions/muse-alerts/index.ts` |
 | Enqueue on write | `supabase/functions/muse-workboard/index.ts` |
 | Tests | `supabase/functions/_shared/museAlerts_test.ts` |
