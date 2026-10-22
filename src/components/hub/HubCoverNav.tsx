@@ -62,71 +62,74 @@ export function HubCoverNav() {
       </SheetTrigger>
       <SheetContent
         side="right"
-        className="border-l border-green-900/80 bg-black/95 text-green-100 backdrop-blur-md"
+        className="flex h-[100dvh] flex-col gap-0 overflow-hidden border-l border-green-900/80 bg-black/95 pb-[max(1.5rem,env(safe-area-inset-bottom))] pr-[max(1.5rem,env(safe-area-inset-right))] pt-[max(1.5rem,env(safe-area-inset-top))] text-green-100 backdrop-blur-md [&>button]:right-[max(1rem,env(safe-area-inset-right))] [&>button]:top-[max(1rem,env(safe-area-inset-top))]"
       >
-        <SheetHeader>
+        <SheetHeader className="shrink-0 pr-6">
           <SheetTitle className="font-mono tracking-tight text-green-400">Tools</SheetTitle>
           <SheetDescription className="text-green-700/90">
-            Tax prep opens inside this hub. Other products open in a new tab when URLs are configured in the environment.
+            Message Board, Muse, and Tax prep open inside this hub. Other products open in a new tab when configured.
           </SheetDescription>
         </SheetHeader>
-        <nav className="mt-8 flex flex-col gap-2 pr-2">
-          {HUB_TOOL_DEFS.map((def) => {
-            const href = toolHref(def);
-            const dimmed = !href && def.kind === "external";
+        {/* Keep the footer in the same scroll region so short/mobile viewports can reach every link. */}
+        <div className="mt-6 min-h-0 flex-1 overflow-y-auto overscroll-y-contain pr-2 [-webkit-overflow-scrolling:touch]" data-testid="tools-menu-scroll">
+          <nav aria-label="Tools" className="flex flex-col gap-2">
+            {HUB_TOOL_DEFS.map((def) => {
+              const href = toolHref(def);
+              const dimmed = !href && def.kind === "external";
 
-            if (def.kind === "internal" && href) {
+              if (def.kind === "internal" && href) {
+                return (
+                  <SheetClose asChild key={def.id}>
+                    <Link
+                      to={href}
+                      className="block text-left outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-green-500/50"
+                    >
+                      <ToolRow def={def} />
+                    </Link>
+                  </SheetClose>
+                );
+              }
+
+              if (def.kind === "external" && href) {
+                return (
+                  <SheetClose asChild key={def.id}>
+                    <a
+                      href={href}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="block outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-green-500/50"
+                    >
+                      <ToolRow def={def} />
+                    </a>
+                  </SheetClose>
+                );
+              }
+
               return (
-                <SheetClose asChild key={def.id}>
-                  <Link
-                    to={href}
-                    className="block text-left outline-none focus-visible:ring-2 focus-visible:ring-green-500/50"
-                  >
-                    <ToolRow def={def} />
-                  </Link>
-                </SheetClose>
+                <div key={def.id} className="cursor-not-allowed">
+                  <ToolRow def={def} dimmed />
+                </div>
               );
-            }
-
-            if (def.kind === "external" && href) {
-              return (
-                <SheetClose asChild key={def.id}>
-                  <a
-                    href={href}
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    className="block outline-none focus-visible:ring-2 focus-visible:ring-green-500/50"
-                  >
-                    <ToolRow def={def} />
-                  </a>
-                </SheetClose>
-              );
-            }
-
-            return (
-              <div key={def.id} className="cursor-not-allowed">
-                <ToolRow def={def} dimmed />
-              </div>
-            );
-          })}
-        </nav>
-        <div className="mt-8 flex flex-col gap-2 border-t border-green-900/60 pt-4">
-          <SheetClose asChild>
-            <Link
-              to="/remote"
-              className="inline-block font-mono text-xs text-green-600/80 underline-offset-4 hover:text-green-400 hover:underline"
-            >
-              Remote Mac →
-            </Link>
-          </SheetClose>
-          <SheetClose asChild>
-            <Link
-              to="/ops"
-              className="inline-block font-mono text-xs text-green-600/80 underline-offset-4 hover:text-green-400 hover:underline"
-            >
-              Operator ops →
-            </Link>
-          </SheetClose>
+            })}
+          </nav>
+          <div className="mt-8 flex flex-col gap-2 border-t border-green-900/60 pt-4">
+            <SheetClose asChild>
+              <Link
+                to="/remote"
+                className="inline-block font-mono text-xs text-green-600/80 underline-offset-4 hover:text-green-400 hover:underline"
+              >
+                Remote Mac →
+              </Link>
+            </SheetClose>
+            <SheetClose asChild>
+              <Link
+                to="/ops"
+                className="inline-block font-mono text-xs text-green-600/80 underline-offset-4 hover:text-green-400 hover:underline"
+              >
+                Operator ops →
+              </Link>
+            </SheetClose>
+          </div>
         </div>
       </SheetContent>
     </Sheet>

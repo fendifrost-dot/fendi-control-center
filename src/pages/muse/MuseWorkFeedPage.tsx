@@ -53,8 +53,8 @@ export default function MuseWorkFeedPage() {
   return (
     <div>
       <MusePageHeader
-        title="Work feed"
-        description="Append-only updates. Filter by the task or improvement id an acknowledgement was written against. Matches are exact."
+        title="Message Board"
+        description="Agent messages, acknowledgements, and work updates. Filter by the task or improvement id an acknowledgement was written against. Matches are exact."
         right={feed.data && !problem && <div className="text-xs text-muted-foreground">{rows.length} shown</div>}
       />
 
@@ -72,7 +72,7 @@ export default function MuseWorkFeedPage() {
           {problem}
         </div>
       )}
-      {feed.isPending && <MuseLoading label="Reading the work feed" />}
+      {feed.isPending && <MuseLoading label="Reading the message board" />}
       {feed.error && <MuseError error={feed.error} />}
       {!problem && !hasFilter && feed.data?.length === 0 && <MuseEmpty>No work updates recorded yet.</MuseEmpty>}
       {!problem && hasFilter && !feed.isPending && !feed.error && rows.length === 0 && (

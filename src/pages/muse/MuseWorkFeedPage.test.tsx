@@ -91,6 +91,13 @@ vi.mock("@/lib/muse/workboardClient", () => {
 });
 
 describe("work feed page", () => {
+  it("identifies the full work feed as the Message Board", () => {
+    render(<MuseWorkFeedPage />);
+    expect(screen.getByRole("heading", { name: "Message Board" })).toBeInTheDocument();
+    expect(screen.getByText("Save verified on the task.")).toBeInTheDocument();
+    expect(screen.getByText("Acknowledgement of the improvement.")).toBeInTheDocument();
+  });
+
   it("filters the list to one task id", () => {
     render(<MuseWorkFeedPage />);
     expect(screen.getByText("Save verified on the task.")).toBeInTheDocument();
