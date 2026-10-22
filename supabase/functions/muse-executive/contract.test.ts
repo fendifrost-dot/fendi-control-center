@@ -10,6 +10,9 @@ import {
   freshnessMinutes,
   rollUpStatus,
   parseSince,
+  IG_SEND_QUEUE_RESOURCE,
+  hubSendQueueRequest,
+  igSendQueueEnvelope,
 } from "./contract.ts";
 
 Deno.test("resource map is a closed allowlist of muse_ views", () => {
@@ -142,4 +145,41 @@ Deno.test("a row demanding human verification propagates even when KNOWN", () =>
   const r = rollUpStatus([{ data_status: "KNOWN", human_verification_required: true }]);
   assertEquals(r.status, "KNOWN");
   assertEquals(r.human_verification_required, true);
+});
+
+Deno.test("ig-send-queue: hub request carries the Muse secret in the header only and asks for the queue action", () => {
+  const r = hubSendQueueRequest({ hubUrl: "https://vsemrziqxrrfcquxfnwd.supabase.co/", secret: "s3cret", limit: 9999 });
+  assertEquals(r.url, "https://vsemrziqxrrfcquxfnwd.supabase.co/functions/v1/control-center-api");
+  assertEquals(r.init.headers["x-muse-ig-receipt-secret"], "s3cret");
+  assertEquals(JSON.parse(r.init.body), { action: "list_ig_dm_send_queue", limit: 250 });
+  assert(!r.init.body.includes("s3cret"));
+  assertThrows(() => hubSendQueueRequest({ hubUrl: "http://plain.example", secret: "x" }));
+  assertThrows(() => hubSendQueueRequest({ hubUrl: "https://ok.example", secret: " " }));
+});
+
+Deno.test("ig-send-queue: a hub 200 becomes a KNOWN envelope with the rows and the sender named", () => {
+  const out = igSendQueueEnvelope(200, {
+    ok: true, send_owner: "muse", receipt_action: "mark_manual_ig_dm_submitted", path: ["a", "b"],
+    total_count: 2, sendable_count: 1,
+    rows: [{ handoff_record_id: "r1", sendable: true, dm_body: "hi" }, { handoff_record_id: "r2", sendable: false, blockers: ["draft_pending"] }],
+  }, "s3cret");
+  assertEquals(out.status, 200);
+  assertEquals(out.body.resource, IG_SEND_QUEUE_RESOURCE);
+  assertEquals(out.body.status, "KNOWN");
+  assertEquals(out.body.row_count, 2);
+  assertEquals(out.body.sendable_count, 1);
+  assertEquals(out.body.send_owner, "muse");
+  assertEquals(out.body.human_verification_required, false);
+});
+
+Deno.test("ig-send-queue: a hub refusal is a 503 here, never an empty queue, and the secret is scrubbed", () => {
+  const out = igSendQueueEnvelope(403, { error: "muse_ig_receipt may only call mark_manual_ig_dm_submitted (s3cret)" }, "s3cret");
+  assertEquals(out.status, 503);
+  assertEquals(out.body.error, "hub_unavailable");
+  assertEquals(out.body.hub_status, 403);
+  assert(!JSON.stringify(out.body).includes("s3cret"));
+  const empty = igSendQueueEnvelope(200, { ok: true, rows: [] }, "");
+  assertEquals(empty.status, 200);
+  assertEquals(empty.body.row_count, 0);
+  assert(String((empty.body.notes as string[])[0]).startsWith("No approved, unsent Instagram DMs"));
 });

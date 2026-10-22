@@ -20,6 +20,9 @@ import {
   freshnessMinutes,
   rollUpStatus,
   parseSince,
+  IG_SEND_QUEUE_RESOURCE,
+  hubSendQueueRequest,
+  igSendQueueEnvelope,
   type ExecutiveEnvelope,
 } from "./contract.ts";
 
@@ -164,6 +167,34 @@ function resolveResource(url: URL): string | null {
   return withoutPrefix[0]?.toLowerCase() ?? null;
 }
 
+async function fetchIgSendQueue(url: URL): Promise<{ status: number; body: Record<string, unknown>; note?: string }> {
+  const secret = (Deno.env.get("MUSE_IG_RECEIPT_SECRET") ?? "").trim();
+  const hubUrl = (Deno.env.get("FANFUEL_HUB_URL") ?? "").trim();
+  if (!secret) return { status: 503, note: "MUSE_IG_RECEIPT_SECRET missing", body: { error: "not_configured", message: "MUSE_IG_RECEIPT_SECRET is not configured on this project." } };
+  if (!hubUrl) return { status: 503, note: "FANFUEL_HUB_URL missing", body: { error: "not_configured", message: "FANFUEL_HUB_URL is not configured on this project." } };
+  let request: ReturnType<typeof hubSendQueueRequest>;
+  try {
+    request = hubSendQueueRequest({ hubUrl, secret, limit: Number(url.searchParams.get("limit") ?? 100) });
+  } catch (e) {
+    const message = e instanceof Error ? e.message : "bad hub configuration";
+    return { status: 503, note: message.slice(0, 300), body: { error: "not_configured", message } };
+  }
+  let response: Response;
+  try {
+    response = await fetch(request.url, request.init);
+  } catch {
+    return { status: 502, note: "hub request failed", body: { error: "hub_unreachable", message: "FanFuel Hub request failed. Nothing was sent." } };
+  }
+  const text = await response.text();
+  let hubBody: unknown;
+  try {
+    hubBody = JSON.parse(text);
+  } catch {
+    hubBody = { ok: false, error: "hub returned a non-json response" };
+  }
+  return igSendQueueEnvelope(response.status, hubBody, secret);
+}
+
 function indexPayload() {
   return {
     service: "muse-executive",
@@ -176,7 +207,12 @@ function indexPayload() {
       authoritative_source: r.authoritative_source,
       filters: [...Object.keys(r.filters ?? {}), ...(r.sinceColumn ? ["since"] : [])],
       max_limit: r.maxLimit,
-    })),
+    })).concat([{
+      path: `/executive/${IG_SEND_QUEUE_RESOURCE}`,
+      authoritative_source: "FanFuel Hub control-center-api list_ig_dm_send_queue (live read)",
+      filters: ["limit"],
+      max_limit: 250,
+    }]),
     status_vocabulary: [
       "KNOWN",
       "AVAILABLE_NOT_CONNECTED",
@@ -199,6 +235,7 @@ function indexPayload() {
       "A commit in GitHub never implies a deployment: read /executive/verifications.",
       "An empty section means nothing real was recorded, not that everything is fine.",
       "Same-day agent posts (Instagram send packs, empty-queue notes) are GET /executive/workboard. The last 48 hours also appear in /executive/brief section workboard, field detail. Scope required: read.",
+      "Instagram DMs: Claude composes in the Hub, Grok approves, Muse sends. GET /executive/ig-send-queue is the live list of approved, unsent DMs with the exact text and handle; after sending, record the receipt with muse-workboard record_ig_dm_receipt.",
     ],
   };
 }
@@ -257,6 +294,15 @@ serve(async (req) => {
       429,
       { "Retry-After": String(RATE_LIMIT_WINDOW_SECONDS) },
     );
+  }
+
+  // 3b. Live pass-through: the approved Instagram send queue on FanFuel Hub.
+  // The Hub owns drafts and approvals, so nothing is copied into a muse_ view.
+  // The Muse secret is read from the environment here and never returned.
+  if (resourceName === IG_SEND_QUEUE_RESOURCE) {
+    const out = await fetchIgSendQueue(url);
+    await audit(supabase, req, { token_label: label, resource: resourceName, http_status: out.status, note: out.note });
+    return json(out.body, out.status);
   }
 
   // 4. Index.
