@@ -4,7 +4,7 @@
  * Postgres is never surfaced: callers throw a stable code.
  */
 import type { SupabaseClient } from "https://esm.sh/@supabase/supabase-js@2.49.1";
-import { buildPacket } from "../agent-hub/contract.ts";
+import { buildPacket } from "./agentHubContract.ts";
 import {
   ALERT_ROLES,
   CLAUDE_INBOX_AGENT,
