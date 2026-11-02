@@ -20,6 +20,9 @@ import {
   freshnessMinutes,
   rollUpStatus,
   parseSince,
+  filterValueRejection,
+  appliedFilterValue,
+  classifyExecutiveReadError,
   IG_SEND_QUEUE_RESOURCE,
   hubSendQueueRequest,
   igSendQueueEnvelope,
@@ -345,18 +348,21 @@ serve(async (req) => {
   for (const [param, column] of Object.entries(spec.filters ?? {})) {
     const raw = url.searchParams.get(param);
     if (raw === null) continue;
-    // Filter values are compared for equality only, and constrained to a safe
-    // character set so nothing resembling a PostgREST operator can be injected.
-    const value = raw.trim().slice(0, 100);
-    if (!/^[A-Za-z0-9_.:\- ]+$/.test(value)) {
+    // UUID filters are checked before the query. A truncated id is a 400,
+    // not a Postgres 22P02 that used to surface as "the board is down".
+    // Other values stay equality-only and inside a safe character set so
+    // nothing resembling a PostgREST operator can be injected.
+    const rejection = filterValueRejection(param, column, raw);
+    if (rejection) {
       await audit(supabase, req, {
         token_label: label,
         resource: resourceName,
         http_status: 400,
         note: `rejected filter value for ${param}`,
       });
-      return json({ error: "invalid_filter", message: `Filter "${param}" contains unsupported characters.` }, 400);
+      return json(rejection, 400);
     }
+    const value = appliedFilterValue(param, column, raw);
     query = query.eq(column, value);
     appliedFilters[param] = value;
   }
@@ -383,22 +389,16 @@ serve(async (req) => {
 
   const { data, error } = await query;
   if (error) {
+    // 22P02 is a bad filter the pre-check missed. Anything else is a real
+    // read failure: 503, with a short code and no database message.
+    const classified = classifyExecutiveReadError(error, appliedFilters, resourceName);
     await audit(supabase, req, {
       token_label: label,
       resource: resourceName,
-      http_status: 503,
-      note: `read failed: ${error.message}`.slice(0, 300),
+      http_status: classified.status,
+      note: `read failed (${classified.status}): ${error.code ?? "none"} ${error.message}`.slice(0, 300),
     });
-    return json(
-      {
-        error: "read_failed",
-        message: "The executive view could not be read.",
-        resource: resourceName,
-        // Surfaces the "schema present in GitHub but not live" case honestly.
-        hint: "If this persists, the Muse migration may not be applied to the live database yet.",
-      },
-      503,
-    );
+    return json(classified.body, classified.status);
   }
 
   const rows = redact((data ?? []) as Record<string, unknown>[]);

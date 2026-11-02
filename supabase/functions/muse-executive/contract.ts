@@ -221,6 +221,111 @@ export function parseSince(value: string | null): string | null {
   return d.toISOString();
 }
 
+/**
+ * Columns compared with equality that Postgres stores as uuid.
+ * Param names and column names are both checked: a future `?mission=`
+ * mapped onto `mission_id` is still a uuid filter.
+ */
+export const UUID_COLUMNS = new Set(["mission_id", "task_id", "improvement_id"]);
+
+/**
+ * Canonical 36-character UUID (8-4-4-4-12 hex). Postgres accepts this form.
+ * A truncated id such as `6f14b53d` must fail here, before the query.
+ */
+export const FULL_UUID_RE =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+export function isUuidFilter(param: string, column: string): boolean {
+  return UUID_COLUMNS.has(param) || UUID_COLUMNS.has(column);
+}
+
+export function invalidUuidFilterBody(field: string): {
+  error: "invalid_filter";
+  field: string;
+  message: string;
+} {
+  return {
+    error: "invalid_filter",
+    field,
+    message: `${field} must be a full 36-character UUID; omit it to list all`,
+  };
+}
+
+/**
+ * Reject a bad filter before it is sent to Postgres.
+ * UUID filters get the id-specific 400. Other filters keep the character-set check.
+ */
+export function filterValueRejection(
+  param: string,
+  column: string,
+  raw: string,
+): { error: "invalid_filter"; field?: string; message: string } | null {
+  if (isUuidFilter(param, column)) {
+    if (!FULL_UUID_RE.test(raw.trim())) return invalidUuidFilterBody(param);
+    return null;
+  }
+  const value = raw.trim().slice(0, 100);
+  if (!/^[A-Za-z0-9_.:\- ]+$/.test(value)) {
+    return { error: "invalid_filter", message: `Filter "${param}" contains unsupported characters.` };
+  }
+  return null;
+}
+
+/** Value actually compared. UUID filters keep the trimmed 36-character id. */
+export function appliedFilterValue(param: string, column: string, raw: string): string {
+  const trimmed = raw.trim();
+  return isUuidFilter(param, column) ? trimmed : trimmed.slice(0, 100);
+}
+
+const SQLSTATE_RE = /^[0-9A-Z]{5}$/;
+const PGRST_RE = /^PGRST\d{3}$/;
+
+/** SQLSTATE or a PostgREST code. Anything else becomes a fixed token so the body cannot echo a message. */
+export function publicReadErrorCode(code: unknown): string {
+  if (typeof code === "string" && (SQLSTATE_RE.test(code) || PGRST_RE.test(code))) return code;
+  return "unavailable";
+}
+
+function fieldFromInvalidText(message: string, applied: Record<string, string>): string {
+  const quoted = /"([^"]*)"/.exec(message)?.[1];
+  if (quoted) {
+    const hit = Object.entries(applied).find(([, value]) => value.toLowerCase() === quoted.toLowerCase());
+    if (hit) return hit[0];
+  }
+  const uuidParams = Object.keys(applied).filter((name) => UUID_COLUMNS.has(name));
+  const bad = uuidParams.find((name) => !FULL_UUID_RE.test(applied[name] ?? ""));
+  if (bad) return bad;
+  if (uuidParams.length === 1) return uuidParams[0];
+  if (/uuid/i.test(message) && uuidParams.length > 0) return uuidParams[0];
+  const keys = Object.keys(applied).filter((name) => name !== "since");
+  if (keys.length === 1) return keys[0];
+  return uuidParams[0] ?? keys[0] ?? "filter";
+}
+
+/**
+ * Postgres 22P02 (invalid_text_representation) is a bad filter, not an outage.
+ * Every other read failure stays a 503 and carries only a short error code.
+ */
+export function classifyExecutiveReadError(
+  error: { code?: string | null; message?: string | null },
+  applied: Record<string, string>,
+  resource: string,
+): { status: 400 | 503; body: Record<string, unknown> } {
+  if (typeof error.code === "string" && error.code.toUpperCase() === "22P02") {
+    return { status: 400, body: invalidUuidFilterBody(fieldFromInvalidText(error.message ?? "", applied)) };
+  }
+  return {
+    status: 503,
+    body: {
+      error: "read_failed",
+      code: publicReadErrorCode(error.code),
+      message: "The executive view could not be read.",
+      resource,
+      hint: "If this persists, the Muse migration may not be applied to the live database yet.",
+    },
+  };
+}
+
 const REDACT_KEY = /(secret|token|api[_-]?key|password|passwd|credential|bearer|jwt|authorization|service[_-]?role)/i;
 
 export function redact<T>(rows: T[]): T[] {
