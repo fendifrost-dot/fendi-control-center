@@ -20,10 +20,12 @@ and belongs in `fan-growth-pilot/supabase/migrations/`.
 | `mcp-playlist-discovery` edge function | ✅ live — `POST /mcp` without a bearer returns `401 missing_bearer` with a correct `WWW-Authenticate` header |
 | `mcp-sync-discovery` edge function | ✅ live — same `401` behaviour; OAuth metadata at `/.well-known/oauth-authorization-server` returns `200` with `scopes_supported: ["sync_discovery"]` |
 | Consent pages `/admin/mcp-playlist-authorize` and `/admin/mcp-sync-authorize` | ✅ published — both route names are present in the live `index-*.js` bundle at `fan-growth-pilot.lovable.app` |
-| **AGH Playlist Discovery** connector on claude.ai | ❌ `needs_reconnect` (`ListConnectors`, installedServerId `0af94910-b480-457e-a515-8f8f8e55c6a3`) |
-| **AGH Sync Discovery** connector on claude.ai | ❌ **never installed** — zero `sync_discovery` tokens have ever been issued (`agh_mcp_oauth_tokens` holds 375 rows, all `scope = playlist_discovery`) |
-| Sync connector attached to the 8:30a and 12:00p scheduled tasks | ❌ cannot be, until it is installed |
-| Sliding-refresh migration | 📝 staged in this repo, validated on a local Postgres 16, **not applied**, **not committed to fan-growth-pilot** |
+| **AGH Playlist Discovery** connector on claude.ai | ✅ reconnected 2026-11-09 — live family, expires 2026-12-09 16:24Z (30-day cap still in force, see Step 4) |
+| **AGH Sync Discovery** connector on claude.ai | ✅ installed and authorized 2026-11-09 — live family, expires 2026-12-09 16:38Z; the 8:30a station on 2026-11-12 wrote targets, verifications and opportunities through it |
+| Sync connector attached to the 8:30a and 12:00p scheduled tasks | ✅ in effect — the 2026-11-12 8:30a station used it (note: `list_triggers.mcp_connections` still lists only the playlist connector on those tasks, so that field is not the source of truth) |
+| Sliding-refresh migration | 📝 staged in this repo, validated on a local Postgres 16, **not applied** (`pg_get_functiondef` on 2026-11-12 still has no `interval '30 days'`), **not committed to fan-growth-pilot** — both connectors will die again 2026-12-09 without it |
+| `agh_handoff_batches` counter columns (`advance_sync_batch` schema error) | ✅ **applied 2026-11-12 14:36Z** via the Lovable SQL path — see Step 5 |
+| Station cron DST drift (fired 1h early since 2026-11-01) | ✅ **fixed 2026-11-12** — see Step 6 |
 | `CLAUDE_AGENT_SECRET` | not involved in either failure; do not check it, do not provision it |
 | Runway connector `needs_reconnect` | unrelated to AGH; ignore for this handoff |
 
@@ -199,6 +201,64 @@ Only after Steps 1a, 2a, 3a and 4c print the expected values: update the status 
 top of this file, and add one line to `fan-growth-pilot/docs/agh-rules/agh-playlist-supply-blockers.md`
 saying the connectors expire only after 30 idle days, so a `needs_reconnect` after this date is
 a real event to report, not a monthly tax.
+
+## Step 5 — `advance_sync_batch` schema defect (DONE 2026-11-12, recorded here for the ledger)
+
+**Symptom (5 days, 7 stations, 11 failed calls, 11-09 → 11-12):** every `advance_sync_batch` call
+returned verbatim `Could not find the 'approved_count' column of 'agh_handoff_batches' in the schema
+cache`, while `submit_sync_targets`, `verify_sync_contacts` and `submit_sync_opportunities` succeeded
+in the same runs. 121 `sync_research_targets` and 45 `sync_research_opportunities` sat with
+`batch_id null`; zero `batch_kind = 'sync'` rows had ever existed in `agh_handoff_batches`.
+
+**Root cause:** `fan-growth-pilot/supabase/migrations/20260911150000_sync_operating_stack.sql` was
+applied to the live Hub *except* its lines 252–262, the `alter table public.agh_handoff_batches add
+column if not exists …` block (nine columns: `raw_count`, `verified_count`, `opportunity_count`,
+`drafted_count`, `approved_count`, `submitted_count`, `rejected_count`, `response_count`,
+`source_evidence_summary`). Every other object in that migration (sync tables, `batch_id` columns,
+OAuth constraint and RPCs) was present. `_shared/sync-research.ts` `advanceSyncBatch()` inserts all
+nine, so PostgREST rejected the insert before any row was written.
+
+**Fix applied (2026-11-12 14:36Z, Lovable `query_database` = the Lovable SQL editor path):** that
+block, verbatim, plus `notify pgrst, 'reload schema'`. No code change, no redeploy: the committed
+migration was simply not fully applied. Nothing new needs committing to `fan-growth-pilot`.
+
+**Verified, from real output:**
+
+```sql
+select string_agg(column_name, ',' order by ordinal_position) from information_schema.columns
+where table_schema='public' and table_name='agh_handoff_batches'
+  and column_name in ('raw_count','verified_count','opportunity_count','drafted_count',
+                      'approved_count','submitted_count','rejected_count','response_count','source_evidence_summary');
+```
+→ all nine returned, `int not null default 0` / `text`.
+
+* A `do $$ … insert into agh_handoff_batches (… the exact column set `advanceSyncBatch` uses …);
+  raise exception 'ROLLBACK_PROBE_OK'; $$` block raised `ROLLBACK_PROBE_OK` — i.e. the insert
+  succeeded and was rolled back; no probe row exists.
+* PostgREST schema cache, with the app's public anon key:
+  `GET /rest/v1/agh_handoff_batches?select=approved_count&limit=1` → `200`; same for
+  `response_count` and `source_evidence_summary`; control `select=no_such_column_xyz` → `400`.
+
+**What the next sync station must show:** `advance_sync_batch` returns a batch id, and
+`select count(*) from public.agh_handoff_batches where batch_kind='sync'` goes from `0` to `≥ 1`.
+The ~66 stranded targets / ~24 opportunities from 11-09 → 11-12 are batchable by id; batching
+them is the station's (or Fendi's) call, not this handoff's.
+
+## Step 6 — Station schedule DST drift (DONE 2026-11-12)
+
+All four AGH station tasks were pinned to UTC and fired an hour early since DST ended on
+2026-11-01 (the "8:30a" station fired at 07:33 CT). Rewritten with `CRON_TZ=America/Chicago` at
+their labelled times: 4:30a `30 4`, 7:00a `0 7`, 8:30a `30 8`, 12:00p `0 12`. Verify with
+`list_triggers`: each `cron_expression` starts with `CRON_TZ=America/Chicago`.
+
+## Still open after 2026-11-12
+
+1. **Step 4 (sliding refresh)** — both connector families expire **2026-12-09**. Needs a session with
+   `fan-growth-pilot` push access to commit `docs/agh/20261107190000_mcp_oauth_sliding_refresh.sql`
+   as a migration there, then apply it via Lovable SQL.
+2. The sync-lane asks that are Fendi's, from the 11-12 sync log: the Meditate `sync_eligible`
+   approval record, the Wizards DMV-connection answer, dedupe-key normalisation (a `fan-growth-pilot`
+   code change), and retiring the four stub target rows named there.
 
 ---
 
