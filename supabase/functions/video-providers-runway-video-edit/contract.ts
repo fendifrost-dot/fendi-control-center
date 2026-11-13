@@ -44,6 +44,13 @@ export type RunwayVideoEditModel = {
   minCredits: number;
   /** Fixed ratio the contract needs, where the model requires one. */
   ratio?: string;
+  /**
+   * Runway's name for the source clip. The AVT request always carries that clip as
+   * `videoUri`; this field is the name on the body Runway receives.
+   * SDK video_to_video params, read 2026-11-13: seedance2_5 is promptVideo;
+   * aleph2 and gemini_omni_flash / gemini_omni_flash_1.1 stay videoUri.
+   */
+  videoField: "videoUri" | "promptVideo";
   source: string;
 };
 
@@ -64,6 +71,7 @@ export const RUNWAY_VIDEO_EDIT_MODELS: Record<string, RunwayVideoEditModel> = {
     creditsPerOutputSecond: 28,
     creditsPerInputSecond: 0,
     minCredits: 56,
+    videoField: "videoUri",
     source:
       "Aleph 2.0: 'Edit one frame and Aleph 2.0 modifies the rest of your video to match'; keyframes are edited frames of THIS video at timestamps (≤ 5); input ≤ 30 s; 28 credits/s with a 56-credit minimum (pricing page 2026-09-23)",
   },
@@ -76,8 +84,9 @@ export const RUNWAY_VIDEO_EDIT_MODELS: Record<string, RunwayVideoEditModel> = {
     creditsPerOutputSecond: 10,
     creditsPerInputSecond: 0,
     minCredits: 0,
+    videoField: "videoUri",
     source:
-      "video_to_video mode=edit with ≤ 5 image references; input ≤ 10 s; 10 credits/s (pricing page lists t2v/i2v; edit assumed the same until a real invoice proves otherwise). Runway 2026-09-23 (unbilled 400): in edit mode `ratio` is rejected — output orientation follows the input video and resolution is 720p; and `contentModeration` is rejected as an unrecognized key",
+      "video_to_video mode=edit with ≤ 5 image references; input ≤ 10 s; source clip field is videoUri (same as gemini_omni_flash in the SDK, read 2026-11-13); 10 credits/s (pricing page lists t2v/i2v; edit assumed the same until a real invoice proves otherwise). Runway 2026-09-23 (unbilled 400): in edit mode `ratio` is rejected — output orientation follows the input video and resolution is 720p; and `contentModeration` is rejected as an unrecognized key",
   },
   seedance2_5: {
     contract: "mode_edit",
@@ -88,8 +97,9 @@ export const RUNWAY_VIDEO_EDIT_MODELS: Record<string, RunwayVideoEditModel> = {
     creditsPerOutputSecond: 30,
     creditsPerInputSecond: 15,
     minCredits: 0,
+    videoField: "promptVideo",
     source:
-      "Seedance 2.5 video_to_video mode=edit (duration auto) with ≤ 30 image references; 720p: 30 credits/s output + 15 credits/s input = 45 credits/s",
+      "Seedance 2.5 video_to_video mode=edit (duration auto) with ≤ 30 image references; source clip field is promptVideo (videoUri is HTTP 400, Runway SDK read 2026-11-13); 720p: 30 credits/s output + 15 credits/s input = 45 credits/s",
   },
 };
 
@@ -318,10 +328,12 @@ export function checkCostAuthorization(params: {
 /** Build the exact Runway request body. Pure, so a dry run can show precisely what would be sent. */
 export function buildRunwayRequest(body: VideoEditBody): Record<string, unknown> {
   const model = RUNWAY_VIDEO_EDIT_MODELS[body.model];
+  // body.videoUri is the normalized clip URL from AVT. The key Runway expects depends on the model.
+  const clip = { [model.videoField]: body.videoUri };
   if (model.contract === "aleph2") {
     return {
       model: body.model,
-      videoUri: body.videoUri,
+      ...clip,
       promptText: body.promptText,
       ...(body.keyframes.length ? { keyframes: body.keyframes } : {}),
       ...(body.contentModeration ? { contentModeration: body.contentModeration } : {}),
@@ -329,7 +341,7 @@ export function buildRunwayRequest(body: VideoEditBody): Record<string, unknown>
   }
   return {
     model: body.model,
-    videoUri: body.videoUri,
+    ...clip,
     mode: "edit",
     promptText: body.promptText,
     duration: "auto",
