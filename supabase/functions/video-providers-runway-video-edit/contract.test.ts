@@ -194,6 +194,7 @@ Deno.test("builds the aleph2 contract with keyframes and no mode field", () => {
   const body = buildRunwayRequest(ok(aleph({ keyframes: [{ uri: IMG, seconds: 3.5 }], contentModeration: { publicFigureThreshold: "low" } })));
   assertEquals(body.model, "aleph2");
   assertEquals(body.videoUri, VIDEO);
+  assertEquals(body.promptVideo, undefined);
   assertEquals(body.mode, undefined);
   assertEquals((body.keyframes as unknown[]).length, 1);
   assertEquals(body.contentModeration, { publicFigureThreshold: "low" });
@@ -205,6 +206,9 @@ Deno.test("builds the mode_edit contract with references and duration auto, and 
   );
   assertEquals(omni.mode, "edit");
   assertEquals(omni.duration, "auto");
+  // gemini_omni_flash and gemini_omni_flash_1.1 still take videoUri (SDK, read 2026-11-13).
+  assertEquals(omni.videoUri, VIDEO);
+  assertEquals(omni.promptVideo, undefined);
   // Runway 2026-09-23: edit mode rejects `ratio` (orientation follows the input, 720p) and
   // `contentModeration` (unrecognized key) with 400 — both observed, both unbilled.
   assertEquals(omni.ratio, undefined);
@@ -212,11 +216,21 @@ Deno.test("builds the mode_edit contract with references and duration auto, and 
   assertEquals((omni.references as unknown[]).length, 1);
 
   // seedance2_5 derives its own ratio — sending one would be wrong.
+  // Its source clip is promptVideo. videoUri is the AVT→CC name only; Runway rejects it (HTTP 400).
   const seed = buildRunwayRequest(
-    ok({ model: "seedance2_5", videoUri: VIDEO, promptText: "edit", inputSeconds: 4, avtAuthorizedMaxCents: 500 }),
+    ok({ model: "seedance2_5", videoUri: VIDEO, promptText: "edit", inputSeconds: 4, avtAuthorizedMaxCents: 500, references: [{ uri: IMG }] }),
   );
+  assertEquals(seed, {
+    model: "seedance2_5",
+    promptVideo: VIDEO,
+    mode: "edit",
+    promptText: "edit",
+    duration: "auto",
+    references: [{ uri: IMG }],
+  });
+  assertEquals(seed.videoUri, undefined);
   assertEquals(seed.ratio, undefined);
-  assertEquals(seed.mode, "edit");
+  assertEquals(seed.contentModeration, undefined);
 });
 
 Deno.test("omits empty keyframe and reference arrays rather than sending []", () => {
