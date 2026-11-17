@@ -13,7 +13,7 @@
  * contain the host and a 4-character hint, never the URL or the key.
  */
 import { serve } from "https://deno.land/std@0.224.0/http/server.ts";
-import { createClient, type SupabaseClient } from "https://esm.sh/@supabase/supabase-js@2.49.1";
+import { createClient } from "https://esm.sh/@supabase/supabase-js@2.49.1";
 import { createMuseAlertStore, type StoredSubscriber, type SubscriberWrite } from "../_shared/museAlertStore.ts";
 import {
   canonicalJson,
@@ -35,6 +35,12 @@ import {
   type AlertRole,
   type SubscriberPublic,
 } from "../_shared/museAlerts.ts";
+import {
+  authenticateMuseToken,
+  databaseTimeoutBody,
+  isDatabaseTimeout,
+  MUSE_DB_TIMEOUT_MS,
+} from "../_shared/museTokenAuth.ts";
 
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
 const SERVICE_KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
@@ -53,38 +59,23 @@ function json(body: unknown, status = 200) {
   });
 }
 
-function timingSafeEqual(a: string, b: string): boolean {
-  if (a.length !== b.length) return false;
-  let diff = 0;
-  for (let i = 0; i < a.length; i++) diff |= a.charCodeAt(i) ^ b.charCodeAt(i);
-  return diff === 0;
-}
-
 function tokenFrom(req: Request): string | null {
   const header = req.headers.get("authorization") ?? "";
   if (header.toLowerCase().startsWith("bearer ")) return header.slice(7).trim() || null;
   return req.headers.get("x-muse-token")?.trim() || null;
 }
 
-async function authenticate(db: SupabaseClient, token: string | null) {
-  if (!token) return { ok: false as const, reason: "missing token" };
-  if (token === SERVICE_KEY) return { ok: false as const, reason: "service-role key rejected" };
-  if (ENV_TOKEN && timingSafeEqual(token, ENV_TOKEN)) {
-    return { ok: true as const, label: "env-bootstrap", scopes: ["read"] };
-  }
-  const hash = await sha256Hex(token);
-  const { data, error } = await db
-    .from("muse_api_tokens")
-    .select("id,label,scopes,expires_at,revoked_at")
-    .eq("token_sha256", hash)
-    .maybeSingle();
-  if (error || !data) return { ok: false as const, reason: "unknown token" };
-  if (data.revoked_at) return { ok: false as const, reason: "token revoked" };
-  if (data.expires_at && Date.parse(data.expires_at) < Date.now()) {
-    return { ok: false as const, reason: "token expired" };
-  }
-  await db.from("muse_api_tokens").update({ last_used_at: new Date().toISOString() }).eq("id", data.id);
-  return { ok: true as const, label: data.label as string, scopes: (data.scopes ?? []) as string[] };
+function createDb() {
+  return createClient(SUPABASE_URL, SERVICE_KEY, {
+    auth: { persistSession: false },
+    global: {
+      fetch: (input, init) => fetch(input, { ...init, signal: AbortSignal.timeout(MUSE_DB_TIMEOUT_MS) }),
+    },
+  });
+}
+
+function timeoutJson() {
+  return json(databaseTimeoutBody(), 503);
 }
 
 function hasScope(scopes: string[], scope: string): boolean {
@@ -230,10 +221,28 @@ async function disable(store: ReturnType<typeof createMuseAlertStore>, payload: 
 }
 
 serve(async (req) => {
+  try {
+    return await handle(req);
+  } catch (error) {
+    if (isDatabaseTimeout(error)) return timeoutJson();
+    console.error("muse_alerts_unhandled");
+    return json({ ok: false, error: "database_unavailable", message: "The database request failed." }, 503);
+  }
+});
+
+async function handle(req: Request): Promise<Response> {
   if (req.method === "OPTIONS") return new Response(null, { headers: cors });
-  const db = createClient(SUPABASE_URL, SERVICE_KEY, { auth: { persistSession: false } });
-  const auth = await authenticate(db, tokenFrom(req));
-  if (!auth.ok) return json({ ok: false, error: "unauthorized", message: auth.reason }, 401);
+  const db = createDb();
+  const auth = await authenticateMuseToken({
+    supabaseUrl: SUPABASE_URL,
+    serviceKey: SERVICE_KEY,
+    token: tokenFrom(req),
+    envToken: ENV_TOKEN,
+  });
+  if (!auth.ok) {
+    if (auth.status === 503) return json({ ok: false, error: auth.error, message: auth.message }, 503);
+    return json({ ok: false, error: "unauthorized", message: auth.message }, 401);
+  }
   const store = createMuseAlertStore(db);
   const url = new URL(req.url);
 
@@ -251,6 +260,7 @@ serve(async (req) => {
         const data = await store.listPublic();
         return json({ ok: true, row_count: data.length, data });
       } catch (e) {
+        if (isDatabaseTimeout(e)) return timeoutJson();
         const code = e instanceof Error ? e.message : "subscribers_read_failed";
         const mapped = httpFor(code);
         return json(mapped.body, mapped.status);
@@ -289,6 +299,7 @@ serve(async (req) => {
         data: page.data,
       });
     } catch (e) {
+      if (isDatabaseTimeout(e)) return timeoutJson();
       const code = e instanceof Error ? e.message : "events_read_failed";
       const mapped = httpFor(code);
       return json(mapped.body, mapped.status);
@@ -318,6 +329,7 @@ serve(async (req) => {
       const result = await store.ack(subscriber.id, items);
       return json({ ok: true, action: "ack", agent_key: subscriber.agent_key, ...result });
     } catch (e) {
+      if (isDatabaseTimeout(e)) return timeoutJson();
       const code = e instanceof Error && /^[a-z0-9_]+$/.test(e.message) ? e.message : "";
       if (!code) console.error("muse_alerts_ack_failed");
       const mapped = httpFor(code || "ack_rejected");
@@ -379,6 +391,7 @@ serve(async (req) => {
       responseBody = { ok: true, action, ...result };
     }
   } catch (e) {
+    if (isDatabaseTimeout(e)) return timeoutJson();
     const code = e instanceof Error && /^[a-z0-9_]+$/.test(e.message) ? e.message : "";
     if (!code) console.error("muse_alerts_failed");
     const mapped = httpFor(code || "rejected");
@@ -397,4 +410,4 @@ serve(async (req) => {
     });
   }
   return json(responseBody, status);
-});
+}
