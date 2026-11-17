@@ -18,7 +18,7 @@ import {
   redactReceiptSecret,
   hubControlCenterUrl,
   type WorkboardAction,
-} from "../muse-workboard/contract.ts";
+} from "./museWorkboardContract.ts";
 import { createMuseAlertStore } from "./museAlertStore.ts";
 import {
   addressPatch,

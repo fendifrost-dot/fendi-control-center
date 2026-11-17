@@ -137,7 +137,10 @@ https://wkzwcfmvnwolgrdpnygc.supabase.co/functions/v1/control-center-mcp/mcp
 
 Approve the consent page while signed in as the Control Center owner.
 
-For `ack_alerts`, register a pull subscriber whose `agent_key` is `chatgpt` (and `claude` if Claude will connect) through the existing `muse-alerts` `register_subscriber` action. That is the same registry the alert tools already use.
+`chatgpt` is already a pull subscriber. The Claude connector's subscriber is
+`supabase/migrations/20261117180000_muse_alert_claude_pull_subscriber.sql`
+(`agent_key` `claude`, alias `claude`, role `audit`). Do not add the alias
+`Claude`; that string belongs to `claude-code`.
 
 ## Report back
 
