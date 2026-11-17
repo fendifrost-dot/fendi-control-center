@@ -1,0 +1,474 @@
+/**
+ * Muse executive read contract.
+ *
+ * Provider-neutral and stable: Muse addresses semantic resources, never table
+ * names, so the underlying views can be reshaped without breaking the consumer.
+ * Read-only by construction — write/action paths remain elsewhere in Control Hub.
+ */
+
+export type DataStatus =
+  | "KNOWN"
+  | "AVAILABLE_NOT_CONNECTED"
+  | "SOURCE_EXISTS_ACCESS_NEEDED"
+  | "NOT_MEASURED"
+  | "UNKNOWN"
+  | "NEEDS_VERIFICATION";
+
+export type Confidence = "HIGH" | "MEDIUM" | "LOW";
+
+export interface ExecutiveEnvelope<T> {
+  resource: string;
+  generated_at: string;
+  data_timestamp: string | null;
+  authoritative_source: string;
+  freshness_minutes: number | null;
+  confidence: Confidence;
+  status: DataStatus;
+  human_verification_required: boolean;
+  evidence: string[];
+  row_count: number;
+  data: T[];
+  notes?: string[];
+}
+
+export interface ResourceSpec {
+  resource: string;
+  view: string;
+  authoritative_source: string;
+  timestampColumn: string | null;
+  orderBy?: { column: string; ascending: boolean };
+  filters?: Record<string, string>;
+  /** When set, `?since=` is a lower bound on this column (UTC), not an equality filter. */
+  sinceColumn?: string;
+  defaultLimit: number;
+  maxLimit: number;
+}
+
+export const RESOURCES: Record<string, ResourceSpec> = {
+  brief: {
+    resource: "brief", view: "muse_executive_brief",
+    authoritative_source: "Control Hub Muse layer (derived from domain systems)",
+    timestampColumn: "as_of", orderBy: { column: "rank", ascending: true },
+    filters: { section: "section", domain: "domain_key" }, defaultLimit: 200, maxLimit: 500,
+  },
+  portfolio: {
+    resource: "portfolio", view: "muse_portfolio_map",
+    authoritative_source: "Control Hub Muse layer (per-domain source of truth declared in muse_source_authority)",
+    timestampColumn: "as_of", orderBy: { column: "sort_order", ascending: true },
+    filters: { domain: "domain_key" }, defaultLimit: 50, maxLimit: 200,
+  },
+  "open-loops": {
+    resource: "open-loops", view: "muse_open_loops_live",
+    authoritative_source: "Control Hub Muse layer; resolution derived from domain systems",
+    timestampColumn: "last_evidence_at", orderBy: { column: "priority", ascending: true },
+    filters: { domain: "domain_key", state: "state", priority: "priority", category: "category" }, defaultLimit: 200, maxLimit: 500,
+  },
+  decisions: {
+    resource: "decisions", view: "muse_decisions_required",
+    authoritative_source: "Control Hub Muse decision register",
+    timestampColumn: "created_at", orderBy: { column: "decision_required_by", ascending: true },
+    filters: { domain: "domain_key" }, defaultLimit: 100, maxLimit: 300,
+  },
+  kpis: {
+    resource: "kpis", view: "muse_kpi_summary",
+    authoritative_source: "Domain systems via Control Hub; unmeasured metrics report status only",
+    timestampColumn: "data_timestamp", orderBy: { column: "sort_order", ascending: true },
+    filters: { domain: "domain_key", metric: "metric_key" }, defaultLimit: 200, maxLimit: 500,
+  },
+  systems: {
+    resource: "systems", view: "muse_system_health",
+    authoritative_source: "Live telemetry from the tables that own each fact",
+    timestampColumn: "latest_activity_at", orderBy: { column: "sort_order", ascending: true },
+    filters: { domain: "domain_key", status: "status" }, defaultLimit: 100, maxLimit: 300,
+  },
+  sources: {
+    resource: "sources", view: "muse_source_authority_state",
+    authoritative_source: "Control Hub Muse source authority register",
+    timestampColumn: "last_verified_at", orderBy: { column: "domain_key", ascending: true },
+    filters: { domain: "domain_key" }, defaultLimit: 200, maxLimit: 500,
+  },
+  conflicts: {
+    resource: "conflicts", view: "muse_source_conflicts_open",
+    authoritative_source: "Control Hub Muse conflict register (both sides preserved)",
+    timestampColumn: "detected_at", orderBy: { column: "detected_at", ascending: false },
+    filters: { domain: "domain_key" }, defaultLimit: 100, maxLimit: 300,
+  },
+  improvements: {
+    resource: "improvements", view: "muse_improvement_ledger",
+    authoritative_source: "Control Hub Muse 1% improvement ledger",
+    timestampColumn: "created_at", orderBy: { column: "review_at", ascending: true },
+    filters: { domain: "domain_key", verdict: "verdict", status: "status" }, defaultLimit: 100, maxLimit: 300,
+  },
+  missions: {
+    resource: "missions", view: "muse_mission_board",
+    authoritative_source: "Control Hub Muse mission board",
+    timestampColumn: "updated_at", orderBy: { column: "priority", ascending: true },
+    filters: { domain: "domain_key", status: "status", priority: "priority" }, defaultLimit: 100, maxLimit: 300,
+  },
+  "daily-improvements": {
+    resource: "daily-improvements", view: "muse_daily_improvement_board",
+    authoritative_source: "Control Hub Muse daily improvement engine",
+    timestampColumn: "created_at", orderBy: { column: "improvement_date", ascending: false },
+    filters: { domain: "domain_key", status: "status", priority: "priority" }, defaultLimit: 100, maxLimit: 300,
+  },
+  "agent-queue": {
+    resource: "agent-queue", view: "muse_agent_queue",
+    authoritative_source: "Control Hub Muse structured agent task queue",
+    timestampColumn: "updated_at", orderBy: { column: "priority", ascending: true },
+    filters: { domain: "domain_key", executor: "executor", state: "state", priority: "priority" }, defaultLimit: 200, maxLimit: 500,
+  },
+  "verification-queue": {
+    resource: "verification-queue", view: "muse_verification_queue",
+    authoritative_source: "Control Hub Muse verification queue",
+    timestampColumn: "claimed_completed_at", orderBy: { column: "claimed_completed_at", ascending: true },
+    filters: { domain: "domain_key", claimant: "claimant", state: "verification_state" }, defaultLimit: 100, maxLimit: 300,
+  },
+  "improvement-results": {
+    resource: "improvement-results", view: "muse_improvement_results",
+    authoritative_source: "Control Hub Muse impact ledger",
+    timestampColumn: "latest_measurement_at", orderBy: { column: "latest_measurement_at", ascending: false },
+    filters: { domain: "domain_key", verdict: "verdict", status: "status" }, defaultLimit: 100, maxLimit: 300,
+  },
+  "work-feed": {
+    resource: "work-feed", view: "muse_work_feed",
+    authoritative_source: "Control Hub Muse append-only work update feed",
+    timestampColumn: "created_at", orderBy: { column: "created_at", ascending: false },
+    sinceColumn: "created_at",
+    filters: {
+      domain: "domain_key",
+      actor: "actor",
+      type: "update_type",
+      // Same ids append_update writes. Exact match, so a save can be read back
+      // without scanning the feed.
+      task_id: "task_id",
+      improvement_id: "improvement_id",
+      mission_id: "mission_id",
+    },
+    defaultLimit: 200, maxLimit: 500,
+  },
+  // Canonical name for the same feed. Enki's reader was calling brief/decisions/
+  // improvements/verifications and 404ing anything that sounded like the board.
+  workboard: {
+    resource: "workboard", view: "muse_work_feed",
+    authoritative_source: "Control Hub Muse append-only workboard (muse_work_updates)",
+    timestampColumn: "created_at", orderBy: { column: "created_at", ascending: false },
+    sinceColumn: "created_at",
+    filters: {
+      domain: "domain_key",
+      actor: "actor",
+      type: "update_type",
+      task_id: "task_id",
+      improvement_id: "improvement_id",
+      mission_id: "mission_id",
+    },
+    defaultLimit: 50, maxLimit: 200,
+  },
+  // ASSIGNMENT + NOTE only. This is the Instagram send-pack correspondence.
+  assignments: {
+    resource: "assignments", view: "muse_workboard_assignments",
+    authoritative_source: "Control Hub Muse workboard ASSIGNMENT and NOTE rows",
+    timestampColumn: "created_at", orderBy: { column: "created_at", ascending: false },
+    sinceColumn: "created_at",
+    filters: {
+      domain: "domain_key",
+      actor: "actor",
+      type: "update_type",
+      task_id: "task_id",
+      improvement_id: "improvement_id",
+      mission_id: "mission_id",
+    },
+    defaultLimit: 50, maxLimit: 200,
+  },
+  "daily-reports": {
+    resource: "daily-reports", view: "muse_daily_report_board",
+    authoritative_source: "Control Hub Muse daily operating reports",
+    timestampColumn: "created_at", orderBy: { column: "created_at", ascending: false },
+    filters: { actor: "actor", cadence: "cadence", report_date: "report_date" },
+    defaultLimit: 60, maxLimit: 400,
+  },
+  verifications: {
+    resource: "verifications", view: "muse_verifications",
+    authoritative_source: "Control Hub Muse verification ledger; GitHub remains code truth",
+    timestampColumn: "claimed_at", orderBy: { column: "claimed_at", ascending: false },
+    filters: { state: "verification_state" }, defaultLimit: 100, maxLimit: 300,
+  },
+};
+
+/**
+ * Lower bound for `?since=` on workboard reads.
+ * Date-only values mean the start of that UTC day. Offsets are rejected:
+ * `+` in a query string is easy to turn into a space, so callers send `Z`.
+ */
+export function parseSince(value: string | null): string | null {
+  if (value === null) return null;
+  const trimmed = value.trim();
+  if (!trimmed) throw new Error("since is empty");
+  if (trimmed.length > 40) throw new Error("since is too long");
+  if (!/^\d{4}-\d{2}-\d{2}(?:T\d{2}:\d{2}(?::\d{2}(?:\.\d{1,6})?)?Z)?$/.test(trimmed)) {
+    throw new Error("since must be YYYY-MM-DD or YYYY-MM-DDTHH:MM:SSZ (UTC, Z suffix)");
+  }
+  const dateOnly = trimmed.length === 10;
+  const iso = dateOnly ? `${trimmed}T00:00:00.000Z` : trimmed;
+  const parsed = Date.parse(iso);
+  if (Number.isNaN(parsed)) throw new Error("since must be a real timestamp");
+  const d = new Date(parsed);
+  if (dateOnly) {
+    const [year, month, day] = trimmed.split("-").map((part) => Number(part));
+    if (d.getUTCFullYear() !== year || d.getUTCMonth() !== month - 1 || d.getUTCDate() !== day) {
+      throw new Error("since must be a real calendar date");
+    }
+  }
+  return d.toISOString();
+}
+
+/**
+ * Columns compared with equality that Postgres stores as uuid.
+ * Param names and column names are both checked: a future `?mission=`
+ * mapped onto `mission_id` is still a uuid filter.
+ */
+export const UUID_COLUMNS = new Set(["mission_id", "task_id", "improvement_id"]);
+
+/**
+ * Canonical 36-character UUID (8-4-4-4-12 hex). Postgres accepts this form.
+ * A truncated id such as `6f14b53d` must fail here, before the query.
+ */
+export const FULL_UUID_RE =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+export function isUuidFilter(param: string, column: string): boolean {
+  return UUID_COLUMNS.has(param) || UUID_COLUMNS.has(column);
+}
+
+export function invalidUuidFilterBody(field: string): {
+  error: "invalid_filter";
+  field: string;
+  message: string;
+} {
+  return {
+    error: "invalid_filter",
+    field,
+    message: `${field} must be a full 36-character UUID; omit it to list all`,
+  };
+}
+
+/**
+ * Reject a bad filter before it is sent to Postgres.
+ * UUID filters get the id-specific 400. Other filters keep the character-set check.
+ */
+export function filterValueRejection(
+  param: string,
+  column: string,
+  raw: string,
+): { error: "invalid_filter"; field?: string; message: string } | null {
+  if (isUuidFilter(param, column)) {
+    if (!FULL_UUID_RE.test(raw.trim())) return invalidUuidFilterBody(param);
+    return null;
+  }
+  const value = raw.trim().slice(0, 100);
+  if (!/^[A-Za-z0-9_.:\- ]+$/.test(value)) {
+    return { error: "invalid_filter", message: `Filter "${param}" contains unsupported characters.` };
+  }
+  return null;
+}
+
+/** Value actually compared. UUID filters keep the trimmed 36-character id. */
+export function appliedFilterValue(param: string, column: string, raw: string): string {
+  const trimmed = raw.trim();
+  return isUuidFilter(param, column) ? trimmed : trimmed.slice(0, 100);
+}
+
+const SQLSTATE_RE = /^[0-9A-Z]{5}$/;
+const PGRST_RE = /^PGRST\d{3}$/;
+
+/** SQLSTATE or a PostgREST code. Anything else becomes a fixed token so the body cannot echo a message. */
+export function publicReadErrorCode(code: unknown): string {
+  if (typeof code === "string" && (SQLSTATE_RE.test(code) || PGRST_RE.test(code))) return code;
+  return "unavailable";
+}
+
+function fieldFromInvalidText(message: string, applied: Record<string, string>): string {
+  const quoted = /"([^"]*)"/.exec(message)?.[1];
+  if (quoted) {
+    const hit = Object.entries(applied).find(([, value]) => value.toLowerCase() === quoted.toLowerCase());
+    if (hit) return hit[0];
+  }
+  const uuidParams = Object.keys(applied).filter((name) => UUID_COLUMNS.has(name));
+  const bad = uuidParams.find((name) => !FULL_UUID_RE.test(applied[name] ?? ""));
+  if (bad) return bad;
+  if (uuidParams.length === 1) return uuidParams[0];
+  if (/uuid/i.test(message) && uuidParams.length > 0) return uuidParams[0];
+  const keys = Object.keys(applied).filter((name) => name !== "since");
+  if (keys.length === 1) return keys[0];
+  return uuidParams[0] ?? keys[0] ?? "filter";
+}
+
+/**
+ * Postgres 22P02 (invalid_text_representation) is a bad filter, not an outage.
+ * Every other read failure stays a 503 and carries only a short error code.
+ */
+export function classifyExecutiveReadError(
+  error: { code?: string | null; message?: string | null },
+  applied: Record<string, string>,
+  resource: string,
+): { status: 400 | 503; body: Record<string, unknown> } {
+  if (typeof error.code === "string" && error.code.toUpperCase() === "22P02") {
+    return { status: 400, body: invalidUuidFilterBody(fieldFromInvalidText(error.message ?? "", applied)) };
+  }
+  return {
+    status: 503,
+    body: {
+      error: "read_failed",
+      code: publicReadErrorCode(error.code),
+      message: "The executive view could not be read.",
+      resource,
+      hint: "If this persists, the Muse migration may not be applied to the live database yet.",
+    },
+  };
+}
+
+const REDACT_KEY = /(secret|token|api[_-]?key|password|passwd|credential|bearer|jwt|authorization|service[_-]?role)/i;
+
+export function redact<T>(rows: T[]): T[] {
+  return rows.map((row) => {
+    if (row === null || typeof row !== "object") return row;
+    const out: Record<string, unknown> = {};
+    for (const [k, v] of Object.entries(row as Record<string, unknown>)) {
+      if (REDACT_KEY.test(k)) { out[k] = "[redacted]"; continue; }
+      out[k] = v && typeof v === "object" && !Array.isArray(v) ? redact([v])[0] : v;
+    }
+    return out as T;
+  });
+}
+
+export function newestTimestamp(rows: Record<string, unknown>[], column: string | null): string | null {
+  if (!column) return null;
+  let newest: number | null = null;
+  for (const row of rows) {
+    const raw = row[column];
+    if (typeof raw !== "string") continue;
+    const t = Date.parse(raw);
+    if (Number.isNaN(t)) continue;
+    if (newest === null || t > newest) newest = t;
+  }
+  return newest === null ? null : new Date(newest).toISOString();
+}
+
+export function freshnessMinutes(dataTimestamp: string | null, now = Date.now()): number | null {
+  if (!dataTimestamp) return null;
+  const t = Date.parse(dataTimestamp);
+  if (Number.isNaN(t)) return null;
+  return Math.max(0, Math.floor((now - t) / 60000));
+}
+
+export function rollUpStatus(rows: Record<string, unknown>[]): {
+  status: DataStatus; confidence: Confidence; human_verification_required: boolean;
+} {
+  const order: DataStatus[] = ["KNOWN", "NEEDS_VERIFICATION", "AVAILABLE_NOT_CONNECTED", "SOURCE_EXISTS_ACCESS_NEEDED", "NOT_MEASURED", "UNKNOWN"];
+  let worstIndex = 0;
+  let needsHuman = false;
+  let sawStatus = false;
+  for (const row of rows) {
+    const s = row["data_status"];
+    if (typeof s === "string") {
+      const i = order.indexOf(s as DataStatus);
+      if (i >= 0) { sawStatus = true; if (i > worstIndex) worstIndex = i; }
+    }
+    if (row["human_verification_required"] === true) needsHuman = true;
+  }
+  if (rows.length === 0) return { status: "NOT_MEASURED", confidence: "LOW", human_verification_required: false };
+  const status = sawStatus ? order[worstIndex] : "KNOWN";
+  const confidence: Confidence = status === "KNOWN" ? "HIGH" : status === "NEEDS_VERIFICATION" ? "MEDIUM" : "LOW";
+  return { status, confidence, human_verification_required: needsHuman || status !== "KNOWN" };
+}
+
+// ---------------------------------------------------------------------------
+// Live pass-through: the approved Instagram send queue on FanFuel Hub.
+//   Claude composes the DM in the Hub -> Grok approves -> Muse sends -> Muse
+//   records the receipt. The Hub is the system of record for drafts and
+//   approvals, so this resource is read live from control-center-api and is
+//   never copied into a muse_ view. The Muse secret stays server-side.
+// ---------------------------------------------------------------------------
+export const IG_SEND_QUEUE_RESOURCE = "ig-send-queue";
+export const IG_SEND_QUEUE_HUB_ACTION = "list_ig_dm_send_queue";
+
+export function hubSendQueueUrl(hubUrl: string): string {
+  const base = hubUrl.trim().replace(/\/+$/, "");
+  if (!/^https:\/\//i.test(base)) throw new Error("FANFUEL_HUB_URL must be https");
+  return `${base}/functions/v1/control-center-api`;
+}
+
+export function hubSendQueueRequest(opts: { hubUrl: string; secret: string; limit?: number }): {
+  url: string;
+  init: { method: "POST"; headers: Record<string, string>; body: string; redirect: "error" };
+} {
+  const secret = opts.secret.trim();
+  if (!secret) throw new Error("MUSE_IG_RECEIPT_SECRET is not configured");
+  const limit = Math.min(Math.max(Math.trunc(Number(opts.limit) || 100), 1), 250);
+  return {
+    url: hubSendQueueUrl(opts.hubUrl),
+    init: {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "x-muse-ig-receipt-secret": secret },
+      body: JSON.stringify({ action: IG_SEND_QUEUE_HUB_ACTION, limit }),
+      redirect: "error",
+    },
+  };
+}
+
+function scrubSecret(value: unknown, secret: string): unknown {
+  if (!secret) return value;
+  const text = JSON.stringify(value ?? null);
+  if (!text.includes(secret)) return value;
+  return JSON.parse(text.split(secret).join("[redacted]"));
+}
+
+/** Wrap the Hub answer in the executive envelope; a non-200 Hub reply is a 503 here, never a fake queue. */
+export function igSendQueueEnvelope(
+  hubStatus: number,
+  hubBody: unknown,
+  secret: string,
+): { status: number; body: Record<string, unknown>; note?: string } {
+  const body = scrubSecret(hubBody, secret) as Record<string, unknown> | null;
+  const generatedAt = new Date().toISOString();
+  if (hubStatus !== 200 || !body || body.ok !== true || !Array.isArray(body.rows)) {
+    const reason = body && typeof body.error === "string" ? body.error : `hub returned ${hubStatus}`;
+    return {
+      status: 503,
+      note: `hub ${hubStatus}: ${reason}`.slice(0, 300),
+      body: {
+        error: "hub_unavailable",
+        resource: IG_SEND_QUEUE_RESOURCE,
+        hub_status: hubStatus,
+        message: reason,
+        hint: hubStatus === 403
+          ? "The Hub refused the Muse credential for list_ig_dm_send_queue. control-center-api may not be redeployed with that action, or MUSE_IG_RECEIPT_SECRET differs between projects."
+          : "FanFuel Hub did not answer with a send queue. Nothing was sent.",
+      },
+    };
+  }
+  const rows = body.rows as Record<string, unknown>[];
+  const envelope: ExecutiveEnvelope<Record<string, unknown>> & Record<string, unknown> = {
+    resource: IG_SEND_QUEUE_RESOURCE,
+    generated_at: generatedAt,
+    data_timestamp: generatedAt,
+    authoritative_source: "FanFuel Hub control-center-api list_ig_dm_send_queue (live read; the Hub owns drafts and approvals)",
+    freshness_minutes: 0,
+    confidence: "HIGH",
+    status: "KNOWN",
+    human_verification_required: false,
+    evidence: ["hub:control-center-api list_ig_dm_send_queue", "project:vsemrziqxrrfcquxfnwd"],
+    row_count: rows.length,
+    data: rows,
+    send_owner: body.send_owner ?? "muse",
+    receipt_action: body.receipt_action ?? "mark_manual_ig_dm_submitted",
+    path: body.path ?? [],
+    sendable_count: body.sendable_count ?? rows.filter((r) => r.sendable === true).length,
+    total_count: body.total_count ?? rows.length,
+    notes: [
+      "Send each row with sendable=true: dm_body to ig_handle, exactly as written. Then record the receipt with muse-workboard record_ig_dm_receipt using handoff_record_id.",
+      "A row with blockers is not yours to fix: skip it and say why on the board. Never hand-send, never edit the copy, never send a row twice.",
+    ],
+  };
+  if (rows.length === 0) envelope.notes = ["No approved, unsent Instagram DMs. This means Grok has approved nothing that is still unsent, not that the lane is broken.", ...(envelope.notes ?? [])];
+  return { status: 200, body: envelope };
+}

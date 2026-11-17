@@ -14,7 +14,7 @@ import {
   appliedFilterValue,
   classifyExecutiveReadError,
   type ExecutiveEnvelope,
-} from "../muse-executive/contract.ts";
+} from "./museExecutiveContract.ts";
 
 export const EXECUTIVE_RATE_LIMIT_REQUESTS = Number(Deno.env.get("MUSE_RATE_LIMIT") ?? "60");
 export const EXECUTIVE_RATE_LIMIT_WINDOW_SECONDS = 60;

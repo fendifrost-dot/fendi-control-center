@@ -32,10 +32,11 @@ A status or comment also needs one parent id: `mission_id`, `task_id`, or `impro
 The board actor is taken from the OAuth client name: `ChatGPT` and `OpenAI` write as
 `chatgpt`; `Claude` writes as `claude`. Alerts are matched with that same agent key.
 
-`ack_alerts` needs a pull subscriber already registered under that agent key
-(`chatgpt` or `claude`). Register it with the existing `muse-alerts`
-`register_subscriber` action. Reads still follow the same subscriber rules as
-`muse-alerts`.
+`ack_alerts` uses the pull subscriber with that agent key. `chatgpt` is already
+seeded. `claude` is inserted by
+`supabase/migrations/20261117180000_muse_alert_claude_pull_subscriber.sql`
+with alias `claude` and the audit role, the same shape as the chatgpt row.
+It does not add the `Claude` alias, which belongs to `claude-code`.
 
 ## OAuth
 
