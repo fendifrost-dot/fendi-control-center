@@ -4704,6 +4704,20 @@ export type Database = {
         }
       }
       muse_alert_route_coding_inbox: { Args: never; Returns: number }
+      muse_resolve_api_token: {
+        Args: { p_token_sha256: string }
+        Returns: {
+          expires_at: string
+          id: string
+          label: string
+          revoked_at: string
+          scopes: string[]
+        }[]
+      }
+      prune_cron_job_run_details: {
+        Args: { batch_size?: number; keep_rows?: number }
+        Returns: number
+      }
     }
     Enums: {
       [_ in never]: never
