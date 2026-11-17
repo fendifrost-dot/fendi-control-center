@@ -12,6 +12,7 @@ import Ops from "./pages/Ops";
 import RemoteControlPage from "./pages/RemoteControlPage";
 import Test from "./pages/Test";
 import Login from "./pages/Login";
+import McpAuthorizePage from "./pages/oauth/McpAuthorizePage";
 import ForgotPassword from "./pages/ForgotPassword";
 import ResetPassword from "./pages/ResetPassword";
 import NotFound from "./pages/NotFound";
@@ -44,6 +45,7 @@ const App = () => (
         <BrowserRouter>
           <Routes>
             <Route path="/login" element={<Login />} />
+            <Route path="/oauth/mcp-authorize" element={<McpAuthorizePage />} />
             <Route path="/forgot-password" element={<ForgotPassword />} />
             <Route path="/reset-password" element={<ResetPassword />} />
             <Route path="/" element={<HubHomePage />} />

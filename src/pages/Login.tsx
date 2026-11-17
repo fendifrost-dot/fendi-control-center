@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { Link, useLocation, useNavigate } from "react-router-dom";
 import { supabase } from "@/integrations/supabase/client";
+import { safeReturnPath } from "@/lib/safeReturnPath";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -24,8 +25,8 @@ export default function Login() {
       setError(err.message);
     } else {
       // Return to the page that sent you here (e.g. the Agent Hub app), else the old default.
-      const from = (location.state as { from?: string } | null)?.from;
-      navigate(from && from.startsWith("/") && from !== "/login" ? from : "/clients", { replace: true });
+      const from = safeReturnPath((location.state as { from?: string } | null)?.from);
+      navigate(from ?? "/clients", { replace: true });
     }
   }
 

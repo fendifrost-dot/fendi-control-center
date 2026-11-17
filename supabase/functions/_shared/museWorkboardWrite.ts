@@ -1,0 +1,297 @@
+/**
+ * Muse workboard writes shared by muse-workboard and the Control Center MCP.
+ * Validation, idempotency, and alert fan-out stay here so the two doors
+ * cannot drift. Callers authenticate first and pass the actor label.
+ */
+import type { SupabaseClient } from "https://esm.sh/@supabase/supabase-js@2.49.1";
+import {
+  isAction,
+  boundedString,
+  uuid,
+  oneOf,
+  reportDate,
+  reportSections,
+  receiptInputFrom,
+  parseIgDmReceipt,
+  hubReceiptRequest,
+  receiptOutcome,
+  redactReceiptSecret,
+  hubControlCenterUrl,
+  type WorkboardAction,
+} from "../muse-workboard/contract.ts";
+import { createMuseAlertStore } from "./museAlertStore.ts";
+import {
+  addressPatch,
+  addressedAgent,
+  addressedRole,
+  errorMessage,
+  eventFromAction,
+  fanoutAndDeliver,
+  readSealKey,
+} from "./museAlerts.ts";
+import { databaseTimeoutBody, isDatabaseTimeout } from "./museTokenAuth.ts";
+
+function iso(value: unknown, name: string): string | null {
+  if (value === null || value === undefined || value === "") return null;
+  if (typeof value !== "string" || Number.isNaN(Date.parse(value))) throw new Error(`${name} must be an ISO timestamp`);
+  return new Date(value).toISOString();
+}
+
+export async function executeWorkboard(
+  db: SupabaseClient,
+  action: WorkboardAction,
+  p: Record<string, unknown>,
+  actor: string,
+) {
+  if (action === "record_ig_dm_receipt") {
+    throw new Error("record_ig_dm_receipt is forwarded to FanFuel Hub");
+  }
+  if (action === "create_mission") {
+    const row = {
+      domain_key: boundedString(p.domain_key, "domain_key", 100, true), title: boundedString(p.title, "title", 300, true),
+      objective: boundedString(p.objective, "objective", 4000, true), business_outcome: boundedString(p.business_outcome, "business_outcome"),
+      owner: boundedString(p.owner, "owner", 200) ?? "Muse", executive_sponsor: "Fendi",
+      priority: oneOf(p.priority, "priority", ["P0", "P1", "P2", "P3"], "P2"), status: oneOf(p.status, "status", ["PROPOSED", "ACTIVE", "PAUSED"], "PROPOSED"),
+      metric: boundedString(p.metric, "metric"), baseline: boundedString(p.baseline, "baseline"), target: boundedString(p.target, "target"),
+      review_at: iso(p.review_at, "review_at"), source_ref: boundedString(p.source_ref, "source_ref"), created_by: actor,
+      notes: boundedString(p.notes, "notes"),
+    };
+    return await db.from("muse_missions").insert(row).select("*").single();
+  }
+  if (action === "create_improvement") {
+    const row = {
+      domain_key: boundedString(p.domain_key, "domain_key", 100, true), problem: boundedString(p.problem, "problem", 4000, true),
+      intervention: boundedString(p.intervention, "intervention", 4000, true), metric: boundedString(p.metric, "metric", 1000, true),
+      baseline: boundedString(p.baseline, "baseline"), expected_result: boundedString(p.expected_result, "expected_result"), owner: "Muse",
+      status: "PROPOSED", verdict: "PENDING", verification_state: "CLAIMED", improvement_date: boundedString(p.improvement_date, "improvement_date", 10),
+      function_name: boundedString(p.function_name, "function_name"), observation: boundedString(p.observation, "observation"), hypothesis: boundedString(p.hypothesis, "hypothesis"),
+      confidence: p.confidence ? oneOf(p.confidence, "confidence", ["HIGH", "MEDIUM", "LOW"]) : null,
+      risk: boundedString(p.risk, "risk"), reversible: typeof p.reversible === "boolean" ? p.reversible : null,
+      priority: p.priority ? oneOf(p.priority, "priority", ["P0", "P1", "P2", "P3"]) : "P2",
+      recommended_executor: boundedString(p.recommended_executor, "recommended_executor", 200), selected_by: actor,
+      mission_id: uuid(p.mission_id, "mission_id", false), definition_of_done: boundedString(p.definition_of_done, "definition_of_done"),
+      verification_requirement: boundedString(p.verification_requirement, "verification_requirement"),
+      owner_attention: p.owner_attention ? oneOf(p.owner_attention, "owner_attention", ["NONE", "INFORM", "APPROVAL", "DECISION", "DIRECT_INVOLVEMENT"]) : "NONE",
+      expected_impact: boundedString(p.expected_impact, "expected_impact"), observe_only_reason: boundedString(p.observe_only_reason, "observe_only_reason"),
+      review_at: iso(p.review_at, "review_at"), source_ref: boundedString(p.source_ref, "source_ref"), notes: boundedString(p.notes, "notes"),
+    };
+    return await db.from("muse_improvements").insert(row).select("*").single();
+  }
+  if (action === "create_task") {
+    const row = {
+      improvement_id: uuid(p.improvement_id, "improvement_id"), domain_key: boundedString(p.domain_key, "domain_key", 100, true),
+      title: boundedString(p.title, "title", 300, true), executor: boundedString(p.executor, "executor", 200, true), assigning_agent: actor,
+      objective: boundedString(p.objective, "objective"), instructions: boundedString(p.instructions, "instructions", 8000),
+      expected_artifact: boundedString(p.expected_artifact, "expected_artifact"), definition_of_done: boundedString(p.definition_of_done, "definition_of_done"),
+      priority: oneOf(p.priority, "priority", ["P0", "P1", "P2", "P3"], "P2"), state: "ASSIGNED", verification_state: "CLAIMED",
+      due_at: iso(p.due_at, "due_at"), source_ref: boundedString(p.source_ref, "source_ref"),
+      ...addressPatch(null, addressedRole(p.addressed_role)),
+    };
+    return await db.from("muse_improvement_tasks").insert(row).select("*").single();
+  }
+  if (action === "append_update") {
+    const row = {
+      domain_key: boundedString(p.domain_key, "domain_key", 100), mission_id: uuid(p.mission_id, "mission_id", false),
+      improvement_id: uuid(p.improvement_id, "improvement_id", false), task_id: uuid(p.task_id, "task_id", false), actor,
+      update_type: oneOf(p.update_type, "update_type", ["NOTE", "ASSIGNMENT", "STATUS", "BLOCKER", "EVIDENCE", "DECISION", "MEASUREMENT"], "NOTE"),
+      message: boundedString(p.message, "message", 8000, true), evidence_ref: boundedString(p.evidence_ref, "evidence_ref"),
+      ...addressPatch(addressedAgent(p.addressed_agent), addressedRole(p.addressed_role)),
+    };
+    if (!row.mission_id && !row.improvement_id && !row.task_id) throw new Error("one parent id is required");
+    return await db.from("muse_work_updates").insert(row).select("*").single();
+  }
+  if (action === "record_daily_report") {
+    const row = {
+      report_date: reportDate(p.report_date),
+      cadence: oneOf(p.cadence, "cadence", ["START_OF_DAY", "END_OF_DAY"]),
+      actor,
+      message: boundedString(p.message, "message", 8000, true),
+      sections: reportSections(p.sections),
+      evidence_ref: boundedString(p.evidence_ref, "evidence_ref"),
+      ...addressPatch(addressedAgent(p.addressed_agent), addressedRole(p.addressed_role)),
+    };
+    return await db.from("muse_daily_reports").insert(row).select("*").single();
+  }
+  if (action === "record_measurement") {
+    const row = {
+      improvement_id: uuid(p.improvement_id, "improvement_id"), measurement_type: oneOf(p.measurement_type, "measurement_type", ["BASELINE", "IMMEDIATE", "DAY_7", "DAY_30", "CUSTOM"]),
+      metric: boundedString(p.metric, "metric", 1000, true), value_text: boundedString(p.value_text, "value_text"),
+      value_numeric: typeof p.value_numeric === "number" ? p.value_numeric : null, unit: boundedString(p.unit, "unit", 100), delta_text: boundedString(p.delta_text, "delta_text"),
+      financial_impact: typeof p.financial_impact === "number" ? p.financial_impact : null, time_saved_minutes: typeof p.time_saved_minutes === "number" ? p.time_saved_minutes : null,
+      unintended_consequences: boundedString(p.unintended_consequences, "unintended_consequences"), evidence_ref: boundedString(p.evidence_ref, "evidence_ref"),
+      verification_state: oneOf(p.verification_state, "verification_state", ["CLAIMED", "ARTIFACT_VERIFIED", "SYSTEM_VERIFIED", "LIVE_VERIFIED"], "CLAIMED"), notes: boundedString(p.notes, "notes"),
+    };
+    if (row.value_text === null && row.value_numeric === null) throw new Error("value_text or value_numeric is required");
+    return await db.from("muse_improvement_measurements").insert(row).select("*").single();
+  }
+  if (action === "update_task_state") {
+    const id = uuid(p.task_id, "task_id")!;
+    const state = oneOf(p.state, "state", ["ASSIGNED", "IN_PROGRESS", "WAITING", "BLOCKED", "IMPLEMENTED", "VERIFICATION", "COMPLETE", "CANCELLED"]);
+    const patch: Record<string, unknown> = { state, blocker: boundedString(p.blocker, "blocker") };
+    if (["IMPLEMENTED", "VERIFICATION", "COMPLETE"].includes(state)) patch.claimed_completed_at = new Date().toISOString();
+    return await db.from("muse_improvement_tasks").update(patch).eq("id", id).select("*").single();
+  }
+  if (action === "update_task_verification") {
+    const id = uuid(p.task_id, "task_id")!;
+    const verification_state = oneOf(p.verification_state, "verification_state", ["CLAIMED", "ARTIFACT_VERIFIED", "SYSTEM_VERIFIED", "LIVE_VERIFIED"]);
+    return await db.from("muse_improvement_tasks").update({ verification_state }).eq("id", id).select("*").single();
+  }
+  const id = uuid(p.improvement_id, "improvement_id")!;
+  const improvementStatus = oneOf(p.status, "status", ["PROPOSED", "RUNNING", "MEASURED", "CLOSED"]);
+  const verdict = p.verdict ? oneOf(p.verdict, "verdict", ["PENDING", "KEEP", "REVISE", "REVERSE"]) : undefined;
+  const patch: Record<string, unknown> = { status: improvementStatus };
+  if (verdict) patch.verdict = verdict;
+  if (p.actual_result !== undefined) patch.actual_result = boundedString(p.actual_result, "actual_result");
+  return await db.from("muse_improvements").update(patch).eq("id", id).select("*").single();
+}
+
+async function forwardIgDmReceipt(input: unknown): Promise<{ status: number; body: Record<string, unknown>; board: ReturnType<typeof receiptOutcome>["board"] }> {
+  const secret = (Deno.env.get("MUSE_IG_RECEIPT_SECRET") ?? "").trim();
+  const hubUrl = (Deno.env.get("FANFUEL_HUB_URL") ?? "").trim();
+  if (!secret) {
+    return { status: 503, body: { ok: false, action: "record_ig_dm_receipt", error: "MUSE_IG_RECEIPT_SECRET is not configured" }, board: null };
+  }
+  if (!hubUrl) {
+    return { status: 503, body: { ok: false, action: "record_ig_dm_receipt", error: "FANFUEL_HUB_URL is not configured" }, board: null };
+  }
+  try {
+    hubControlCenterUrl(hubUrl);
+  } catch (e) {
+    return {
+      status: 503,
+      body: { ok: false, action: "record_ig_dm_receipt", error: e instanceof Error ? e.message : "FANFUEL_HUB_URL is invalid" },
+      board: null,
+    };
+  }
+  const receipt = parseIgDmReceipt(input);
+  const request = hubReceiptRequest({ hubUrl, secret, receipt });
+  let response: Response;
+  try {
+    response = await fetch(request.url, { ...request.init, signal: AbortSignal.timeout(15_000) });
+  } catch (error) {
+    const timedOut = isDatabaseTimeout(error);
+    return {
+      status: 502,
+      body: {
+        ok: false,
+        action: "record_ig_dm_receipt",
+        error: timedOut ? "FanFuel Hub did not answer within 15 seconds" : "FanFuel Hub request failed",
+      },
+      board: null,
+    };
+  }
+  const text = await response.text();
+  let hubBody: unknown;
+  try {
+    hubBody = JSON.parse(text);
+  } catch {
+    hubBody = { ok: false, error: "hub returned a non-json response", hub_status: response.status };
+  }
+  return receiptOutcome(response.status, redactReceiptSecret(hubBody, secret), receipt, secret);
+}
+
+export async function performWorkboardWrite(
+  db: SupabaseClient,
+  input: { actor: string; requestKey: string; body: Record<string, unknown> },
+): Promise<{ status: number; body: Record<string, unknown> }> {
+  const requestKey = input.requestKey.trim();
+  if (!/^[A-Za-z0-9_.:-]{8,120}$/.test(requestKey)) {
+    return { status: 400, body: { error: "invalid_idempotency_key" } };
+  }
+  const body = input.body;
+  if (!isAction(body.action)) return { status: 400, body: { error: "unknown_action" } };
+
+  const { data: prior } = await db
+    .from("muse_workboard_requests")
+    .select("action,http_status,response")
+    .eq("token_label", input.actor)
+    .eq("request_key", requestKey)
+    .maybeSingle();
+  if (prior) {
+    if (prior.action !== body.action) {
+      return { status: 409, body: { error: "idempotency_key_reused_for_different_action" } };
+    }
+    return {
+      status: prior.http_status,
+      body: { ...(prior.response as Record<string, unknown>), idempotent_replay: true },
+    };
+  }
+
+  let payload: Record<string, unknown>;
+  let status = 200;
+  try {
+    if (body.action === "record_ig_dm_receipt") {
+      const outcome = await forwardIgDmReceipt(receiptInputFrom(body));
+      status = outcome.status;
+      payload = outcome.body;
+      if (outcome.board) {
+        const { error: boardError } = await db.from("muse_work_updates").insert({
+          mission_id: outcome.board.mission_id,
+          actor: input.actor,
+          update_type: outcome.board.update_type,
+          message: outcome.board.message,
+          evidence_ref: outcome.board.evidence_ref,
+        });
+        if (boardError) console.error("ig_dm_receipt board notice failed:", boardError.code ?? "write_failed");
+      }
+    } else {
+      const result = await executeWorkboard(db, body.action, (body.payload ?? {}) as Record<string, unknown>, input.actor);
+      if (result.error) throw new Error(result.error.message);
+      payload = { ok: true, action: body.action, data: result.data };
+    }
+  } catch (e) {
+    if (isDatabaseTimeout(e)) return { status: 503, body: databaseTimeoutBody() };
+    status = 400;
+    const message = e instanceof Error ? e.message : "write failed";
+    const alertMessage = errorMessage(message);
+    payload = {
+      ok: false,
+      action: body.action,
+      error: alertMessage === "request rejected" && message !== "request rejected" ? message : alertMessage,
+    };
+  }
+
+  if (status === 200 && payload.ok === true) {
+    const event = eventFromAction(body.action, (payload as { data?: unknown }).data, input.actor);
+    if (event) {
+      const store = createMuseAlertStore(db);
+      let summary = { matched: 0, pull: 0, enqueued: 0, delivered: 0, pending: 0, failed: 0 };
+      let inbox: { handoff_id: string; created: boolean } | null = null;
+      try {
+        let sealKey = null;
+        try {
+          sealKey = await readSealKey(Deno.env.get("MUSE_ALERT_SEAL_KEY"));
+        } catch {
+          console.error("muse_alert_seal_key_invalid");
+        }
+        summary = await fanoutAndDeliver({ store, event, sealKey });
+      } catch {
+        console.error("muse_alert_fanout_failed");
+      }
+      try {
+        inbox = await store.openCodingInbox(event);
+      } catch {
+        console.error("muse_alert_inbox_failed");
+      }
+      if (summary.matched > 0 || inbox) {
+        payload = {
+          ...payload,
+          alerts: {
+            ...summary,
+            inbox_handoff_id: inbox?.handoff_id ?? null,
+            inbox_created: inbox?.created ?? false,
+          },
+        };
+      }
+    }
+  }
+
+  await db.from("muse_workboard_requests").insert({
+    token_label: input.actor,
+    request_key: requestKey,
+    action: body.action,
+    http_status: status,
+    response: payload,
+  });
+  return { status, body: payload };
+}
