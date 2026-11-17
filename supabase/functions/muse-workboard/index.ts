@@ -1,6 +1,12 @@
 import { serve } from "https://deno.land/std@0.224.0/http/server.ts";
 import { createClient, type SupabaseClient } from "https://esm.sh/@supabase/supabase-js@2.49.1";
 import {
+  authenticateMuseToken,
+  databaseTimeoutBody,
+  isDatabaseTimeout,
+  MUSE_DB_TIMEOUT_MS,
+} from "../_shared/museTokenAuth.ts";
+import {
   isAction,
   boundedString,
   uuid,
@@ -38,28 +44,38 @@ function json(body: unknown, status = 200) {
   return new Response(JSON.stringify(body, null, 2), { status, headers: { ...cors, "Content-Type": "application/json" } });
 }
 
-async function sha256Hex(input: string): Promise<string> {
-  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(input));
-  return Array.from(new Uint8Array(digest)).map((b) => b.toString(16).padStart(2, "0")).join("");
-}
-
 function tokenFrom(req: Request): string | null {
   const h = req.headers.get("authorization") ?? "";
   if (h.toLowerCase().startsWith("bearer ")) return h.slice(7).trim() || null;
   return req.headers.get("x-muse-token")?.trim() || null;
 }
 
-async function authenticate(db: SupabaseClient, token: string | null) {
-  if (!token) return { ok: false as const, reason: "missing token" };
-  if (token === SERVICE_KEY) return { ok: false as const, reason: "service-role key rejected" };
-  const hash = await sha256Hex(token);
-  const { data, error } = await db.from("muse_api_tokens").select("id,label,scopes,expires_at,revoked_at").eq("token_sha256", hash).maybeSingle();
-  if (error || !data) return { ok: false as const, reason: "unknown token" };
-  if (data.revoked_at) return { ok: false as const, reason: "token revoked" };
-  if (data.expires_at && Date.parse(data.expires_at) < Date.now()) return { ok: false as const, reason: "token expired" };
-  if (!(data.scopes ?? []).includes("workboard:write")) return { ok: false as const, reason: "token lacks workboard:write scope" };
-  await db.from("muse_api_tokens").update({ last_used_at: new Date().toISOString() }).eq("id", data.id);
-  return { ok: true as const, label: data.label as string };
+function createDb() {
+  return createClient(SUPABASE_URL, SERVICE_KEY, {
+    auth: { persistSession: false },
+    global: {
+      fetch: (input, init) => fetch(input, { ...init, signal: AbortSignal.timeout(MUSE_DB_TIMEOUT_MS) }),
+    },
+  });
+}
+
+async function authenticate(token: string | null) {
+  const auth = await authenticateMuseToken({
+    supabaseUrl: SUPABASE_URL,
+    serviceKey: SERVICE_KEY,
+    token,
+  });
+  if (!auth.ok) return auth;
+  if (!auth.scopes.includes("workboard:write")) {
+    return {
+      ok: false as const,
+      status: 401 as const,
+      error: "unauthorized" as const,
+      message: "token lacks workboard:write scope",
+      label: auth.label,
+    };
+  }
+  return auth;
 }
 
 function iso(value: unknown, name: string): string | null {
@@ -193,9 +209,18 @@ async function forwardIgDmReceipt(input: unknown): Promise<{ status: number; bod
   const request = hubReceiptRequest({ hubUrl, secret, receipt });
   let response: Response;
   try {
-    response = await fetch(request.url, request.init);
-  } catch {
-    return { status: 502, body: { ok: false, action: "record_ig_dm_receipt", error: "FanFuel Hub request failed" }, board: null };
+    response = await fetch(request.url, { ...request.init, signal: AbortSignal.timeout(15_000) });
+  } catch (error) {
+    const timedOut = isDatabaseTimeout(error);
+    return {
+      status: 502,
+      body: {
+        ok: false,
+        action: "record_ig_dm_receipt",
+        error: timedOut ? "FanFuel Hub did not answer within 15 seconds" : "FanFuel Hub request failed",
+      },
+      board: null,
+    };
   }
   const text = await response.text();
   let hubBody: unknown;
@@ -208,11 +233,24 @@ async function forwardIgDmReceipt(input: unknown): Promise<{ status: number; bod
 }
 
 serve(async (req) => {
+  try {
+    return await handle(req);
+  } catch (error) {
+    if (isDatabaseTimeout(error)) return json(databaseTimeoutBody(), 503);
+    console.error("muse_workboard_unhandled");
+    return json({ ok: false, error: "database_unavailable", message: "The database request failed." }, 503);
+  }
+});
+
+async function handle(req: Request): Promise<Response> {
   if (req.method === "OPTIONS") return new Response(null, { headers: cors });
   if (req.method !== "POST") return json({ error: "method_not_allowed" }, 405);
-  const db = createClient(SUPABASE_URL, SERVICE_KEY, { auth: { persistSession: false } });
-  const auth = await authenticate(db, tokenFrom(req));
-  if (!auth.ok) return json({ error: "unauthorized", message: auth.reason }, 401);
+  const db = createDb();
+  const auth = await authenticate(tokenFrom(req));
+  if (!auth.ok) {
+    if (auth.status === 503) return json({ ok: false, error: auth.error, message: auth.message }, 503);
+    return json({ error: "unauthorized", message: auth.message }, 401);
+  }
   const requestKey = (req.headers.get("idempotency-key") ?? "").trim();
   if (!/^[A-Za-z0-9_.:-]{8,120}$/.test(requestKey)) return json({ error: "invalid_idempotency_key" }, 400);
   let body: Record<string, unknown>;
@@ -248,6 +286,7 @@ serve(async (req) => {
       payload = { ok: true, action: body.action, data: result.data };
     }
   } catch (e) {
+    if (isDatabaseTimeout(e)) return json(databaseTimeoutBody(), 503);
     status = 400;
     const message = e instanceof Error ? e.message : "write failed";
     const alertMessage = errorMessage(message);
@@ -295,4 +334,4 @@ serve(async (req) => {
 
   await db.from("muse_workboard_requests").insert({ token_label: auth.label, request_key: requestKey, action: body.action, http_status: status, response: payload });
   return json(payload, status);
-});
+}

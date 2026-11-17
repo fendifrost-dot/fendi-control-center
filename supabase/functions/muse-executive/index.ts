@@ -13,6 +13,7 @@
  */
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
 import { createClient, type SupabaseClient } from "https://esm.sh/@supabase/supabase-js@2.49.1";
+import { authenticateMuseToken } from "../_shared/museTokenAuth.ts";
 import {
   RESOURCES,
   redact,
@@ -61,14 +62,6 @@ async function sha256Hex(input: string): Promise<string> {
     .join("");
 }
 
-/** Constant-time comparison so the bootstrap token cannot be probed byte by byte. */
-function timingSafeEqual(a: string, b: string): boolean {
-  if (a.length !== b.length) return false;
-  let diff = 0;
-  for (let i = 0; i < a.length; i++) diff |= a.charCodeAt(i) ^ b.charCodeAt(i);
-  return diff === 0;
-}
-
 /** Client IP is hashed, never stored raw. */
 async function hashIp(req: Request): Promise<string | null> {
   const ip = req.headers.get("x-forwarded-for")?.split(",")[0]?.trim();
@@ -86,44 +79,27 @@ interface AuthResult {
   ok: boolean;
   label: string | null;
   reason?: string;
+  status?: 401 | 503;
 }
 
-async function authenticate(supabase: SupabaseClient, token: string | null): Promise<AuthResult> {
-  if (!token) return { ok: false, label: null, reason: "missing token" };
-
-  // A Supabase key must never work as a Muse credential.
-  if (token === SUPABASE_SERVICE_ROLE_KEY) {
-    return { ok: false, label: null, reason: "service-role key rejected as a Muse token" };
+async function authenticate(token: string | null): Promise<AuthResult> {
+  const auth = await authenticateMuseToken({
+    supabaseUrl: SUPABASE_URL,
+    serviceKey: SUPABASE_SERVICE_ROLE_KEY,
+    token,
+    envToken: ENV_TOKEN,
+  });
+  if (!auth.ok) {
+    if (auth.status === 503) return { ok: false, label: null, status: 503, reason: auth.message };
+    if (auth.message === "service-role key rejected") {
+      return { ok: false, label: null, reason: "service-role key rejected as a Muse token" };
+    }
+    return { ok: false, label: auth.label, reason: auth.message };
   }
-
-  if (ENV_TOKEN && timingSafeEqual(token, ENV_TOKEN)) {
-    return { ok: true, label: "env-bootstrap" };
+  if (auth.source !== "env" && !auth.scopes.includes("read")) {
+    return { ok: false, label: auth.label, reason: "token lacks read scope" };
   }
-
-  const hash = await sha256Hex(token);
-  const { data, error } = await supabase
-    .from("muse_api_tokens")
-    .select("id, label, scopes, expires_at, revoked_at")
-    .eq("token_sha256", hash)
-    .maybeSingle();
-
-  if (error) return { ok: false, label: null, reason: "token lookup failed" };
-  if (!data) return { ok: false, label: null, reason: "unknown token" };
-  if (data.revoked_at) return { ok: false, label: data.label, reason: "token revoked" };
-  if (data.expires_at && Date.parse(data.expires_at) < Date.now()) {
-    return { ok: false, label: data.label, reason: "token expired" };
-  }
-  if (!(data.scopes ?? []).includes("read")) {
-    return { ok: false, label: data.label, reason: "token lacks read scope" };
-  }
-
-  // Best-effort usage stamp; a failure here must not deny a valid request.
-  await supabase
-    .from("muse_api_tokens")
-    .update({ last_used_at: new Date().toISOString() })
-    .eq("id", data.id);
-
-  return { ok: true, label: data.label };
+  return { ok: true, label: auth.label };
 }
 
 async function audit(
@@ -272,8 +248,11 @@ serve(async (req) => {
   }
 
   // 2. Authenticate.
-  const auth = await authenticate(supabase, presentedToken(req));
+  const auth = await authenticate(presentedToken(req));
   if (!auth.ok) {
+    if (auth.status === 503) {
+      return json({ ok: false, error: "database_timeout", message: auth.reason ?? "The database did not answer within 8 seconds." }, 503);
+    }
     await audit(supabase, req, {
       token_label: auth.label,
       resource: resourceName || "(none)",

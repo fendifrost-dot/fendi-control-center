@@ -12,6 +12,7 @@
  */
 import { serve } from "https://deno.land/std@0.224.0/http/server.ts";
 import { createClient, type SupabaseClient } from "https://esm.sh/@supabase/supabase-js@2.49.1";
+import { authenticateMuseToken, isDatabaseTimeout, MUSE_DB_TIMEOUT_MS } from "../_shared/museTokenAuth.ts";
 import {
   authoredKind, attachments, buildPacket, effectiveAvailability, InputError, isAction, LIMITS, MESSAGE_KINDS, oneOf,
   PURPOSES, renderPacket, responseKindFor, str, uuid, workContext,
@@ -42,12 +43,7 @@ type Actor =
   | { type: "agent"; key: string; via: string }
   | { type: "bridge"; key: "mac-bridge"; via: "bridge-token" };
 
-async function sha256Hex(input: string): Promise<string> {
-  const d = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(input));
-  return Array.from(new Uint8Array(d)).map((b) => b.toString(16).padStart(2, "0")).join("");
-}
-
-type AuthFailure = { error: string; status?: 401 | 403 };
+type AuthFailure = { error: string; status?: 401 | 403 | 503 };
 
 async function authenticate(req: Request, db: SupabaseClient): Promise<Actor | AuthFailure> {
   const bridge = req.headers.get("x-remote-bridge-token");
@@ -69,26 +65,29 @@ async function authenticate(req: Request, db: SupabaseClient): Promise<Actor | A
     // Signing in is not enough: only accounts listed in control_center_owners act as Fendi.
     const { data: owner, error: ownerErr } = await db.from("control_center_owners")
       .select("user_id").eq("user_id", data.user.id).maybeSingle();
-    if (ownerErr) return { error: `owner check failed: ${ownerErr.message}`, status: 403 };
+    if (ownerErr) {
+      if (isDatabaseTimeout(ownerErr)) return { error: "The database did not answer within 8 seconds.", status: 503 };
+      return { error: `owner check failed: ${ownerErr.message}`, status: 403 };
+    }
     if (!owner) return { error: "this account is not a Control Center owner", status: 403 };
     return { type: "human", key: "fendi", ingestOnly: false, via: `session:${data.user.email ?? data.user.id}` };
   }
 
-  const { data: t } = await db.from("muse_api_tokens")
-    .select("id,label,scopes,expires_at,revoked_at").eq("token_sha256", await sha256Hex(token)).maybeSingle();
-  if (!t) return { error: "unknown token" };
-  if (t.revoked_at) return { error: "token revoked" };
-  if (t.expires_at && Date.parse(t.expires_at) < Date.now()) return { error: "token expired" };
-  const scopes: string[] = t.scopes ?? [];
-  await db.from("muse_api_tokens").update({ last_used_at: new Date().toISOString() }).eq("id", t.id);
+  const resolved = await authenticateMuseToken({
+    supabaseUrl: SUPABASE_URL,
+    serviceKey: SERVICE_KEY,
+    token,
+  });
+  if (!resolved.ok) return { error: resolved.message, status: resolved.status };
+  const scopes = resolved.scopes;
   if (scopes.includes("agenthub:ingest") && !scopes.includes("agenthub")) {
-    return { type: "human", key: "fendi", ingestOnly: true, via: `token:${t.label}` };
+    return { type: "human", key: "fendi", ingestOnly: true, via: `token:${resolved.label}` };
   }
   if (!scopes.includes("agenthub") && !scopes.includes("workboard:write")) return { error: "token lacks agenthub scope" };
-  const { data: agent } = await db.from("agent_hub_agents").select("key").eq("token_label", t.label).maybeSingle();
-  if (!agent) return { error: `token ${t.label} is not mapped to an agent` };
+  const { data: agent } = await db.from("agent_hub_agents").select("key").eq("token_label", resolved.label).maybeSingle();
+  if (!agent) return { error: `token ${resolved.label} is not mapped to an agent` };
   await db.from("agent_hub_agents").update({ last_seen_at: new Date().toISOString() }).eq("key", agent.key);
-  return { type: "agent", key: agent.key as string, via: `token:${t.label}` };
+  return { type: "agent", key: agent.key as string, via: `token:${resolved.label}` };
 }
 
 // ---------------------------------------------------------------------------
@@ -695,21 +694,28 @@ async function handle(db: SupabaseClient, actor: Actor, action: string, p: Recor
 serve(async (req) => {
   if (req.method === "OPTIONS") return new Response(null, { headers: cors });
   if (req.method !== "POST") return json({ error: "method_not_allowed" }, 405);
-  const db = createClient(SUPABASE_URL, SERVICE_KEY);
+  const db = createClient(SUPABASE_URL, SERVICE_KEY, {
+    auth: { persistSession: false },
+    global: {
+      fetch: (input, init) => fetch(input, { ...init, signal: AbortSignal.timeout(MUSE_DB_TIMEOUT_MS) }),
+    },
+  });
   let body: Record<string, unknown> = {};
   try { body = await req.json(); } catch { return json({ error: "invalid_json" }, 400); }
   const action = body.action;
   if (!isAction(action)) return json({ error: "unknown_action", action }, 400);
 
-  const actor = await authenticate(req, db);
-  if ("error" in actor) {
-    const status = actor.status ?? 401;
-    return json({ error: status === 403 ? "forbidden" : "unauthorized", message: actor.error }, status);
-  }
   try {
+    const actor = await authenticate(req, db);
+    if ("error" in actor) {
+      if (actor.status === 503) return json({ ok: false, error: "database_timeout", message: actor.error }, 503);
+      const status = actor.status ?? 401;
+      return json({ error: status === 403 ? "forbidden" : "unauthorized", message: actor.error }, status);
+    }
     const result = await handle(db, actor, action, body);
     return json({ ok: true, ...result as object });
   } catch (e) {
+    if (isDatabaseTimeout(e)) return json({ ok: false, error: "database_timeout", message: "The database did not answer within 8 seconds." }, 503);
     if (e instanceof InputError) return json({ error: "bad_request", message: e.message }, 400);
     console.error("agent-hub", action, e);
     return json({ error: "server_error", message: e instanceof Error ? e.message : String(e) }, 500);
