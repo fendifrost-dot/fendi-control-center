@@ -411,6 +411,139 @@ export type Database = {
         }
         Relationships: []
       }
+      cc_mcp_oauth_clients: {
+        Row: {
+          actor_label: string
+          client_id: string
+          client_name: string | null
+          client_secret_hash: string | null
+          created_at: string
+          grant_types: string[]
+          redirect_uris: string[]
+          token_endpoint_auth_method: string
+        }
+        Insert: {
+          actor_label: string
+          client_id: string
+          client_name?: string | null
+          client_secret_hash?: string | null
+          created_at?: string
+          grant_types?: string[]
+          redirect_uris?: string[]
+          token_endpoint_auth_method?: string
+        }
+        Update: {
+          actor_label?: string
+          client_id?: string
+          client_name?: string | null
+          client_secret_hash?: string | null
+          created_at?: string
+          grant_types?: string[]
+          redirect_uris?: string[]
+          token_endpoint_auth_method?: string
+        }
+        Relationships: []
+      }
+      cc_mcp_oauth_codes: {
+        Row: {
+          authorized_by_user_id: string | null
+          client_id: string
+          code_challenge: string
+          code_challenge_method: string
+          code_hash: string
+          created_at: string
+          expires_at: string
+          redirect_uri: string
+          resource: string | null
+          scope: string
+        }
+        Insert: {
+          authorized_by_user_id?: string | null
+          client_id: string
+          code_challenge: string
+          code_challenge_method?: string
+          code_hash: string
+          created_at?: string
+          expires_at: string
+          redirect_uri: string
+          resource?: string | null
+          scope?: string
+        }
+        Update: {
+          authorized_by_user_id?: string | null
+          client_id?: string
+          code_challenge?: string
+          code_challenge_method?: string
+          code_hash?: string
+          created_at?: string
+          expires_at?: string
+          redirect_uri?: string
+          resource?: string | null
+          scope?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "cc_mcp_oauth_codes_client_id_fkey"
+            columns: ["client_id"]
+            isOneToOne: false
+            referencedRelation: "cc_mcp_oauth_clients"
+            referencedColumns: ["client_id"]
+          },
+        ]
+      }
+      cc_mcp_oauth_tokens: {
+        Row: {
+          actor_kind: string
+          actor_label: string
+          authorized_by_user_id: string | null
+          client_id: string
+          created_at: string
+          expires_at: string
+          refresh_expires_at: string
+          refresh_token_hash: string | null
+          resource: string | null
+          revoked_at: string | null
+          scope: string
+          token_hash: string
+        }
+        Insert: {
+          actor_kind?: string
+          actor_label: string
+          authorized_by_user_id?: string | null
+          client_id: string
+          created_at?: string
+          expires_at: string
+          refresh_expires_at?: string
+          refresh_token_hash?: string | null
+          resource?: string | null
+          revoked_at?: string | null
+          scope?: string
+          token_hash: string
+        }
+        Update: {
+          actor_kind?: string
+          actor_label?: string
+          authorized_by_user_id?: string | null
+          client_id?: string
+          created_at?: string
+          expires_at?: string
+          refresh_expires_at?: string
+          refresh_token_hash?: string | null
+          resource?: string | null
+          revoked_at?: string | null
+          scope?: string
+          token_hash?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "cc_mcp_oauth_tokens_client_id_fkey"
+            columns: ["client_id"]
+            isOneToOne: false
+            referencedRelation: "cc_mcp_oauth_clients"
+            referencedColumns: ["client_id"]
+          },
+        ]
+      }
       client_aliases: {
         Row: {
           alias: string
@@ -4597,6 +4730,32 @@ export type Database = {
           p_handoff_id: string
           p_kind: string
           p_session_id?: string
+        }
+        Returns: Json
+      }
+      cc_mcp_consume_oauth_code: {
+        Args: {
+          p_access_expires_at: string
+          p_access_token_hash: string
+          p_client_id: string
+          p_code_hash: string
+          p_expected_challenge: string
+          p_redirect_uri: string
+          p_refresh_expires_at: string
+          p_refresh_token_hash: string
+          p_resource: string
+        }
+        Returns: Json
+      }
+      cc_mcp_oauth_cleanup_expired: { Args: never; Returns: Json }
+      cc_mcp_rotate_oauth_refresh: {
+        Args: {
+          p_access_expires_at: string
+          p_client_id: string
+          p_new_access_token_hash: string
+          p_new_refresh_token_hash: string
+          p_refresh_token_hash: string
+          p_resource: string
         }
         Returns: Json
       }
