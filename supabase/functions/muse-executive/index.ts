@@ -16,19 +16,17 @@ import { createClient, type SupabaseClient } from "https://esm.sh/@supabase/supa
 import { authenticateMuseToken } from "../_shared/museTokenAuth.ts";
 import {
   RESOURCES,
-  redact,
-  newestTimestamp,
-  freshnessMinutes,
-  rollUpStatus,
-  parseSince,
-  filterValueRejection,
-  appliedFilterValue,
-  classifyExecutiveReadError,
   IG_SEND_QUEUE_RESOURCE,
   hubSendQueueRequest,
   igSendQueueEnvelope,
-  type ExecutiveEnvelope,
 } from "./contract.ts";
+import {
+  EXECUTIVE_RATE_LIMIT_REQUESTS,
+  EXECUTIVE_RATE_LIMIT_WINDOW_SECONDS,
+  executiveRateLimitBody,
+  executiveRateLimited,
+  readExecutiveResource,
+} from "../_shared/museExecutiveRead.ts";
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
@@ -44,9 +42,6 @@ const SUPABASE_SERVICE_ROLE_KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
  * trailing newline or space, which would otherwise make the comparison impossible.
  */
 const ENV_TOKEN = (Deno.env.get("MUSE_API_TOKEN") ?? "").trim();
-
-const RATE_LIMIT_REQUESTS = Number(Deno.env.get("MUSE_RATE_LIMIT") ?? "60");
-const RATE_LIMIT_WINDOW_SECONDS = 60;
 
 function json(body: unknown, status = 200, extra: Record<string, string> = {}) {
   return new Response(JSON.stringify(body, null, 2), {
@@ -122,18 +117,6 @@ async function audit(
   }
 }
 
-/** Fixed window over the audit trail — no extra state to keep. */
-async function rateLimited(supabase: SupabaseClient, label: string): Promise<boolean> {
-  const since = new Date(Date.now() - RATE_LIMIT_WINDOW_SECONDS * 1000).toISOString();
-  const { count, error } = await supabase
-    .from("muse_access_audit")
-    .select("id", { count: "exact", head: true })
-    .eq("token_label", label)
-    .gte("at", since);
-  if (error) return false;
-  return (count ?? 0) >= RATE_LIMIT_REQUESTS;
-}
-
 /** "/functions/v1/muse-executive/executive/brief" -> "brief" */
 function resolveResource(url: URL): string | null {
   const fromQuery = url.searchParams.get("resource");
@@ -180,7 +163,7 @@ function indexPayload() {
     contract: "v1",
     access: "read-only (GET)",
     authentication: "Bearer token (sha256-hashed in muse_api_tokens) or X-Muse-Token",
-    rate_limit: `${RATE_LIMIT_REQUESTS} requests / ${RATE_LIMIT_WINDOW_SECONDS}s per token`,
+    rate_limit: `${EXECUTIVE_RATE_LIMIT_REQUESTS} requests / ${EXECUTIVE_RATE_LIMIT_WINDOW_SECONDS}s per token`,
     resources: Object.values(RESOURCES).map((r) => ({
       path: `/executive/${r.resource}`,
       authoritative_source: r.authoritative_source,
@@ -264,7 +247,7 @@ serve(async (req) => {
   const label = auth.label ?? "unknown";
 
   // 3. Rate limit.
-  if (await rateLimited(supabase, label)) {
+  if (await executiveRateLimited(supabase, label)) {
     await audit(supabase, req, {
       token_label: label,
       resource: resourceName || "(none)",
@@ -272,9 +255,9 @@ serve(async (req) => {
       note: "rate limit exceeded",
     });
     return json(
-      { error: "rate_limited", message: `Limit is ${RATE_LIMIT_REQUESTS} requests per ${RATE_LIMIT_WINDOW_SECONDS}s.` },
+      executiveRateLimitBody(),
       429,
-      { "Retry-After": String(RATE_LIMIT_WINDOW_SECONDS) },
+      { "Retry-After": String(EXECUTIVE_RATE_LIMIT_WINDOW_SECONDS) },
     );
   }
 
@@ -293,120 +276,13 @@ serve(async (req) => {
     return json(indexPayload());
   }
 
-  // 5. Closed allowlist — no dynamic table access.
-  const spec = RESOURCES[resourceName];
-  if (!spec) {
-    await audit(supabase, req, {
-      token_label: label,
-      resource: resourceName,
-      http_status: 404,
-      note: "unknown resource",
-    });
-    return json(
-      {
-        error: "unknown_resource",
-        message: `No executive resource named "${resourceName}".`,
-        available: Object.keys(RESOURCES),
-      },
-      404,
-    );
-  }
-
-  // 6. Read, with validated paging and filters only.
-  const requestedLimit = Number(url.searchParams.get("limit") ?? spec.defaultLimit);
-  const limit = Number.isFinite(requestedLimit)
-    ? Math.min(Math.max(1, Math.trunc(requestedLimit)), spec.maxLimit)
-    : spec.defaultLimit;
-
-  let query = supabase.from(spec.view).select("*").limit(limit);
-  if (spec.orderBy) {
-    query = query.order(spec.orderBy.column, { ascending: spec.orderBy.ascending, nullsFirst: false });
-  }
-
-  const appliedFilters: Record<string, string> = {};
-  for (const [param, column] of Object.entries(spec.filters ?? {})) {
-    const raw = url.searchParams.get(param);
-    if (raw === null) continue;
-    // UUID filters are checked before the query. A truncated id is a 400,
-    // not a Postgres 22P02 that used to surface as "the board is down".
-    // Other values stay equality-only and inside a safe character set so
-    // nothing resembling a PostgREST operator can be injected.
-    const rejection = filterValueRejection(param, column, raw);
-    if (rejection) {
-      await audit(supabase, req, {
-        token_label: label,
-        resource: resourceName,
-        http_status: 400,
-        note: `rejected filter value for ${param}`,
-      });
-      return json(rejection, 400);
-    }
-    const value = appliedFilterValue(param, column, raw);
-    query = query.eq(column, value);
-    appliedFilters[param] = value;
-  }
-
-  if (spec.sinceColumn && url.searchParams.has("since")) {
-    let since: string | null;
-    try {
-      since = parseSince(url.searchParams.get("since"));
-    } catch (e) {
-      const message = e instanceof Error ? e.message : "invalid since";
-      await audit(supabase, req, {
-        token_label: label,
-        resource: resourceName,
-        http_status: 400,
-        note: message.slice(0, 300),
-      });
-      return json({ error: "invalid_filter", message }, 400);
-    }
-    if (since) {
-      query = query.gte(spec.sinceColumn, since);
-      appliedFilters.since = since;
-    }
-  }
-
-  const { data, error } = await query;
-  if (error) {
-    // 22P02 is a bad filter the pre-check missed. Anything else is a real
-    // read failure: 503, with a short code and no database message.
-    const classified = classifyExecutiveReadError(error, appliedFilters, resourceName);
-    await audit(supabase, req, {
-      token_label: label,
-      resource: resourceName,
-      http_status: classified.status,
-      note: `read failed (${classified.status}): ${error.code ?? "none"} ${error.message}`.slice(0, 300),
-    });
-    return json(classified.body, classified.status);
-  }
-
-  const rows = redact((data ?? []) as Record<string, unknown>[]);
-  const dataTimestamp = newestTimestamp(rows, spec.timestampColumn);
-  const { status, confidence, human_verification_required } = rollUpStatus(rows);
-
-  const envelope: ExecutiveEnvelope<Record<string, unknown>> = {
-    resource: spec.resource,
-    generated_at: new Date().toISOString(),
-    data_timestamp: dataTimestamp,
-    authoritative_source: spec.authoritative_source,
-    freshness_minutes: freshnessMinutes(dataTimestamp),
-    confidence,
-    status,
-    human_verification_required,
-    evidence: [`view:public.${spec.view}`, "project:wkzwcfmvnwolgrdpnygc"],
-    row_count: rows.length,
-    data: rows,
-  };
-
-  if (rows.length === 0) {
-    envelope.notes = [
-      "No rows. This means nothing was recorded for this resource, not that nothing is wrong.",
-    ];
-  }
-  if (Object.keys(appliedFilters).length > 0) {
-    envelope.notes = [...(envelope.notes ?? []), `filters applied: ${JSON.stringify(appliedFilters)}`];
-  }
-
-  await audit(supabase, req, { token_label: label, resource: resourceName, http_status: 200 });
-  return json(envelope);
+  // 5–6. Closed allowlist and validated read. Shared with control-center-mcp.
+  const read = await readExecutiveResource(supabase, resourceName, url.searchParams);
+  await audit(supabase, req, {
+    token_label: label,
+    resource: resourceName,
+    http_status: read.status,
+    note: read.note ?? (read.status === 404 ? "unknown resource" : undefined),
+  });
+  return json(read.body, read.status);
 });

@@ -170,3 +170,10 @@ verify_jwt = false
 
 [functions.agent-hub]
 verify_jwt = false
+
+# Remote MCP for ChatGPT and Claude. OAuth 2.1 + PKCE + dynamic client
+# registration live in this function. verify_jwt stays off because the
+# connector is not a Supabase user; opaque tokens are checked in the function.
+# Do not put a static bearer token in the connector.
+[functions.control-center-mcp]
+verify_jwt = false
