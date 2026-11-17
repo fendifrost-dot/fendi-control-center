@@ -4877,6 +4877,7 @@ export type Database = {
         Args: { batch_size?: number; keep_rows?: number }
         Returns: number
       }
+      truncate_pg_net_responses: { Args: never; Returns: number }
     }
     Enums: {
       [_ in never]: never
