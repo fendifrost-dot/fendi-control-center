@@ -39,6 +39,7 @@ import {
   validateCommonBody,
   normaliseStatus,
 } from "../_shared/video-providers/proxy.ts";
+import { SEEDANCE_25_CENTS_NO_VIDEO, SEEDANCE_25_CENTS_WITH_VIDEO, estimateCostCents } from "./estimate.ts";
 
 const HF_API_BASE = "https://api.higgsfield.ai";
 const HF_USER_AGENT = "higgsfield-server-js/2.0";
@@ -51,6 +52,7 @@ type ModelSpec = {
   fields: string[];             // optional input fields the model accepts besides prompt/duration(/image_url/video_url/image_urls)
   centsPerSecond: number;       // list price for the cost estimate (2026-10, docs.higgsfield.ai); the balance is authoritative
   resolutions?: Record<string, number>;   // video-to-video: allowed `resolution` values → cents per SOURCE second (overrides centsPerSecond)
+  resolutionsNoVideo?: Record<string, number>;   // reference-to-video, ESTIMATE ONLY: cents per output second when the request carries no video reference
   maxImages?: number;           // video-to-video / reference-to-video: how many image_urls the model accepts
   minImages?: number;           // video-to-video: the fewest image_urls the model needs (default 1; Seedance video edit takes none)
   maxVideos?: number;           // reference-to-video: how many video_urls the model accepts
@@ -78,16 +80,20 @@ const MODELS: Record<string, ModelSpec> = {
   "genjutsu-motion-transfer":     { path: "/higgsfield/genjutsu/motion-transfer/v1.0",        mode: "video_to_video", durations: [],      fields: ["resolution"], centsPerSecond: 68.1, resolutions: { "480p": 31.8, "720p": 68.1, "1080p": 163.2 }, maxImages: 8 },
   // Seedance 2.5 reference-to-video (ByteDance via Higgsfield; docs.higgsfield.ai/docs/models/seedance-2-5/reference-to-video):
   // up to 30 images, 10 videos, 10 audio files as references; prompt may address them (@Video1, @Image1); 4–30 s out; any aspect.
-  // Billed per OUTPUT second by resolution (480p 24.7¢ · 720p 46.2¢ · 1080p 113.7¢) AND per INPUT video second at the same rate
-  // (image/audio references are free). The estimate below counts output seconds only; callers add input seconds themselves.
-  "seedance-2.5-reference":       { path: "/bytedance/seedance-2.5/reference-to-video",          mode: "reference_to_video", durations: [], fields: ["resolution", "aspect_ratio", "generate_audio", "bitrate_mode"], centsPerSecond: 46.2, resolutions: { "480p": 24.7, "720p": 46.2, "1080p": 113.7 }, maxImages: 30, maxVideos: 10, aspects: ["16:9", "4:3", "1:1", "3:4", "9:16", "21:9"] },
+  // List prices read on 27 Nov 2026 from https://open.higgsfield.ai/models/bytedance/seedance-2.5/reference-to-video/playground
+  // (the tables are in ./estimate.ts). Billed per OUTPUT second by resolution: 480p 13.87¢ · 720p 32.64¢ · 1080p 78.58¢ when the
+  // request carries at least one reference video, 480p 11.77¢ · 720p 26.47¢ · 1080p 65.18¢ with images or audio only. The reference
+  // videos' own seconds are NOT billed in addition: the estimate is output seconds only and callers add nothing for inputs.
+  "seedance-2.5-reference":       { path: "/bytedance/seedance-2.5/reference-to-video",          mode: "reference_to_video", durations: [], fields: ["resolution", "aspect_ratio", "generate_audio", "bitrate_mode"], centsPerSecond: 32.64, resolutions: SEEDANCE_25_CENTS_WITH_VIDEO, resolutionsNoVideo: SEEDANCE_25_CENTS_NO_VIDEO, maxImages: 30, maxVideos: 10, aspects: ["16:9", "4:3", "1:1", "3:4", "9:16", "21:9"] },
   // Seedance 2.5 VIDEO EDIT (docs.higgsfield.ai/docs/models/seedance-2-5/video-edit, checked 2026-11-26): the source clip is
   // changed as the prompt says and everything else is kept. Output length and frame FOLLOW the source: the endpoint takes no
   // duration and no aspect_ratio, and the reference-to-video endpoint above refuses an edit-worded prompt for that reason
   // ("Your prompt was interpreted as video editing … Use video-editing mode", request 01a21ac7, 2026-11-26). Source 4–30 s;
   // image_urls are optional (0–30). generate_audio is sent false unless the caller asks for it (the provider's default is true).
-  // The docs page lists no price: the estimate uses the reference endpoint's rates per source second. The balance is authoritative.
-  "seedance-2.5-edit":            { path: "/bytedance/seedance-2.5/video-edit",                  mode: "video_to_video", durations: [], fields: ["resolution", "generate_audio", "bitrate_mode"], centsPerSecond: 46.2, resolutions: { "480p": 24.7, "720p": 46.2, "1080p": 113.7 }, minImages: 0, maxImages: 30 },
+  // List prices read on 27 Nov 2026 from https://open.higgsfield.ai/models/bytedance/seedance-2.5/video-edit/playground (the table
+  // is in ./estimate.ts): 480p 13.87¢ · 720p 32.64¢ · 1080p 78.58¢ per second of the SOURCE clip, rounded up to a whole second
+  // (minimum 4 s); nothing more is billed for the source as an input. The balance is authoritative.
+  "seedance-2.5-edit":            { path: "/bytedance/seedance-2.5/video-edit",                  mode: "video_to_video", durations: [], fields: ["resolution", "generate_audio", "bitrate_mode"], centsPerSecond: 32.64, resolutions: SEEDANCE_25_CENTS_WITH_VIDEO, minImages: 0, maxImages: 30 },
   // IMAGE EDIT — "build the world around the performer": the real frame goes in as the first reference, the model keeps the
   // person and rebuilds the scene (docs.higgsfield.ai/docs/models/image-generation, checked 2026-10-02). The key-based API carries
   // no Nano Banana; its reference-edit models are Grok Image 2.0 (≤ 10 refs, same engine as grok.com/imagine) and Qwen Image 3
@@ -166,8 +172,8 @@ serve(async (req) => {
     if (parsed.aspectRatio && spec.aspects && !spec.aspects.includes(parsed.aspectRatio)) return jsonError("INVALID_INPUT", `aspectRatio must be one of ${spec.aspects.join(", ")}.`, 400, false);
   }
   const duration = spec.mode === "image_edit" ? 1 : spec.mode === "reference_to_video" ? Math.min(30, Math.max(4, Math.round(Number(parsed.duration ?? 5)))) : pickDuration(spec, parsed.duration);
-  const centsPerSecond = spec.mode === "image_edit" && spec.centsPerImage && resolution ? spec.centsPerImage[resolution]
-    : ((spec.mode === "video_to_video" || spec.mode === "reference_to_video") && spec.resolutions && resolution) ? spec.resolutions[resolution] : spec.centsPerSecond;
+  // the estimate only (./estimate.ts): a reference-to-video request with no reference video is priced from the model's no-video table
+  const costEstimateCents = estimateCostCents(spec, resolution, duration, refVideos.length);
 
   const input: Record<string, unknown> = spec.mode === "video_to_video"
     ? { prompt: parsed.promptText, video_url: parsed.referenceVideoUrl, ...(refImages.length ? { image_urls: refImages } : {}), resolution }
@@ -253,7 +259,7 @@ serve(async (req) => {
     providerJobId,
     status,
     resultUrl,
-    costEstimateCents: Math.round(centsPerSecond * duration),
+    costEstimateCents,
     resolution: resolution ?? null,
     costFinalCents: null,
     provider: "higgsfield",
