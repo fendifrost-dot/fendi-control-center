@@ -15,7 +15,7 @@ import {
 } from "./estimate.ts";
 
 // The same shapes index.ts gives these variants in its MODELS table.
-const seedanceEdit: EstimateSpec = { mode: "video_to_video", centsPerSecond: 32.64, resolutions: SEEDANCE_25_CENTS_WITH_VIDEO };
+const seedanceEdit: EstimateSpec = { mode: "video_to_video", centsPerSecond: 32.64, resolutions: SEEDANCE_25_CENTS_WITH_VIDEO, minBilledSeconds: 4 };
 const seedanceReference: EstimateSpec = { mode: "reference_to_video", centsPerSecond: 32.64, resolutions: SEEDANCE_25_CENTS_WITH_VIDEO, resolutionsNoVideo: SEEDANCE_25_CENTS_NO_VIDEO };
 const genjutsu: EstimateSpec = { mode: "video_to_video", centsPerSecond: 68.1, resolutions: { "480p": 31.8, "720p": 68.1, "1080p": 163.2 } };
 const kling: EstimateSpec = { mode: "text_to_video", centsPerSecond: 7 };
@@ -39,6 +39,28 @@ Deno.test("Seedance 2.5 video edit: the reference-video count never changes its 
   // index.ts passes refVideos.length; an edit has no no-video table, so 0 and 1 price the same
   assertEquals(estimateCostCents(seedanceEdit, "480p", 4, 0), 55);
   assertEquals(estimateRateCents(seedanceEdit, "720p"), 32.64);
+});
+
+Deno.test("Seedance 2.5 video edit: never estimated below the provider's 4 billed seconds", () => {
+  // index.ts hands over pickDuration's value: 1 when the caller omits `duration`, else the declared length rounded up
+  assertEquals(estimateCostCents(seedanceEdit, "480p", 1, 1), 55);     // floored to 4 × 13.87 = 55.48
+  assertEquals(estimateCostCents(seedanceEdit, "720p", 1, 1), 131);    // floored to 4 × 32.64 = 130.56
+  assertEquals(estimateCostCents(seedanceEdit, "480p", 3, 1), 55);
+  assertEquals(estimateCostCents(seedanceEdit, "480p", 4, 1), 55);     // at the floor: unchanged
+  assertEquals(estimateCostCents(seedanceEdit, "480p", 6, 1), 83);     // above the floor: 6 × 13.87 = 83.22, unchanged
+  assertEquals(estimateCostCents(seedanceEdit, "720p", 6, 1), 196);    // 6 × 32.64 = 195.84
+});
+
+Deno.test("the 4-second floor belongs to the edit only: Genjutsu and Seedance reference keep their seconds", () => {
+  assertEquals(estimateCostCents(genjutsu, "480p", 1, 1), 32);             // 1 × 31.8, no floor
+  assertEquals(estimateCostCents(genjutsu, "720p", 1, 1), 68);             // 1 × 68.1
+  assertEquals(estimateCostCents(genjutsu, "720p", 3, 1), 204);            // 3 × 68.1 = 204.3
+  assertEquals(estimateCostCents(seedanceReference, "720p", 1, 1), 33);    // the function floors nothing here (index.ts clamps 4–30 itself)
+  assertEquals(estimateCostCents(seedanceReference, "720p", 1, 0), 26);    // 1 × 26.47
+  assertEquals(estimateCostCents(seedanceReference, "720p", 4, 1), 131);
+  assertEquals(estimateCostCents(seedanceReference, "720p", 4, 0), 106);
+  assertEquals(estimateCostCents(kling, undefined, 1, 0), 7);
+  assertEquals(estimateCostCents(grokImage, "2k", 1, 0), 14);
 });
 
 Deno.test("Seedance 2.5 reference-to-video: with a video reference, the with-video rate", () => {

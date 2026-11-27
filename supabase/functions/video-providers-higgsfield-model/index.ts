@@ -53,6 +53,7 @@ type ModelSpec = {
   centsPerSecond: number;       // list price for the cost estimate (2026-10, docs.higgsfield.ai); the balance is authoritative
   resolutions?: Record<string, number>;   // video-to-video: allowed `resolution` values → cents per SOURCE second (overrides centsPerSecond)
   resolutionsNoVideo?: Record<string, number>;   // reference-to-video, ESTIMATE ONLY: cents per output second when the request carries no video reference
+  minBilledSeconds?: number;    // ESTIMATE ONLY: the fewest seconds the provider bills (Seedance video edit: 4); not a validation rule
   maxImages?: number;           // video-to-video / reference-to-video: how many image_urls the model accepts
   minImages?: number;           // video-to-video: the fewest image_urls the model needs (default 1; Seedance video edit takes none)
   maxVideos?: number;           // reference-to-video: how many video_urls the model accepts
@@ -92,8 +93,9 @@ const MODELS: Record<string, ModelSpec> = {
   // image_urls are optional (0–30). generate_audio is sent false unless the caller asks for it (the provider's default is true).
   // List prices read on 27 Nov 2026 from https://open.higgsfield.ai/models/bytedance/seedance-2.5/video-edit/playground (the table
   // is in ./estimate.ts): 480p 13.87¢ · 720p 32.64¢ · 1080p 78.58¢ per second of the SOURCE clip, rounded up to a whole second
-  // (minimum 4 s); nothing more is billed for the source as an input. The balance is authoritative.
-  "seedance-2.5-edit":            { path: "/bytedance/seedance-2.5/video-edit",                  mode: "video_to_video", durations: [], fields: ["resolution", "generate_audio", "bitrate_mode"], centsPerSecond: 32.64, resolutions: SEEDANCE_25_CENTS_WITH_VIDEO, minImages: 0, maxImages: 30 },
+  // (minimum 4 s: `minBilledSeconds` floors the estimate there when the caller declares a shorter length or none); nothing more
+  // is billed for the source as an input. The balance is authoritative.
+  "seedance-2.5-edit":            { path: "/bytedance/seedance-2.5/video-edit",                  mode: "video_to_video", durations: [], fields: ["resolution", "generate_audio", "bitrate_mode"], centsPerSecond: 32.64, resolutions: SEEDANCE_25_CENTS_WITH_VIDEO, minBilledSeconds: 4, minImages: 0, maxImages: 30 },
   // IMAGE EDIT — "build the world around the performer": the real frame goes in as the first reference, the model keeps the
   // person and rebuilds the scene (docs.higgsfield.ai/docs/models/image-generation, checked 2026-10-02). The key-based API carries
   // no Nano Banana; its reference-edit models are Grok Image 2.0 (≤ 10 refs, same engine as grok.com/imagine) and Qwen Image 3

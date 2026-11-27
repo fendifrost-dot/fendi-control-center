@@ -28,6 +28,8 @@ export type EstimateSpec = {
   resolutions?: RateTable;
   resolutionsNoVideo?: RateTable;
   centsPerImage?: RateTable;
+  /** The fewest seconds the provider bills for one request (Seedance 2.5 video edit: 4). Estimate only. */
+  minBilledSeconds?: number;
 };
 
 /**
@@ -44,7 +46,11 @@ export function estimateRateCents(spec: EstimateSpec, resolution: string | undef
   return spec.centsPerSecond;
 }
 
-/** `costEstimateCents`: the rate × the billed seconds (1 for an image), rounded to a whole cent. */
+/**
+ * `costEstimateCents`: the rate × the billed seconds (1 for an image), rounded to a whole cent.
+ * A model with `minBilledSeconds` is never estimated below that many seconds, whatever length the caller declared.
+ */
 export function estimateCostCents(spec: EstimateSpec, resolution: string | undefined, billedSeconds: number, referenceVideoCount = 0): number {
-  return Math.round(estimateRateCents(spec, resolution, referenceVideoCount) * billedSeconds);
+  const seconds = Math.max(billedSeconds, spec.minBilledSeconds ?? 0);
+  return Math.round(estimateRateCents(spec, resolution, referenceVideoCount) * seconds);
 }
