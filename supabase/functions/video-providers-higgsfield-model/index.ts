@@ -17,7 +17,8 @@
  * caller cannot aim this at an arbitrary endpoint; adding a model is one line of data.
  *
  * Modes: text_to_video (prompt), image_to_video (prompt + referenceImageUrl), video_to_video (prompt +
- * referenceVideoUrl + referenceImageUrls[1..n] + resolution — Genjutsu object-swap / motion-transfer),
+ * referenceVideoUrl + referenceImageUrls[1..n] + resolution — Genjutsu object-swap / motion-transfer; Seedance 2.5 video
+ * edit takes referenceImageUrls[0..30] and its length and frame follow the source),
  * image_edit (prompt + referenceImageUrls[1..n] + resolution 1k|2k + aspectRatio): Grok Image 2.0 / Qwen Image 3 edit — the
  *   first reference is the frame to keep; result is images[0].url. costEstimateCents = per image by tier.
  * reference_to_video (prompt + referenceVideoUrls[0..10] + referenceImageUrls[0..30] + duration + resolution +
@@ -51,6 +52,7 @@ type ModelSpec = {
   centsPerSecond: number;       // list price for the cost estimate (2026-10, docs.higgsfield.ai); the balance is authoritative
   resolutions?: Record<string, number>;   // video-to-video: allowed `resolution` values → cents per SOURCE second (overrides centsPerSecond)
   maxImages?: number;           // video-to-video / reference-to-video: how many image_urls the model accepts
+  minImages?: number;           // video-to-video: the fewest image_urls the model needs (default 1; Seedance video edit takes none)
   maxVideos?: number;           // reference-to-video: how many video_urls the model accepts
   aspects?: string[];           // reference-to-video / image_edit: allowed aspect_ratio values
   centsPerImage?: Record<string, number>;   // image_edit: cents per image by `resolution` tier
@@ -79,6 +81,13 @@ const MODELS: Record<string, ModelSpec> = {
   // Billed per OUTPUT second by resolution (480p 24.7¢ · 720p 46.2¢ · 1080p 113.7¢) AND per INPUT video second at the same rate
   // (image/audio references are free). The estimate below counts output seconds only; callers add input seconds themselves.
   "seedance-2.5-reference":       { path: "/bytedance/seedance-2.5/reference-to-video",          mode: "reference_to_video", durations: [], fields: ["resolution", "aspect_ratio", "generate_audio", "bitrate_mode"], centsPerSecond: 46.2, resolutions: { "480p": 24.7, "720p": 46.2, "1080p": 113.7 }, maxImages: 30, maxVideos: 10, aspects: ["16:9", "4:3", "1:1", "3:4", "9:16", "21:9"] },
+  // Seedance 2.5 VIDEO EDIT (docs.higgsfield.ai/docs/models/seedance-2-5/video-edit, checked 2026-11-26): the source clip is
+  // changed as the prompt says and everything else is kept. Output length and frame FOLLOW the source: the endpoint takes no
+  // duration and no aspect_ratio, and the reference-to-video endpoint above refuses an edit-worded prompt for that reason
+  // ("Your prompt was interpreted as video editing … Use video-editing mode", request 01a21ac7, 2026-11-26). Source 4–30 s;
+  // image_urls are optional (0–30). generate_audio is sent false unless the caller asks for it (the provider's default is true).
+  // The docs page lists no price: the estimate uses the reference endpoint's rates per source second. The balance is authoritative.
+  "seedance-2.5-edit":            { path: "/bytedance/seedance-2.5/video-edit",                  mode: "video_to_video", durations: [], fields: ["resolution", "generate_audio", "bitrate_mode"], centsPerSecond: 46.2, resolutions: { "480p": 24.7, "720p": 46.2, "1080p": 113.7 }, minImages: 0, maxImages: 30 },
   // IMAGE EDIT — "build the world around the performer": the real frame goes in as the first reference, the model keeps the
   // person and rebuilds the scene (docs.higgsfield.ai/docs/models/image-generation, checked 2026-10-02). The key-based API carries
   // no Nano Banana; its reference-edit models are Grok Image 2.0 (≤ 10 refs, same engine as grok.com/imagine) and Qwen Image 3
@@ -137,7 +146,8 @@ serve(async (req) => {
   let resolution: string | undefined;
   if (spec.mode === "video_to_video") {
     if (!isHttpUrl(parsed.referenceVideoUrl)) return jsonError("INVALID_INPUT", `${requested} is video-to-video: pass referenceVideoUrl (a publicly fetchable URL of the source clip).`, 400, false);
-    if (refImages.length < 1 || refImages.length > (spec.maxImages ?? 8)) return jsonError("INVALID_INPUT", `${requested} needs 1–${spec.maxImages ?? 8} reference images (referenceImageUrls or referenceImageUrl).`, 400, false);
+    const minImages = spec.minImages ?? 1;
+    if (refImages.length < minImages || refImages.length > (spec.maxImages ?? 8)) return jsonError("INVALID_INPUT", `${requested} needs ${minImages}–${spec.maxImages ?? 8} reference images (referenceImageUrls or referenceImageUrl).`, 400, false);
     resolution = String(extra.resolution ?? DEFAULT_V2V_RESOLUTION);
     if (spec.resolutions && !(resolution in spec.resolutions)) return jsonError("INVALID_INPUT", `resolution must be one of ${Object.keys(spec.resolutions).join(", ")}.`, 400, false);
   }
@@ -160,7 +170,7 @@ serve(async (req) => {
     : ((spec.mode === "video_to_video" || spec.mode === "reference_to_video") && spec.resolutions && resolution) ? spec.resolutions[resolution] : spec.centsPerSecond;
 
   const input: Record<string, unknown> = spec.mode === "video_to_video"
-    ? { prompt: parsed.promptText, video_url: parsed.referenceVideoUrl, image_urls: refImages, resolution }
+    ? { prompt: parsed.promptText, video_url: parsed.referenceVideoUrl, ...(refImages.length ? { image_urls: refImages } : {}), resolution }
     : spec.mode === "reference_to_video"
     ? { prompt: parsed.promptText, duration, resolution, aspect_ratio: parsed.aspectRatio ?? "16:9", generate_audio: extra.generate_audio === true, ...(refImages.length ? { image_urls: refImages } : {}), ...(refVideos.length ? { video_urls: refVideos } : {}), ...(refAudios.length ? { audio_urls: refAudios } : {}) }
     : spec.mode === "image_edit"
@@ -176,6 +186,7 @@ serve(async (req) => {
   if (spec.mode === "image_to_video") input.image_url = parsed.referenceImageUrl;
   for (const f of spec.fields) {
     if (f === "resolution" || (spec.mode === "reference_to_video" && (f === "aspect_ratio" || f === "generate_audio"))) continue;   // set above, validated against the model's enums
+    if (spec.mode === "video_to_video" && f === "generate_audio") { input.generate_audio = extra.generate_audio === true; continue; }   // never the provider's default (true)
     if (f === "negative_prompt" && typeof parsed.negativePrompt === "string" && extra[f] === undefined) input.negative_prompt = parsed.negativePrompt;
     else if (extra[f] !== undefined) input[f] = extra[f];
   }
